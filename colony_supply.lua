@@ -192,10 +192,17 @@
   - The fallback is bounded to one alternate source-export attempt per transaction and
     stores no new history/cache structures, so it cannot create long-running memory growth.
 
+  v2.41 compile-safety refactor:
+  - Diagnostic and command-only helpers are grouped under one DIAG table instead of
+    consuming many permanent top-level local slots in the main Lua chunk.
+  - This restores a wide margin below CC:Tweaked/Lua's 200-local-variable ceiling.
+  - Runtime transfer, overflow, crafting, and persisted state behavior are unchanged.
+  - The refactor adds no queues, caches, timers, histories, or long-lived allocations.
+
 --]]
 
-local PROGRAM_VERSION = "2.40"
-local SUITE_VERSION = "1.1.5"
+local PROGRAM_VERSION = "2.41"
+local SUITE_VERSION = "1.1.6"
 
 local Util = require("colony.lib.util")
 local SharedUI = require("colony.lib.ui")
@@ -6201,7 +6208,9 @@ end
 -- dashboard. Long output is wrapped and paginated. The computer terminal is
 -- retained only as a fallback if no monitor can be found.
 
-local function wrapDiagnosticLine(text, width)
+local DIAG = {}
+
+function DIAG.wrapDiagnosticLine(text, width)
     text = tostring(text or "")
     width = math.max(1, math.floor(tonumber(width) or 1))
     local out = {}
@@ -6227,10 +6236,10 @@ local function wrapDiagnosticLine(text, width)
     return out
 end
 
-local function buildDiagnosticDisplayLines(lines, width)
+function DIAG.buildDiagnosticDisplayLines(lines, width)
     local wrapped = {}
     for _, line in ipairs(lines or {}) do
-        for _, part in ipairs(wrapDiagnosticLine(line, width)) do
+        for _, part in ipairs(DIAG.wrapDiagnosticLine(line, width)) do
             wrapped[#wrapped + 1] = part
         end
     end
@@ -6238,7 +6247,7 @@ local function buildDiagnosticDisplayLines(lines, width)
     return wrapped
 end
 
-local function renderDiagnosticMonitor(title, lines, page)
+function DIAG.renderDiagnosticMonitor(title, lines, page)
     if not monitor and not resolveMonitor() then return nil, 1, 1 end
     pcall(monitor.setTextScale, CONFIG.monitorTextScale)
 
@@ -6250,7 +6259,7 @@ local function renderDiagnosticMonitor(title, lines, page)
     end
 
     local contentWidth = math.max(1, w)
-    local displayLines = buildDiagnosticDisplayLines(lines, contentWidth)
+    local displayLines = DIAG.buildDiagnosticDisplayLines(lines, contentWidth)
     local firstLine = 3
     local lastLine = math.max(firstLine, h - 2)
     local rowsPerPage = math.max(1, lastLine - firstLine + 1)
@@ -6293,7 +6302,7 @@ local function renderDiagnosticMonitor(title, lines, page)
     return { width = w, height = h, rows = rowsPerPage }, page, totalPages
 end
 
-local function terminalDiagnosticFallback(title, lines)
+function DIAG.terminalDiagnosticFallback(title, lines)
     term.setBackgroundColor(colors.black)
     terminalColor(colors.white)
     term.clear()
@@ -6302,10 +6311,10 @@ local function terminalDiagnosticFallback(title, lines)
     for _, line in ipairs(lines or {}) do print(tostring(line)) end
 end
 
-local function showDiagnosticViewer(title, lines)
-    local info, page, totalPages = renderDiagnosticMonitor(title, lines, 1)
+function DIAG.showDiagnosticViewer(title, lines)
+    local info, page, totalPages = DIAG.renderDiagnosticMonitor(title, lines, 1)
     if not info then
-        terminalDiagnosticFallback(title, lines)
+        DIAG.terminalDiagnosticFallback(title, lines)
         return
     end
 
@@ -6335,7 +6344,7 @@ local function showDiagnosticViewer(title, lines)
                     elseif x >= exitX and x < exitX + #exitButton then
                         break
                     end
-                    info, page, totalPages = renderDiagnosticMonitor(title, lines, page)
+                    info, page, totalPages = DIAG.renderDiagnosticMonitor(title, lines, page)
                     if not info then break end
                 end
             end
@@ -6344,31 +6353,31 @@ local function showDiagnosticViewer(title, lines)
             if p1 == keys.left then
                 page = page - 1
                 if page < 1 then page = totalPages end
-                info, page, totalPages = renderDiagnosticMonitor(title, lines, page)
+                info, page, totalPages = DIAG.renderDiagnosticMonitor(title, lines, page)
             elseif p1 == keys.right then
                 page = page + 1
                 if page > totalPages then page = 1 end
-                info, page, totalPages = renderDiagnosticMonitor(title, lines, page)
+                info, page, totalPages = DIAG.renderDiagnosticMonitor(title, lines, page)
             end
         elseif event == "peripheral_detach" and monitorResolvedName and p1 == monitorResolvedName then
-            terminalDiagnosticFallback(title, lines)
+            DIAG.terminalDiagnosticFallback(title, lines)
             break
         elseif event == "monitor_resize" then
-            info, page, totalPages = renderDiagnosticMonitor(title, lines, page)
+            info, page, totalPages = DIAG.renderDiagnosticMonitor(title, lines, page)
             if not info then break end
         end
     end
 end
 
 -- Non-blocking diagnostic refresh used while the four-stage transfer test is
--- actively running. The completed test enters showDiagnosticViewer() so the
+-- actively running. The completed test enters DIAG.showDiagnosticViewer() so the
 -- player can page through the result afterward.
-local function updateDiagnosticMonitor(title, lines)
+function DIAG.updateDiagnosticMonitor(title, lines)
     if not monitor then resolveMonitor() end
-    if monitor then renderDiagnosticMonitor(title, lines, 1) end
+    if monitor then DIAG.renderDiagnosticMonitor(title, lines, 1) end
 end
 
-local function peripheralDiagnosticLines()
+function DIAG.peripheralDiagnosticLines()
     local lines = {}
     local function add(s) lines[#lines + 1] = tostring(s or "") end
 
@@ -6435,25 +6444,25 @@ local function peripheralDiagnosticLines()
     return lines
 end
 
-local function printPeripheralDiagnostics()
-    showDiagnosticViewer("PERIPHERAL DIAGNOSTICS v" .. PROGRAM_VERSION, peripheralDiagnosticLines())
+function DIAG.printPeripheralDiagnostics()
+    DIAG.showDiagnosticViewer("PERIPHERAL DIAGNOSTICS v" .. PROGRAM_VERSION, DIAG.peripheralDiagnosticLines())
 end
 
-local function printRequestDiagnostics()
+function DIAG.printRequestDiagnostics()
     local lines = {}
     local function add(s) lines[#lines + 1] = tostring(s or "") end
 
     refreshPeripherals()
     if not colony then
         add("ERROR: No colonyIntegrator found/in colony.")
-        showDiagnosticViewer("REQUEST DIAGNOSTICS v" .. PROGRAM_VERSION, lines)
+        DIAG.showDiagnosticViewer("REQUEST DIAGNOSTICS v" .. PROGRAM_VERSION, lines)
         return
     end
 
     local requests, err = getColonyRequests()
     if not requests then
         add("ERROR: getRequests failed: " .. tostring(err))
-        showDiagnosticViewer("REQUEST DIAGNOSTICS v" .. PROGRAM_VERSION, lines)
+        DIAG.showDiagnosticViewer("REQUEST DIAGNOSTICS v" .. PROGRAM_VERSION, lines)
         return
     end
 
@@ -6497,12 +6506,12 @@ local function printRequestDiagnostics()
         add("")
     end
 
-    showDiagnosticViewer("REQUEST DIAGNOSTICS v" .. PROGRAM_VERSION, lines)
+    DIAG.showDiagnosticViewer("REQUEST DIAGNOSTICS v" .. PROGRAM_VERSION, lines)
 end
 
 -- Performs a one-item round-trip through the complete transfer path:
 -- Player RS -> barrel -> Colony RS/Warehouse -> barrel -> Player RS.
-local function printSourceDiagnostic(itemName)
+function DIAG.printSourceDiagnostic(itemName)
     local lines = {}
     local function add(s)
         lines[#lines + 1] = tostring(s or "")
@@ -6512,14 +6521,14 @@ local function printSourceDiagnostic(itemName)
 
     if not refreshPeripherals() or not playerRS then
         add("ERROR: Player RS Bridge unavailable.")
-        showDiagnosticViewer("SOURCE v" .. PROGRAM_VERSION, lines)
+        DIAG.showDiagnosticViewer("SOURCE v" .. PROGRAM_VERSION, lines)
         return
     end
 
     if not itemName or itemName == "" then
         add("Usage:")
         add("colony_supply.lua source minecraft:honey_bottle")
-        showDiagnosticViewer("SOURCE v" .. PROGRAM_VERSION, lines)
+        DIAG.showDiagnosticViewer("SOURCE v" .. PROGRAM_VERSION, lines)
         return
     end
 
@@ -6558,17 +6567,17 @@ local function printSourceDiagnostic(itemName)
     add("Expected for ordinary Honey Bottle:")
     add("Export filter: name")
 
-    showDiagnosticViewer("SOURCE v" .. PROGRAM_VERSION, lines)
+    DIAG.showDiagnosticViewer("SOURCE v" .. PROGRAM_VERSION, lines)
 end
 
-local function printTransferTest(itemName)
+function DIAG.printTransferTest(itemName)
     local lines = {}
     local function add(s)
         lines[#lines + 1] = tostring(s or "")
-        updateDiagnosticMonitor("TRANSFER TEST v" .. PROGRAM_VERSION, lines)
+        DIAG.updateDiagnosticMonitor("TRANSFER TEST v" .. PROGRAM_VERSION, lines)
     end
     local function finish()
-        showDiagnosticViewer("TRANSFER TEST v" .. PROGRAM_VERSION, lines)
+        DIAG.showDiagnosticViewer("TRANSFER TEST v" .. PROGRAM_VERSION, lines)
     end
 
     loadState()
@@ -6682,14 +6691,14 @@ end
 -- Tests Player RS autocrafting directly without MineColonies request logic.
 -- This WILL submit a real crafting job when the item is craftable and not
 -- already being crafted.
-local function printCraftTest(itemName, requestedCount)
+function DIAG.printCraftTest(itemName, requestedCount)
     local lines = {}
     local function add(s)
         lines[#lines + 1] = tostring(s or "")
-        updateDiagnosticMonitor("CRAFT TEST v" .. PROGRAM_VERSION, lines)
+        DIAG.updateDiagnosticMonitor("CRAFT TEST v" .. PROGRAM_VERSION, lines)
     end
     local function finish()
-        showDiagnosticViewer("CRAFT TEST v" .. PROGRAM_VERSION, lines)
+        DIAG.showDiagnosticViewer("CRAFT TEST v" .. PROGRAM_VERSION, lines)
     end
 
     loadState()
@@ -6793,7 +6802,7 @@ end
 -- Shows every acceptable MineColonies item option and exactly how the
 -- supply manager sees it from Player RS. This diagnostic does NOT craft or
 -- transfer anything.
-local function printCraftDiagnostics()
+function DIAG.printCraftDiagnostics()
     local lines = {}
     local function add(s)
         lines[#lines + 1] = tostring(s or "")
@@ -6803,7 +6812,7 @@ local function printCraftDiagnostics()
 
     if not refreshPeripherals() then
         add("ERROR: Required peripherals are unavailable.")
-        showDiagnosticViewer("CRAFT DIAG v" .. PROGRAM_VERSION, lines)
+        DIAG.showDiagnosticViewer("CRAFT DIAG v" .. PROGRAM_VERSION, lines)
         return
     end
 
@@ -6811,7 +6820,7 @@ local function printCraftDiagnostics()
     if not requests then
         add("ERROR reading colony requests:")
         add(tostring(err))
-        showDiagnosticViewer("CRAFT DIAG v" .. PROGRAM_VERSION, lines)
+        DIAG.showDiagnosticViewer("CRAFT DIAG v" .. PROGRAM_VERSION, lines)
         return
     end
 
@@ -6914,12 +6923,12 @@ local function printCraftDiagnostics()
         add("> marks the option the program selected.")
     end
 
-    showDiagnosticViewer("CRAFT DIAG v" .. PROGRAM_VERSION, lines)
+    DIAG.showDiagnosticViewer("CRAFT DIAG v" .. PROGRAM_VERSION, lines)
 end
 
 -- Explains which current requests are likely to fail at the source side.
 -- This diagnostic does NOT move any items.
-local function printBlockedDiagnostics()
+function DIAG.printBlockedDiagnostics()
     local lines = {}
     local function add(s)
         lines[#lines + 1] = tostring(s or "")
@@ -6929,14 +6938,14 @@ local function printBlockedDiagnostics()
 
     if not refreshPeripherals() then
         add("ERROR: Required peripherals are not available.")
-        showDiagnosticViewer("BLOCKED v" .. PROGRAM_VERSION, lines)
+        DIAG.showDiagnosticViewer("BLOCKED v" .. PROGRAM_VERSION, lines)
         return
     end
 
     local requests, err = getColonyRequests()
     if not requests then
         add("ERROR reading requests: " .. tostring(err))
-        showDiagnosticViewer("BLOCKED v" .. PROGRAM_VERSION, lines)
+        DIAG.showDiagnosticViewer("BLOCKED v" .. PROGRAM_VERSION, lines)
         return
     end
 
@@ -7000,12 +7009,12 @@ local function printBlockedDiagnostics()
     add("exact blocked registry name, not cobblestone:")
     add("  colony_supply.lua test <item>")
 
-    showDiagnosticViewer("BLOCKED v" .. PROGRAM_VERSION, lines)
+    DIAG.showDiagnosticViewer("BLOCKED v" .. PROGRAM_VERSION, lines)
 end
 
 -- Shows only transfer-barrel discovery/inspection state.
 -- Persist the exact modem-connected transfer barrel.
-local function setTransferBarrelName(name)
+function DIAG.setTransferBarrelName(name)
     loadState()
 
     if not name or name == "" then
@@ -7032,7 +7041,7 @@ local function setTransferBarrelName(name)
     print(name)
 end
 
-local function clearTransferBarrelName()
+function DIAG.clearTransferBarrelName()
     loadState()
     state.settings = state.settings or {}
     state.settings.transferChestName = nil
@@ -7042,7 +7051,7 @@ local function clearTransferBarrelName()
     print("Saved transfer barrel cleared.")
 end
 
-local function printBarrelDiagnostics()
+function DIAG.printBarrelDiagnostics()
     local lines = {}
     local function add(s) lines[#lines + 1] = tostring(s or "") end
 
@@ -7089,12 +7098,12 @@ local function printBarrelDiagnostics()
         add("CONFIG.transferChestName to the barrel name.")
     end
 
-    showDiagnosticViewer("BARREL v" .. PROGRAM_VERSION, lines)
+    DIAG.showDiagnosticViewer("BARREL v" .. PROGRAM_VERSION, lines)
 end
 
 -- Shows the single transaction which is currently holding the transfer barrel.
 -- This diagnostic does not move or clear items.
-local function printPendingDiagnostics()
+function DIAG.printPendingDiagnostics()
     local lines = {}
     local function add(s)
         lines[#lines + 1] = tostring(s or "")
@@ -7112,7 +7121,7 @@ local function printPendingDiagnostics()
         add("No pending transaction.")
         add("")
         add("The transfer barrel is not logically locked.")
-        showDiagnosticViewer("PENDING v" .. PROGRAM_VERSION, lines)
+        DIAG.showDiagnosticViewer("PENDING v" .. PROGRAM_VERSION, lines)
         return
     end
 
@@ -7155,18 +7164,18 @@ local function printPendingDiagnostics()
     add("the destination RS network is refusing")
     add("or unable to accept the remaining items.")
 
-    showDiagnosticViewer("PENDING v" .. PROGRAM_VERSION, lines)
+    DIAG.showDiagnosticViewer("PENDING v" .. PROGRAM_VERSION, lines)
 end
 
 -- Warehouse overflow eligibility without moving anything.
-local function printOverflowDiagnostics()
+function DIAG.printOverflowDiagnostics()
     local lines = {}
     local function add(s) lines[#lines + 1] = tostring(s or "") end
 
     loadState()
     if not refreshPeripherals() then
         add("ERROR: Required RS bridges / colony network are not ready.")
-        showDiagnosticViewer("OVERFLOW DIAGNOSTICS v" .. PROGRAM_VERSION, lines)
+        DIAG.showDiagnosticViewer("OVERFLOW DIAGNOSTICS v" .. PROGRAM_VERSION, lines)
         return
     end
 
@@ -7271,10 +7280,10 @@ local function printOverflowDiagnostics()
         add("Normal mode returns up to " .. tostring(CONFIG.maxOverflowChunk) .. " items per scan.")
     end
 
-    showDiagnosticViewer("OVERFLOW DIAGNOSTICS v" .. PROGRAM_VERSION, lines)
+    DIAG.showDiagnosticViewer("OVERFLOW DIAGNOSTICS v" .. PROGRAM_VERSION, lines)
 end
 
-local function printHistoryDiagnostics()
+function DIAG.printHistoryDiagnostics()
     loadState()
 
     local history = state.history or {}
@@ -7305,43 +7314,43 @@ end
 
 local args = { ... }
 if args[1] == "diag" then
-    printPeripheralDiagnostics()
+    DIAG.printPeripheralDiagnostics()
     return
 elseif args[1] == "requests" then
-    printRequestDiagnostics()
+    DIAG.printRequestDiagnostics()
     return
 elseif args[1] == "source" then
-    printSourceDiagnostic(args[2])
+    DIAG.printSourceDiagnostic(args[2])
     return
 elseif args[1] == "test" then
-    printTransferTest(args[2])
+    DIAG.printTransferTest(args[2])
     return
 elseif args[1] == "crafttest" then
-    printCraftTest(args[2], args[3])
+    DIAG.printCraftTest(args[2], args[3])
     return
 elseif args[1] == "craftdiag" then
-    printCraftDiagnostics()
+    DIAG.printCraftDiagnostics()
     return
 elseif args[1] == "blocked" then
-    printBlockedDiagnostics()
+    DIAG.printBlockedDiagnostics()
     return
 elseif args[1] == "setbarrel" then
-    setTransferBarrelName(args[2])
+    DIAG.setTransferBarrelName(args[2])
     return
 elseif args[1] == "clearbarrel" then
-    clearTransferBarrelName()
+    DIAG.clearTransferBarrelName()
     return
 elseif args[1] == "barrel" then
-    printBarrelDiagnostics()
+    DIAG.printBarrelDiagnostics()
     return
 elseif args[1] == "pending" then
-    printPendingDiagnostics()
+    DIAG.printPendingDiagnostics()
     return
 elseif args[1] == "overflow" then
-    printOverflowDiagnostics()
+    DIAG.printOverflowDiagnostics()
     return
 elseif args[1] == "history" then
-    printHistoryDiagnostics()
+    DIAG.printHistoryDiagnostics()
     return
 elseif args[1] == "reset" then
     if fs.exists(CONFIG.stateFile) then fs.delete(CONFIG.stateFile) end
