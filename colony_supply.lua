@@ -167,7 +167,7 @@
 --]]
 
 local PROGRAM_VERSION = "2.37"
-local SUITE_VERSION = "1.1.1"
+local SUITE_VERSION = "1.1.2"
 
 local Util = require("colony.lib.util")
 local SharedUI = require("colony.lib.ui")

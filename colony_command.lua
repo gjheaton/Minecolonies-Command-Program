@@ -2,13 +2,13 @@
 -- Minecraft 1.20.1
 -- Requires: CC:Tweaked + Advanced Peripherals + MineColonies
 -- Display: Advanced Monitor
--- v2.13: Adds Help Wanted staffing view with MineColonies-aware capacity rules.
+-- v2.14: Suppress the sick-colony alarm when a staffed hospital can treat citizens.
 
 local REFRESH_SECONDS = 10
 local RAID_BLINK_SECONDS = 0.75
 local TEXT_SCALE = 0.5
-local PROGRAM_VERSION = "2.13"
-local SUITE_VERSION = "1.1.1"
+local PROGRAM_VERSION = "2.14"
+local SUITE_VERSION = "1.1.2"
 
 local Util = require("colony.lib.util")
 local SharedUI = require("colony.lib.ui")
@@ -64,18 +64,20 @@ local function hasSickTriggerHardware()
     return true
 end
 
-local function sickTriggerHardwareText(sickCount)
-    local powered = (tonumber(sickCount) or 0) > 0
+local function sickTriggerHardwareText(sickCount, alarmSuppressed)
+    local sick = (tonumber(sickCount) or 0) > 0
+    local powered = sick and alarmSuppressed ~= true
     local state = powered and "ON" or "OFF"
+    local suffix = (sick and alarmSuppressed == true) and " (HOSPITAL+DOCTOR)" or ""
 
     local integrator = resolveSickRedstoneIntegrator()
     if integrator then
         return "INTEGRATOR [" ..
             tostring(sickRedstoneIntegratorName or "?") ..
-            "] TOP " .. state
+            "] TOP " .. state .. suffix
     end
 
-    return "COMPUTER TOP " .. state
+    return "COMPUTER TOP " .. state .. suffix
 end
 
 monitor.setTextScale(TEXT_SCALE)
@@ -592,6 +594,36 @@ local function staffingBuildingKey(building)
     return ""
 end
 
+-- Return whether the colony has an operational Hospital and an assigned
+-- medical worker. MineColonies calls the Hospital worker a Healer in some
+-- APIs/UI versions; matching the worker by the Hospital's exact work location
+-- is more reliable than depending on the localized/display job name.
+--
+-- This is recomputed from the current refresh snapshot and retains no history,
+-- so it cannot grow memory usage over time.
+local function colonyMedicalCoverage()
+    local hospitalAvailable = false
+    local doctorAvailable = false
+
+    for _, building in ipairs(D.buildings or {}) do
+        local key = staffingBuildingKey(building)
+        if key == "hospital" or key == "healer" then
+            local level = tonumber(building.level) or 0
+            local operational = level > 0 and building.built ~= false
+
+            if operational then
+                hospitalAvailable = true
+                if #buildingWorkers(building) > 0 then
+                    doctorAvailable = true
+                    break
+                end
+            end
+        end
+    end
+
+    return hospitalAvailable, doctorAvailable
+end
+
 local function buildingStaffCapacity(building)
     if type(building) ~= "table" then return 0 end
 
@@ -1007,6 +1039,12 @@ local function refreshData()
         end
     end
 
+    D.hospitalAvailable, D.doctorAvailable = colonyMedicalCoverage()
+    D.sickAlarmSuppressed = (D.sick > 0)
+        and D.hospitalAvailable
+        and D.doctorAvailable
+    D.sickAlarmActive = (D.sick > 0) and not D.sickAlarmSuppressed
+
     D.unclaimedOrders = 0
     D.activeOrders = 0
     for _, o in ipairs(D.workOrders) do
@@ -1054,8 +1092,7 @@ local function setSickTrigger(powered)
 end
 
 local function updateSickTrigger()
-    local sickCount = tonumber(D.sick) or 0
-    setSickTrigger(sickCount > 0)
+    setSickTrigger(D.sickAlarmActive == true)
 end
 
 -- =========================
@@ -1102,7 +1139,7 @@ local function renderTerminalStartup(updateText, statusText)
     print("Integrator:   ONLINE [" .. tostring(colonyPeripheralName or "?") .. "]")
     print("Citizens:     " .. tostring(D.population or 0) .. "/" ..
         tostring(D.maxPopulation or 0))
-    print("Sick trigger: " .. sickTriggerHardwareText(D.sick))
+    print("Sick trigger: " .. sickTriggerHardwareText(D.sick, D.sickAlarmSuppressed))
 
     if errors == 0 then
         terminalColor(colors.lime)
@@ -1254,13 +1291,14 @@ local function drawHome()
         -- If space permits, show the affected names on a second line.
         local names = table.concat(D.sickNames or {}, ", ")
         fill(1, 6, w, 6, C.bg)
-        local alarmState = sickTriggerHardwareText(D.sick)
+        local alarmState = sickTriggerHardwareText(D.sick, D.sickAlarmSuppressed)
+        local triggerColor = D.sickAlarmSuppressed and C.good
+            or (hasSickTriggerHardware() and C.danger or C.warn)
         if names ~= "" then
             center(6, "Sick: " .. names .. "  |  TRIGGER: " .. alarmState,
-                hasSickTriggerHardware() and C.danger or C.warn, C.bg)
+                triggerColor, C.bg)
         else
-            center(6, "TRIGGER: " .. alarmState,
-                hasSickTriggerHardware() and C.danger or C.warn, C.bg)
+            center(6, "TRIGGER: " .. alarmState, triggerColor, C.bg)
         end
 
         -- Touching either warning line jumps directly to the citizen list.
