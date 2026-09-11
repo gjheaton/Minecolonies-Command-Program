@@ -8,7 +8,7 @@ local REFRESH_SECONDS = 10
 local RAID_BLINK_SECONDS = 0.75
 local TEXT_SCALE = 0.5
 local PROGRAM_VERSION = "2.14"
-local SUITE_VERSION = "1.1.4"
+local SUITE_VERSION = "1.1.5"
 
 local Util = require("colony.lib.util")
 local SharedUI = require("colony.lib.ui")

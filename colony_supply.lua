@@ -1,6 +1,6 @@
 --[[
   colony_supply.lua
-  Version 2.38
+  Version 2.40
   Minecraft 1.20.1
   CC:Tweaked + Advanced Peripherals + MineColonies + Refined Storage
 
@@ -184,10 +184,18 @@
   - Overflow transfer failures are no longer overwritten by a generic ONLINE message
     at the end of the same scan. No new persistent tables, timers, or queues are added.
 
+  v2.40 reverse-transfer hardening:
+  - Overflow exports are physically verified against the modem-visible transfer barrel.
+  - If the normal Colony-RS directional export moves nothing, Supply retries that leg
+    with Advanced Peripherals exportItemToPeripheral() using the resolved barrel name.
+  - A bridge-reported export is never credited when the barrel count does not increase.
+  - The fallback is bounded to one alternate source-export attempt per transaction and
+    stores no new history/cache structures, so it cannot create long-running memory growth.
+
 --]]
 
-local PROGRAM_VERSION = "2.39"
-local SUITE_VERSION = "1.1.4"
+local PROGRAM_VERSION = "2.40"
+local SUITE_VERSION = "1.1.5"
 
 local Util = require("colony.lib.util")
 local SharedUI = require("colony.lib.ui")
@@ -3705,8 +3713,121 @@ local function performOverflowReturn(itemName, amount)
     p.stage = "exporting"
     saveState()
 
+    -- The overflow path is the reverse of normal supply. Verify the source
+    -- export at the shared barrel instead of trusting only the RS Bridge return.
+    -- This also gives us a safe condition for trying the named-peripheral API:
+    -- if the barrel count did not increase, the first export did not physically
+    -- stage this item and a bounded fallback cannot duplicate it.
+    local barrelBefore = chestItemCount(itemName)
+
     local exported, exportErr = NBTX.exportFromColony(itemName, amount)
-    exported = tonumber(exported) or 0
+    exported = math.max(0, math.floor(tonumber(exported) or 0))
+
+    if barrelBefore ~= nil then
+        transferSleep(CONFIG.transferSettleDelay)
+        local barrelAfter = chestItemCount(itemName)
+
+        if barrelAfter ~= nil then
+            local physicalExported = math.max(0, barrelAfter - barrelBefore)
+            physicalExported = math.min(physicalExported, amount)
+
+            if physicalExported ~= exported then
+                writeLog(
+                    "OVERFLOW EXPORT VERIFY mismatch item=" .. tostring(itemName) ..
+                    " reported=" .. tostring(exported) ..
+                    " physical=" .. tostring(physicalExported) ..
+                    " barrel=" .. tostring(barrelBefore) .. "->" .. tostring(barrelAfter)
+                )
+            end
+
+            exported = physicalExported
+
+            -- v2.40: the Player->Colony direction was already proven in normal
+            -- operation, but the reverse Colony->barrel leg may fail with the
+            -- directional API. The barrel is on the wired peripheral network,
+            -- so try AP's named-container export exactly once when the verified
+            -- directional movement is zero.
+            if exported <= 0 then
+                local barrelName = transferChestResolvedName
+                if barrelName and peripheral.isPresent(barrelName) then
+                    local fallbackFilter = { name = itemName, count = amount }
+                    local okFallback, fallbackMoved, fallbackErr = safeCall(
+                        colonyRS,
+                        "exportItemToPeripheral",
+                        fallbackFilter,
+                        barrelName
+                    )
+
+                    fallbackMoved = math.max(0, math.floor(tonumber(fallbackMoved) or 0))
+                    transferSleep(CONFIG.transferSettleDelay)
+
+                    local barrelAfterFallback = chestItemCount(itemName)
+                    if barrelAfterFallback ~= nil then
+                        local fallbackPhysical =
+                            math.max(0, barrelAfterFallback - barrelBefore)
+                        fallbackPhysical = math.min(fallbackPhysical, amount)
+
+                        writeLog(
+                            "OVERFLOW EXPORT FALLBACK item=" .. tostring(itemName) ..
+                            " barrel=" .. tostring(barrelName) ..
+                            " apiOK=" .. tostring(okFallback) ..
+                            " reported=" .. tostring(fallbackMoved) ..
+                            " physical=" .. tostring(fallbackPhysical)
+                        )
+
+                        if fallbackPhysical > 0 then
+                            exported = fallbackPhysical
+                            exportErr = nil
+                            NBTX.invalidateRSList(colonyRS)
+                        else
+                            exportErr = fallbackErr or fallbackMoved or exportErr or
+                                "named-barrel export moved 0"
+                        end
+                    else
+                        -- We started from a verifiable barrel. If verification
+                        -- disappears after the fallback, do not trust the bridge
+                        -- return and do not claim the overflow moved.
+                        exported = 0
+                        exportErr = "Transfer barrel verification unavailable after overflow export fallback"
+                    end
+                end
+            end
+        else
+            -- A visible barrel became unreadable during the export. Do not
+            -- convert an unverified bridge return into a successful overflow.
+            exported = 0
+            exportErr = "Transfer barrel verification unavailable after colony export"
+        end
+    elseif exported <= 0 then
+        -- If inventory inspection itself is unavailable but the barrel still has
+        -- a resolved peripheral name, retain a best-effort named-container
+        -- fallback. This path cannot physically verify the move, so it is used
+        -- only when the normal directional call already moved zero.
+        local barrelName = transferChestResolvedName
+        if barrelName and peripheral.isPresent(barrelName) then
+            local okFallback, fallbackMoved, fallbackErr = safeCall(
+                colonyRS,
+                "exportItemToPeripheral",
+                { name = itemName, count = amount },
+                barrelName
+            )
+            if okFallback then
+                fallbackMoved = math.max(0, math.floor(tonumber(fallbackMoved) or 0))
+                if fallbackMoved > 0 then
+                    exported = fallbackMoved
+                    exportErr = nil
+                    NBTX.invalidateRSList(colonyRS)
+                    writeLog("OVERFLOW EXPORT FALLBACK unverified item=" ..
+                        tostring(itemName) .. " moved=" .. tostring(exported))
+                else
+                    exportErr = fallbackErr or exportErr
+                end
+            else
+                exportErr = fallbackMoved or fallbackErr or exportErr
+            end
+        end
+    end
+
     if exported <= 0 then
         clearPending("colony overflow export returned 0")
         local fresh = getRSAmount(colonyRS, itemName)
