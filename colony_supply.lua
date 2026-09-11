@@ -225,10 +225,18 @@
   - Re-ranks every acceptable non-tool request item on each scan.
   - Stocked alternatives outrank zero-stock alternatives that merely report craftable.
   - Keeps the previously selected alternative only as a tie-breaker to avoid churn.
+
+  v2.46 Flint and Steel request/NBT safety fix:
+  - Recognizes the literal MineColonies request phrase "Flint and Steel" as the
+    lighter tool class so it uses the exact equipment-selection path.
+  - Treats minecraft:flint_and_steel as a real durability-bearing tool for safe
+    default MineColonies NBT handling, preventing normal default NBT from being
+    rejected before stock/craftability checks.
+  - Does not relax NBT safety for enchanted, damaged, or customized variants.
 --]]
 
-local PROGRAM_VERSION = "2.45"
-local SUITE_VERSION = "1.1.10"
+local PROGRAM_VERSION = "2.46"
+local SUITE_VERSION = "1.1.11"
 
 local Util = require("colony.lib.util")
 local SharedUI = require("colony.lib.ui")
@@ -624,6 +632,7 @@ local function requestNBTIsSafeDefault(item)
         or path:match("_leggings$") ~= nil
         or path == "boots"
         or path:match("_boots$") ~= nil
+        or path == "flint_and_steel"
 
     if not explicitlyAllowed and not looksLikeRealTool then
         return false
@@ -2526,6 +2535,14 @@ function NBTX.requestToolClass(request)
 
     if NBTX.textHasToolToken(haystack, "shovel dig") then
         return "shovel"
+    end
+
+    -- MineColonies normally names this request literally rather than using
+    -- the internal class name "lighter". Map the displayed/requested item
+    -- phrase to the existing lighter tool class.
+    if NBTX.textHasToolToken(haystack, "flint and steel")
+        or NBTX.textHasToolToken(haystack, "flint_and_steel") then
+        return "lighter"
     end
 
     local classes = {
