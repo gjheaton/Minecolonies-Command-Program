@@ -1,6 +1,6 @@
 --[[
   colony_supply.lua
-  Version 2.40
+  Version 2.44
   Minecraft 1.20.1
   CC:Tweaked + Advanced Peripherals + MineColonies + Refined Storage
 
@@ -213,10 +213,17 @@
   - The current page number is shown in the History header.
   - Refreshing or receiving new transfer history keeps the currently selected page.
 
+  v2.44 request tool-token recognition:
+  - Tool-class detection now matches complete normalized words/phrases instead of raw
+    substrings. This prevents ordinary items such as minecraft:bowl from being
+    misclassified as a Bow request merely because "bowl" contains "bow".
+  - Existing underscore/hyphen forms such as fishing_rod remain recognized after
+    normalization. No transfer, overflow, history, or persistent-state logic changed.
+
 --]]
 
-local PROGRAM_VERSION = "2.43"
-local SUITE_VERSION = "1.1.8"
+local PROGRAM_VERSION = "2.44"
+local SUITE_VERSION = "1.1.9"
 
 local Util = require("colony.lib.util")
 local SharedUI = require("colony.lib.ui")
@@ -2477,6 +2484,19 @@ function NBTX.cleanMinecraftText(value)
     return s
 end
 
+-- Match tool names as complete normalized tokens, never as arbitrary substrings.
+-- This is important for names such as "bowl": a raw search for "bow" would
+-- incorrectly turn an ordinary Bowl request into a Bow equipment request.
+function NBTX.textHasToolToken(text, token)
+    local normalized = tostring(text or ""):lower():gsub("[^%w]+", " ")
+    local wanted = tostring(token or ""):lower():gsub("[^%w]+", " ")
+
+    normalized = (" " .. normalized:gsub("^%s+", ""):gsub("%s+$", "") .. " ")
+    wanted = wanted:gsub("^%s+", ""):gsub("%s+$", "")
+
+    return wanted ~= "" and normalized:find(" " .. wanted .. " ", 1, true) ~= nil
+end
+
 function NBTX.requestToolClass(request)
     if type(request) ~= "table" then return nil end
 
@@ -2488,20 +2508,18 @@ function NBTX.requestToolClass(request)
          " " .. NBTX.cleanMinecraftText(request.toolClass) ..
          " "):lower()
 
-    -- Common MineColonies/tool-action spellings.
-    if haystack:find("axe_dig", 1, true)
-        or haystack:find("axe dig", 1, true)
-        or haystack:find("axes", 1, true) then
+    -- Common MineColonies/tool-action spellings. These use the same token-aware
+    -- matcher so unrelated words cannot accidentally trigger an equipment class.
+    if NBTX.textHasToolToken(haystack, "axe dig")
+        or NBTX.textHasToolToken(haystack, "axes") then
         return "axe"
     end
 
-    if haystack:find("pickaxe_dig", 1, true)
-        or haystack:find("pickaxe dig", 1, true) then
+    if NBTX.textHasToolToken(haystack, "pickaxe dig") then
         return "pickaxe"
     end
 
-    if haystack:find("shovel_dig", 1, true)
-        or haystack:find("shovel dig", 1, true) then
+    if NBTX.textHasToolToken(haystack, "shovel dig") then
         return "shovel"
     end
 
@@ -2512,7 +2530,7 @@ function NBTX.requestToolClass(request)
     }
 
     for _, class in ipairs(classes) do
-        if haystack:find(class, 1, true) then
+        if NBTX.textHasToolToken(haystack, class) then
             if class == "fishing rod" then return "fishing_rod" end
             return class
         end
