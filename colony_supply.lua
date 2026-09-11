@@ -199,10 +199,18 @@
   - Runtime transfer, overflow, crafting, and persisted state behavior are unchanged.
   - The refactor adds no queues, caches, timers, histories, or long-lived allocations.
 
+  v2.42 WH->Player path diagnostic:
+  - Adds `overflowtest` / `whtest` to exercise the exact production overflow transfer path.
+  - The diagnostic moves a small real quantity from Colony/Warehouse RS to Player RS,
+    reports before/after Colony, barrel, and Player counts, and records normal WH>P history
+    only when the production transfer physically succeeds.
+  - It refuses to run with a pending transaction or non-empty/unreadable transfer barrel.
+  - The diagnostic adds no persistent queues, timers, caches, or background allocations.
+
 --]]
 
-local PROGRAM_VERSION = "2.41"
-local SUITE_VERSION = "1.1.6"
+local PROGRAM_VERSION = "2.42"
+local SUITE_VERSION = "1.1.7"
 
 local Util = require("colony.lib.util")
 local SharedUI = require("colony.lib.ui")
@@ -7283,6 +7291,139 @@ function DIAG.printOverflowDiagnostics()
     DIAG.showDiagnosticViewer("OVERFLOW DIAGNOSTICS v" .. PROGRAM_VERSION, lines)
 end
 
+-- Exercise the exact production Warehouse/Colony -> Player overflow path.
+-- This is intentionally a real one-way transfer test: on success the requested
+-- test quantity remains in Player RS and is recorded as a normal WH>P history row.
+-- No target/overflow settings are changed.
+function DIAG.printOverflowTransferTest(itemName, requestedCount)
+    local lines = {}
+    local function add(text)
+        lines[#lines + 1] = tostring(text or "")
+        DIAG.updateDiagnosticMonitor("WH>P PATH TEST v" .. PROGRAM_VERSION, lines)
+    end
+    local function finish()
+        DIAG.showDiagnosticViewer("WH>P PATH TEST v" .. PROGRAM_VERSION, lines)
+    end
+
+    loadState()
+    local ready = refreshPeripherals()
+
+    add("Production overflow path test")
+    add("This moves a REAL item Colony/Warehouse -> Player RS.")
+    add("")
+    add("Player bridge: " .. tostring(playerBridgeResolvedName or "NOT FOUND"))
+    add("Colony bridge: " .. tostring(colonyBridgeResolvedName or "NOT FOUND"))
+    add("Transfer barrel: " .. tostring(transferChestResolvedName or CONFIG.transferChestName or "NOT FOUND"))
+
+    if not ready then
+        add("")
+        add("FAIL: Required peripherals/networks are not ready.")
+        add("Run: colony_supply.lua diag")
+        finish()
+        return
+    end
+
+    if not itemName or itemName == "" then
+        add("")
+        add("Usage:")
+        add("  colony_supply.lua overflowtest minecraft:cobblestone")
+        add("  colony_supply.lua overflowtest minecraft:cobblestone 1")
+        finish()
+        return
+    end
+
+    local count = math.floor(tonumber(requestedCount) or 1)
+    count = math.max(1, math.min(count, tonumber(CONFIG.maxOverflowChunk) or 64))
+
+    if state.pending then
+        add("")
+        add("FAIL: A transfer is already pending.")
+        add("Pending item: " .. tostring(state.pending.item or "?"))
+        add("Run: colony_supply.lua pending")
+        finish()
+        return
+    end
+
+    local barrelEmpty = chestIsEmpty()
+    if barrelEmpty == nil then
+        add("")
+        add("FAIL: Transfer barrel cannot be inspected.")
+        add("The WH>P test requires modem-visible barrel verification.")
+        add("Run: colony_supply.lua barrel")
+        finish()
+        return
+    elseif barrelEmpty == false then
+        add("")
+        add("FAIL: Transfer barrel is not empty.")
+        add("Contents: " .. tostring(chestContentsSummary(3) or "unknown"))
+        add("Empty/recover the barrel before running this test.")
+        finish()
+        return
+    end
+
+    local colonyBefore = getRSAmount(colonyRS, itemName)
+    local playerBefore = getRSAmount(playerRS, itemName)
+    local barrelBefore = chestItemCount(itemName) or 0
+
+    add("")
+    add("Item: " .. tostring(itemName))
+    add("Requested test count: " .. tostring(count))
+    add("Colony before: " .. formatNumber(colonyBefore))
+    add("Barrel before: " .. formatNumber(barrelBefore))
+    add("Player before: " .. formatNumber(playerBefore))
+
+    if colonyBefore < count then
+        add("")
+        add("FAIL: Colony RS does not contain enough of this item.")
+        finish()
+        return
+    end
+
+    add("")
+    add("Running exact performOverflowReturn() production path...")
+    local moved, err = performOverflowReturn(itemName, count)
+    moved = math.max(0, math.floor(tonumber(moved) or 0))
+
+    transferSleep(CONFIG.transferSettleDelay)
+    NBTX.invalidateRSList(colonyRS)
+    NBTX.invalidateRSList(playerRS)
+
+    local colonyAfter = getRSAmount(colonyRS, itemName)
+    local playerAfter = getRSAmount(playerRS, itemName)
+    local barrelAfter = chestItemCount(itemName)
+
+    add("Result moved: " .. tostring(moved))
+    if err then add("Result error: " .. tostring(err)) end
+    add("Health: " .. tostring(health.message or ""))
+    add("")
+    add("Colony after: " .. formatNumber(colonyAfter))
+    add("Barrel after: " .. tostring(barrelAfter == nil and "UNREADABLE" or formatNumber(barrelAfter)))
+    add("Player after: " .. formatNumber(playerAfter))
+    add("Observed colony delta: " .. tostring(math.max(0, colonyBefore - colonyAfter)))
+    add("Observed player delta: +" .. tostring(math.max(0, playerAfter - playerBefore)))
+
+    if moved >= count and barrelAfter == 0 and playerAfter > playerBefore then
+        add("")
+        add("PASS: WH>P production transfer path is working.")
+        add("A WH>P entry should now appear in transfer history.")
+    else
+        add("")
+        add("FAIL: WH>P production transfer did not complete.")
+        if barrelAfter and barrelAfter > 0 then
+            add("Item reached the barrel but did not fully reach Player RS.")
+        elseif colonyAfter >= colonyBefore then
+            add("Item did not leave Colony/Warehouse RS.")
+            add("Check Colony RS External Storage extraction access/filter.")
+        else
+            add("Item left Colony RS but was not confirmed in Player RS.")
+        end
+        add("Run: colony_supply.lua barrel")
+        add("Run: colony_supply.lua history")
+    end
+
+    finish()
+end
+
 function DIAG.printHistoryDiagnostics()
     loadState()
 
@@ -7348,6 +7489,9 @@ elseif args[1] == "pending" then
     return
 elseif args[1] == "overflow" then
     DIAG.printOverflowDiagnostics()
+    return
+elseif args[1] == "overflowtest" or args[1] == "whtest" then
+    DIAG.printOverflowTransferTest(args[2], args[3])
     return
 elseif args[1] == "history" then
     DIAG.printHistoryDiagnostics()
