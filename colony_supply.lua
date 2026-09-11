@@ -207,10 +207,16 @@
   - It refuses to run with a pending transaction or non-empty/unreadable transfer barrel.
   - The diagnostic adds no persistent queues, timers, caches, or background allocations.
 
+  v2.43 manual History navigation:
+  - History pages no longer auto-advance.
+  - The History footer uses fixed PREV / REFRESH / NEXT touch controls.
+  - The current page number is shown in the History header.
+  - Refreshing or receiving new transfer history keeps the currently selected page.
+
 --]]
 
-local PROGRAM_VERSION = "2.42"
-local SUITE_VERSION = "1.1.7"
+local PROGRAM_VERSION = "2.43"
+local SUITE_VERSION = "1.1.8"
 
 local Util = require("colony.lib.util")
 local SharedUI = require("colony.lib.ui")
@@ -5460,10 +5466,13 @@ local function renderHistoryMonitor()
     if not monitor then return end
 
     local history = state.history or {}
+    local rowsPerPage, totalPages = historyRowsPerPage()
+    historyPage = clamp(historyPage, 1, totalPages)
 
     drawSupplyHeader(
         w,
-        "TRANSFER HISTORY  (" .. tostring(#history) .. ")",
+        "TRANSFER HISTORY  (" .. tostring(#history) .. ")  PAGE " ..
+            tostring(historyPage) .. "/" .. tostring(totalPages),
         "P>WH = SUPPLY  |  WH>P = OVERFLOW  |  Newest first",
         UI.muted
     )
@@ -5515,9 +5524,6 @@ local function renderHistoryMonitor()
     monitorWrite(columns.sep3X, 5, "|", colors.gray, UI.panel2)
     monitorWrite(columns.qtyX, 5, padRight("QTY", columns.qtyW), colors.black, UI.panel2)
 
-    local rowsPerPage, totalPages = historyRowsPerPage()
-    historyPage = clamp(historyPage, 1, totalPages)
-
     local startIndex = (historyPage - 1) * rowsPerPage + 1
     local endIndex = math.min(#history, startIndex + rowsPerPage - 1)
 
@@ -5550,13 +5556,28 @@ local function renderHistoryMonitor()
         end
     end
 
-    drawSupplySubBar(
-        historyPage,
-        totalPages,
-        "Entries " .. tostring(#history) .. "/" ..
-            tostring(tonumber(CONFIG.maxHistoryEntries) or 200),
-        w,
-        h
+    -- History navigation is deliberately manual.  Unlike the request pages,
+    -- History never auto-advances: PREV and NEXT are the only page-changing
+    -- controls.  REFRESH redraws the current page without changing it.
+    monitorWrite(1, h - 1, string.rep(" ", w), UI.muted, UI.panel)
+    local third = math.max(1, math.floor(w / 3))
+    local rightStart = math.min(w, third * 2 + 1)
+    monitorWrite(
+        1, h - 1,
+        padRight(centerText("< PREV", third), third),
+        UI.text, UI.panel
+    )
+    local middleWidth = math.max(1, rightStart - third - 1)
+    monitorWrite(
+        third + 1, h - 1,
+        padRight(centerText("REFRESH", middleWidth), middleWidth),
+        UI.accent, UI.panel
+    )
+    local rightWidth = math.max(1, w - rightStart + 1)
+    monitorWrite(
+        rightStart, h - 1,
+        padRight(centerText("NEXT >", rightWidth), rightWidth),
+        UI.text, UI.panel
     )
     drawSupplyNav("history", w, h)
 end
@@ -6025,12 +6046,14 @@ local function eventLoop()
                             if view == "settings" then settingsPage = 1 end
                             renderMonitor()
 
-                        elseif y == h - 1 and totalPages > 1 then
-                            local prevX2, nextX1 = pageSubBarGeometry(w)
-                            if x <= prevX2 then
-                                previousHistoryPage()
-                            elseif x >= nextX1 then
-                                nextHistoryPage()
+                        elseif y == h - 1 then
+                            local third = math.max(1, math.floor(w / 3))
+                            if x <= third then
+                                if totalPages > 1 then previousHistoryPage() end
+                            elseif x > third * 2 then
+                                if totalPages > 1 then nextHistoryPage() end
+                            else
+                                -- REFRESH intentionally keeps historyPage unchanged.
                             end
                             renderMonitor()
                         end
@@ -6170,15 +6193,6 @@ local function monitorRefreshLoop()
                    and now - lastManualPageChange >= CONFIG.monitorPageSeconds then
                     currentPage = currentPage + 1
                     if currentPage > pages then currentPage = 1 end
-                    lastAuto = now
-                end
-            elseif monitorView == "history" then
-                local _, pages = historyRowsPerPage()
-                if pages > 1
-                   and now - lastAuto >= CONFIG.monitorPageSeconds
-                   and now - lastManualPageChange >= CONFIG.monitorPageSeconds then
-                    historyPage = historyPage + 1
-                    if historyPage > pages then historyPage = 1 end
                     lastAuto = now
                 end
             end
