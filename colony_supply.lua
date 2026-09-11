@@ -1,6 +1,6 @@
 --[[
   colony_supply.lua
-  Version 2.44
+  Version 2.45
   Minecraft 1.20.1
   CC:Tweaked + Advanced Peripherals + MineColonies + Refined Storage
 
@@ -220,10 +220,15 @@
   - Existing underscore/hyphen forms such as fishing_rod remain recognized after
     normalization. No transfer, overflow, history, or persistent-state logic changed.
 
+
+  v2.45 alternative-request selection:
+  - Re-ranks every acceptable non-tool request item on each scan.
+  - Stocked alternatives outrank zero-stock alternatives that merely report craftable.
+  - Keeps the previously selected alternative only as a tie-breaker to avoid churn.
 --]]
 
-local PROGRAM_VERSION = "2.44"
-local SUITE_VERSION = "1.1.9"
+local PROGRAM_VERSION = "2.45"
+local SUITE_VERSION = "1.1.10"
 
 local Util = require("colony.lib.util")
 local SharedUI = require("colony.lib.ui")
@@ -3104,21 +3109,16 @@ local function chooseCandidate(request, requestState, remaining)
         return nil
     end
 
-    -- Sticky alternatives only apply to normal non-tool requests.
-    if not toolClass and requestState and requestState.item then
-        local existing = candidateExists(candidates, requestState.item)
-        if existing then
-            NBTX.populateCandidateAvailability(existing)
-
-            if existing.playerStock > 0 or existing.craftable then
-                return existing
-            end
-        end
-    end
-
+    -- Normal non-tool requests may contain multiple acceptable alternatives
+    -- (for example raw cod OR tropical fish). Always rank every candidate on
+    -- the current scan instead of pinning a zero-stock candidate merely because
+    -- Refined Storage says it is craftable. A previously selected alternative
+    -- is retained only as a tie-breaker between equally useful choices.
+    local stickyName = requestState and requestState.item or nil
     local best = nil
     local bestTier = -1
     local bestScore = -1
+    local bestIsSticky = false
 
     for _, c in ipairs(candidates) do
         if c.playerStock == nil then
@@ -3134,11 +3134,26 @@ local function chooseCandidate(request, requestState, remaining)
             score = c.warehouseStock
         end
 
-        if tier > bestTier or (tier == bestTier and score > bestScore) then
+        local isSticky = stickyName ~= nil and c.name == stickyName
+        if tier > bestTier
+            or (tier == bestTier and score > bestScore)
+            or (tier == bestTier and score == bestScore and isSticky and not bestIsSticky) then
             bestTier = tier
             bestScore = score
+            bestIsSticky = isSticky
             best = c
         end
+    end
+
+    if stickyName and best and best.name ~= stickyName then
+        writeLog(
+            "ALTERNATIVE RESELECT request=" .. tostring(request.id or "?") ..
+            " old=" .. tostring(stickyName) ..
+            " new=" .. tostring(best.name) ..
+            " tier=" .. tostring(bestTier) ..
+            " stock=" .. tostring(best.playerStock or 0) ..
+            " craftable=" .. tostring(best.craftable == true)
+        )
     end
 
     return best
