@@ -1,6 +1,6 @@
 --[[
   colony_supply.lua
-  Version 2.36
+  Version 2.37
   Minecraft 1.20.1
   CC:Tweaked + Advanced Peripherals + MineColonies + Refined Storage
 
@@ -86,16 +86,16 @@
     function correctly instead of resolving a nil global in peripheral-transfer mode.
 
   v2.29 RS status clarity:
-  - Only the exact failed request shows RS DESYNC. Other requests blocked by the
+  - Only the exact failed request shows RS STALE. Other requests blocked by the
     global extraction-safety latch show RS PAUSED.
 
   v2.30 RS recovery countdown:
-  - RS DESYNC/RS PAUSED status cells show a live seconds countdown to the next
+  - RS STALE/RS PAUSED status cells show a live seconds countdown to the next
     one-item Player-RS recovery probe. The monitor redraws the countdown every second.
   v2.31 craft/desync separation:
   - craftItem() Java exceptions are quarantined per item but no longer trigger
     the global Player-RS extraction safety latch.
-  - RS DESYNC / RS PAUSED are reserved for verified source extraction failures.
+  - RS STALE / RS PAUSED are reserved for verified source extraction failures.
   - crafttest calls the RS Bridge directly and reports the raw craftItem() result
     without modifying normal RS safety/desync state.
   - On first run, legacy safety latches created specifically by a craftItem Java
@@ -151,10 +151,23 @@
     Refined Storage cannot substitute a damaged or enchanted copy with the same name.
   - If no provably clean stored copy is available, normal RS autocrafting is preferred.
 
+  v2.37 RS stale-cache recovery:
+  - A single export=0 no longer globally pauses Supply. The affected item is isolated
+    as RS STALE while unrelated requests continue normally.
+  - Before quarantining an item, Supply invalidates its RS snapshot and performs three
+    fresh listItems() reads. A disappearing or changing stock count is treated as a
+    transient cache refresh and retried without latching stale state.
+  - RS STALE entries clear automatically when stock changes, disappears, or a retry
+    export succeeds. Retries remain rate-limited to avoid hammering the RS Bridge.
+  - Stale tracking is memory-bounded: inactive records expire and a hard maximum of
+    64 entries is enforced, preventing long-running worlds from accumulating state.
+  - The short-lived listItems() cache is keyed by stable peripheral name instead of
+    bridge wrapper tables, preventing wrapper churn from retaining old cache entries.
+
 --]]
 
-local PROGRAM_VERSION = "2.36"
-local SUITE_VERSION = "1.1.0"
+local PROGRAM_VERSION = "2.37"
+local SUITE_VERSION = "1.1.1"
 
 local Util = require("colony.lib.util")
 local SharedUI = require("colony.lib.ui")
@@ -233,11 +246,15 @@ local CONFIG = {
     craftErrorCooldownSeconds = 300,
     craftErrorMaxCooldownSeconds = 3600,
 
-    -- If Player RS reports stock but exportItem() moves 0, treat it as a
-    -- storage/extraction desync. A confirmed failure latches a GLOBAL safety
-    -- pause for Player-RS source extraction and all Colony Supply autocrafting.
-    -- Recovery is proven with a one-item name-only extraction/return probe.
-    rsDesyncProbeSeconds = 60,
+    -- If Player RS reports stock but exportItem() moves 0, do not immediately
+    -- trust either side of the contradiction. Invalidate the cached listItems()
+    -- snapshot and require several stable fresh reads before quarantining only
+    -- that item as RS STALE. Unrelated requests continue normally.
+    rsDesyncProbeSeconds = 30,
+    rsStaleVerifyReads = 3,
+    rsStaleVerifyDelay = 0.10,
+    rsStaleRetentionSeconds = 3600,
+    rsStaleMaxEntries = 64,
 
     -- MineColonies getRequests() is already the authoritative list of
     -- outstanding requests. Warehouse stock is therefore DISPLAYED but
@@ -1151,12 +1168,23 @@ end
 --   2. getItem() with NBT can lock the matching RS stack so exportItem() returns 0.
 -- Use listItems() as the source of truth for ACTUALLY STORED stock. Cache the
 -- snapshot briefly because a request scan asks for the same bridge repeatedly.
+function NBTX.rsListCacheKey(bridge)
+    if not bridge then return nil end
+    local ok, name = pcall(peripheral.getName, bridge)
+    if ok and type(name) == "string" and name ~= "" then return name end
+    -- Do not cache an unnamed wrapper. resolveRSBridges() may create fresh
+    -- wrapper tables during later scans, and using those tables as keys would
+    -- retain obsolete wrappers indefinitely.
+    return nil
+end
+
 function NBTX.getRSListItems(bridge, force)
     if not bridge then return nil end
     NBTX.rsListCache = NBTX.rsListCache or {}
 
     local now = nowMs()
-    local cached = NBTX.rsListCache[bridge]
+    local cacheKey = NBTX.rsListCacheKey(bridge)
+    local cached = cacheKey and NBTX.rsListCache[cacheKey] or nil
     if not force and type(cached) == "table"
         and type(cached.items) == "table"
         and now - (tonumber(cached.time) or 0) <= 500 then
@@ -1166,13 +1194,16 @@ function NBTX.getRSListItems(bridge, force)
     local ok, items = safeCall(bridge, "listItems")
     if not ok or type(items) ~= "table" then return nil end
 
-    NBTX.rsListCache[bridge] = { time = now, items = items }
+    if cacheKey then
+        NBTX.rsListCache[cacheKey] = { time = now, items = items }
+    end
     return items
 end
 
 function NBTX.invalidateRSList(bridge)
     if NBTX.rsListCache and bridge then
-        NBTX.rsListCache[bridge] = nil
+        local cacheKey = NBTX.rsListCacheKey(bridge)
+        if cacheKey then NBTX.rsListCache[cacheKey] = nil end
     end
 end
 
@@ -1426,7 +1457,7 @@ function NBTX.quarantineCraft(key, itemName, amount, reason)
 
     -- A craft calculation/bridge exception is isolated to this item/variant.
     -- It does NOT prove that Player-RS extraction is unhealthy, so do not
-    -- activate the global RS DESYNC / RS PAUSED safety latch here.
+    -- activate the global RS STALE / RS PAUSED safety latch here.
 
     local msg = "CRAFT ERROR: " .. tostring(itemName or key or "?") ..
         " x" .. tostring(qty) ..
@@ -1474,6 +1505,16 @@ function NBTX.rsSafetyState()
             }
             saveState()
             writeLog("RS SAFETY LEGACY CRAFT LATCH CLEARED item=" .. oldItem)
+        elseif not legacyReason:find("global safety probe", 1, true)
+            and not legacyReason:find("generic source probe", 1, true) then
+            local oldItem = tostring(state.rsSafety.item or "?")
+            state.rsSafety = {
+                latched = false,
+                lastRecovered = nowSeconds(),
+                lastDetail = "v2.37 converted legacy item latch to per-item RS STALE",
+            }
+            saveState()
+            writeLog("RS SAFETY LEGACY ITEM LATCH CLEARED item=" .. oldItem)
         end
     end
 
@@ -1565,7 +1606,8 @@ function NBTX.autoCraftSafetyAllowed()
     return not NBTX.isRSSafetyLatched()
 end
 
--- Refined Storage source-extraction desync tracking. Keep these helpers on
+-- Refined Storage source-extraction stale tracking (legacy rsDesync state name kept
+-- for upgrade compatibility). Keep these helpers on
 -- NBTX rather than adding more top-level locals; this program has previously
 -- approached Lua/CC:Tweaked's local-variable limit.
 function NBTX.desyncKey(candidate)
@@ -1599,34 +1641,35 @@ function NBTX.markRSDesync(candidate, reportedStock, requestedCount, reason, glo
     state.rsDesync[key] = {
         time = type(previous) == "table" and (tonumber(previous.time) or now) or now,
         lastProbe = now,
+        lastSeen = now,
+        failures = (type(previous) == "table" and (tonumber(previous.failures) or 0) or 0) + 1,
         item = tostring(candidate and candidate.name or "?"),
         reported = math.max(0, math.floor(tonumber(reportedStock) or 0)),
         requested = math.max(0, math.floor(tonumber(requestedCount) or 0)),
-        reason = tostring(reason or "Player RS reported stock but exportItem moved 0"),
+        reason = tostring(reason or "Player RS reported stable stock but exportItem moved 0"),
         sourceHealthy = itemSpecific,
         sourceHealthyAt = itemSpecific and tonumber(previous.sourceHealthyAt) or nil,
     }
     saveState()
 
-    -- First failure: briefly pause and independently prove general Player-RS
-    -- extraction. Once that generic probe has succeeded, later failures of the
-    -- SAME item remain isolated to that item. If the generic probe itself
-    -- fails, keep the true global latch and use the normal probe interval.
-    if not itemSpecific then
+    -- Ordinary item failures are isolated. A global latch is reserved only for
+    -- an explicit generic source-health probe which itself fails. This prevents
+    -- one stale RS item/cache entry from freezing unrelated colony requests.
+    if globalProbeFailure == true then
         NBTX.latchRSSafety(candidate, reportedStock, requestedCount,
-            reason or "Player RS reported stock but exportItem moved 0",
-            globalProbeFailure == true)
+            reason or "Player RS generic source probe returned 0", true)
     end
 
     health.transfer = false
-    health.message = "RS DESYNC: " .. tostring(candidate and candidate.name or "?") ..
+    health.message = "RS STALE: " .. tostring(candidate and candidate.name or "?") ..
         " stock=" .. tostring(reportedStock or 0) .. " export=0"
 
     writeLog(
-        "RS DESYNC DETECTED item=" .. tostring(candidate and candidate.name or "?") ..
+        "RS STALE DETECTED item=" .. tostring(candidate and candidate.name or "?") ..
         " key=" .. tostring(key) ..
         " reported=" .. tostring(reportedStock or 0) ..
         " requested=" .. tostring(requestedCount or 0) ..
+        " failures=" .. tostring(state.rsDesync[key].failures) ..
         " export=0" ..
         " reason=" .. tostring(reason or "none")
     )
@@ -1641,7 +1684,7 @@ function NBTX.noteRSDesyncProbe(candidate)
     if type(entry) == "table" then
         entry.lastProbe = nowSeconds()
         saveState()
-        writeLog("RS DESYNC PROBE item=" .. tostring(candidate and candidate.name or "?") ..
+        writeLog("RS STALE RETRY item=" .. tostring(candidate and candidate.name or "?") ..
             " amount=1")
     end
 end
@@ -1655,9 +1698,58 @@ function NBTX.clearRSDesync(candidate, detail)
 
     state.rsDesync[key] = nil
     saveState()
-    writeLog("RS DESYNC CLEARED item=" .. tostring(candidate and candidate.name or "?") ..
+    writeLog("RS STALE CLEARED item=" .. tostring(candidate and candidate.name or "?") ..
         " detail=" .. tostring(detail or "source extraction recovered"))
     return true
+end
+
+-- Bound persistent stale-item state so a long-running server cannot accumulate
+-- one table entry for every item ever encountered. This operates only on the
+-- small quarantine table and saves state only when something was actually pruned.
+function NBTX.pruneRSDesync()
+    state.rsDesync = state.rsDesync or {}
+    local now = nowSeconds()
+    local ttl = math.max(300, tonumber(CONFIG.rsStaleRetentionSeconds) or 3600)
+    local maxEntries = math.max(8, math.floor(tonumber(CONFIG.rsStaleMaxEntries) or 64))
+    local count = 0
+    local changed = false
+
+    for key, entry in pairs(state.rsDesync) do
+        if type(entry) ~= "table" then
+            state.rsDesync[key] = nil
+            changed = true
+        else
+            local touched = tonumber(entry.lastProbe or entry.lastSeen or entry.time) or 0
+            if touched > 0 and (now - touched) > ttl then
+                state.rsDesync[key] = nil
+                changed = true
+                writeLog("RS STALE EXPIRED key=" .. tostring(key))
+            else
+                count = count + 1
+            end
+        end
+    end
+
+    -- Allocate/sort an age list only in the exceptional case where the hard
+    -- bound was exceeded. Normal scans therefore create no per-entry tables.
+    if count > maxEntries then
+        local entries = {}
+        for key, entry in pairs(state.rsDesync) do
+            entries[#entries + 1] = {
+                key = key,
+                touched = tonumber(entry.lastProbe or entry.lastSeen or entry.time) or 0,
+            }
+        end
+        table.sort(entries, function(a, b) return a.touched < b.touched end)
+        for i = 1, #entries - maxEntries do
+            state.rsDesync[entries[i].key] = nil
+            changed = true
+            writeLog("RS STALE PRUNED key=" .. tostring(entries[i].key))
+        end
+    end
+
+    if changed then saveState() end
+    return changed
 end
 
 -- Start a craft job. If RS refuses the entire requested quantity, try
@@ -2661,6 +2753,49 @@ function NBTX.getPristineEquipmentVariants(bridge, candidate)
         return (tonumber(a.amount) or 0) > (tonumber(b.amount) or 0)
     end)
     return variants, total, rejected, matching
+end
+
+-- Return a fresh Player-RS stock count for a request candidate. Cache is
+-- explicitly invalidated first, so every call below corresponds to a new
+-- listItems() snapshot rather than the normal 500 ms shared scan cache.
+function NBTX.getFreshPlayerStock(candidate)
+    NBTX.invalidateRSList(playerRS)
+    if type(candidate) == "table" and candidate.requiresPristine then
+        local _, cleanStock = NBTX.getPristineEquipmentVariants(playerRS, candidate)
+        return math.max(0, tonumber(cleanStock) or 0)
+    end
+    return math.max(0, tonumber(NBTX.getRSAmountByCandidate(playerRS, candidate)) or 0)
+end
+
+-- Verify an apparent export=0 contradiction without retaining snapshots. The
+-- stock value must remain positive and unchanged across all fresh reads to be
+-- classified as an RS STALE item. Any change means RS is actively refreshing,
+-- so the caller simply retries on a later scan instead of creating a latch.
+function NBTX.confirmRSStale(candidate, baselineStock)
+    local reads = math.max(2, math.min(5, math.floor(tonumber(CONFIG.rsStaleVerifyReads) or 3)))
+    local delay = math.max(0, math.min(1, tonumber(CONFIG.rsStaleVerifyDelay) or 0.10))
+    local baseline = math.max(0, math.floor(tonumber(baselineStock) or 0))
+    local previous = baseline
+    local current = baseline
+    local samples = ""
+
+    for i = 1, reads do
+        current = math.floor(NBTX.getFreshPlayerStock(candidate))
+        samples = samples .. (i > 1 and "," or "") .. tostring(current)
+
+        if current <= 0 then
+            return false, current, "fresh stock disappeared; samples=" .. samples
+        end
+        if previous > 0 and current ~= previous then
+            return false, current, "fresh stock changed; samples=" .. samples
+        end
+
+        previous = current
+        if i < reads and delay > 0 then sleep(delay) end
+    end
+
+    return true, current, "stable positive stock across " .. tostring(reads) ..
+        " fresh reads; samples=" .. samples
 end
 
 function NBTX.populateCandidateAvailability(candidate)
@@ -3687,6 +3822,7 @@ end
 
 local STATUS_PRIORITY = {
     ERROR = 1,
+    ["RS STALE"] = 2,
     ["RS DESYNC"] = 2,
     ["RS PAUSED"] = 3,
     BLOCKED = 4,
@@ -3702,6 +3838,7 @@ local STATUS_PRIORITY = {
 
 local STATUS_COLORS = {
     ERROR = colors.red,
+    ["RS STALE"] = colors.orange,
     ["RS DESYNC"] = colors.orange,
     ["RS PAUSED"] = colors.yellow,
     BLOCKED = colors.red,
@@ -3742,7 +3879,7 @@ local function addRow(row)
     if row.status == "MISSING" then targetStats.missing = targetStats.missing + 1 end
     if row.status == "CRAFTING" then targetStats.crafting = targetStats.crafting + 1 end
     if row.status == "READY" or row.status == "TRANSFER" then targetStats.ready = targetStats.ready + 1 end
-    if row.status == "ERROR" or row.status == "BLOCKED" or row.status == "RS DESYNC" then
+    if row.status == "ERROR" or row.status == "BLOCKED" or row.status == "RS STALE" or row.status == "RS DESYNC" then
         targetStats.errors = targetStats.errors + 1
     end
 end
@@ -4081,7 +4218,7 @@ local function processSingleRequest(request)
         -- while reporting the per-request cause accurately.
         if desyncEntry then
             local _, _, itemDue, itemWait = NBTX.getRSDesync(candidate)
-            row.status = "RS DESYNC"
+            row.status = "RS STALE"
             row.rsCountdown = itemDue and 0 or itemWait
             row.message = "Player RS extraction failed for this item; " ..
                 (due and "generic recovery probe pending" or ("generic probe in " .. tostring(wait) .. "s"))
@@ -4107,22 +4244,29 @@ local function processSingleRequest(request)
     ------------------------------------------------------------------
     local itemDesync, _, itemRetryDue, itemRetryWait = NBTX.getRSDesync(candidate)
     if itemDesync then
+        local staleReported = math.max(0, math.floor(tonumber(itemDesync.reported) or 0))
         if playerStock <= 0 then
             -- The stock that originally failed extraction is no longer present.
-            -- The request may now legitimately need crafting, so retire the stale
-            -- source-desync record instead of blocking that craft forever.
+            -- The request may now legitimately need crafting.
             NBTX.clearRSDesync(candidate, "reported source stock no longer present")
+            itemDesync = nil
+        elseif staleReported > 0 and math.floor(playerStock) ~= staleReported then
+            -- A quantity change proves the snapshot is no longer the same stale
+            -- condition. Clear immediately and let this scan retry normally.
+            NBTX.clearRSDesync(candidate,
+                "reported source stock changed " .. tostring(staleReported) ..
+                "->" .. tostring(math.floor(playerStock)))
+            itemDesync = nil
         elseif not itemRetryDue then
-            row.status = "RS DESYNC"
+            row.status = "RS STALE"
             row.rsCountdown = itemRetryWait
-            row.message = "Item-specific Player RS export failure; retry in " ..
-                tostring(itemRetryWait) .. "s" ..
-                (candidate.craftable and "; craftable once stored stock is gone" or "")
+            row.message = "Player RS item appears stale; retry in " ..
+                tostring(itemRetryWait) .. "s; other requests continue"
             addRow(row)
             return
         else
             row.rsCountdown = 0
-            writeLog("RS ITEM RETRY due item=" .. tostring(candidate.name) ..
+            writeLog("RS STALE RETRY due item=" .. tostring(candidate.name) ..
                 " stock=" .. tostring(playerStock))
         end
     end
@@ -4263,21 +4407,40 @@ local function processSingleRequest(request)
                 )
 
             elseif transferState == "source_export_zero" then
-                -- playerStock was positive before this real export attempt. Any
-                -- export=0 is therefore a source-health fault, even if the next
-                -- inventory query fluctuates to zero. Never craft from this path.
-                NBTX.markRSDesync(
-                    candidate,
-                    math.max(tonumber(freshStock) or 0, tonumber(playerStock) or 0),
-                    remaining,
-                    err or "Player RS export returned 0 after positive stock reading"
-                )
-                row.status = "RS DESYNC"
-                local _, _, retryDue, retryWait = NBTX.getRSDesync(candidate)
-                row.rsCountdown = retryDue and 0 or retryWait
-                row.message = itemDesync and
-                    "Item-specific Player RS export still returns 0; retry timer reset" or
-                    "Player RS extraction moved 0; generic source probe scheduled"
+                -- A real export contradicted the positive stock snapshot. Do not
+                -- globally latch on one contradiction. First require multiple
+                -- stable, uncached listItems() reads. If RS changes underneath us,
+                -- treat it as a transient refresh and retry on the next scan.
+                local baseline = math.max(tonumber(freshStock) or 0, tonumber(playerStock) or 0)
+                local staleConfirmed, verifiedStock, verifyDetail =
+                    NBTX.confirmRSStale(candidate, baseline)
+
+                if staleConfirmed then
+                    NBTX.markRSDesync(
+                        candidate,
+                        verifiedStock,
+                        remaining,
+                        err or verifyDetail or "Player RS export returned 0 with stable positive stock"
+                    )
+                    row.status = "RS STALE"
+                    local _, _, retryDue, retryWait = NBTX.getRSDesync(candidate)
+                    row.rsCountdown = retryDue and 0 or retryWait
+                    local entry = select(1, NBTX.getRSDesync(candidate))
+                    local failures = type(entry) == "table" and (tonumber(entry.failures) or 1) or 1
+                    row.message = "Player RS reports " .. tostring(verifiedStock) ..
+                        " but export moved 0; stale retry " .. tostring(failures) ..
+                        "; other requests continue" ..
+                        (failures >= 3 and "; reseat RS storage disk if persistent" or "")
+                else
+                    NBTX.clearRSDesync(candidate, verifyDetail or "fresh RS stock changed")
+                    row.status = "WAITING"
+                    row.rsCountdown = nil
+                    row.message = "RS inventory refreshed after export=0; retrying next scan"
+                    writeLog("RS STALE NOT CONFIRMED item=" .. tostring(candidate.name) ..
+                        " baseline=" .. tostring(baseline) ..
+                        " verified=" .. tostring(verifiedStock) ..
+                        " detail=" .. tostring(verifyDetail or "none"))
+                end
 
             else
                 -- Defensive fallback: an unknown transfer result must never cause
@@ -4376,6 +4539,7 @@ local function cleanupOldRequestState(activeIds)
             end
         end
     end
+    NBTX.pruneRSDesync()
 end
 
 local function scanAndProcess()
@@ -4549,9 +4713,10 @@ function NBTX.dashboardStatusText(status, width, row)
     status = tostring(status or "")
     width = math.max(1, math.floor(tonumber(width) or #status))
 
-    if status == "RS PAUSED" or status == "RS DESYNC" then
+    if status == "RS PAUSED" or status == "RS STALE" or status == "RS DESYNC" then
         local due, wait
-        if status == "RS DESYNC" and type(row) == "table" and row.rsCountdown ~= nil then
+        if (status == "RS STALE" or status == "RS DESYNC")
+            and type(row) == "table" and row.rsCountdown ~= nil then
             wait = math.max(0, math.floor(tonumber(row.rsCountdown) or 0))
             due = wait <= 0
         else
@@ -4561,7 +4726,7 @@ function NBTX.dashboardStatusText(status, width, row)
         local full = status .. suffix
         if #full <= width then return full end
 
-        local shortBase = status == "RS PAUSED" and "PAUSED" or "DESYNC"
+        local shortBase = status == "RS PAUSED" and "PAUSED" or "STALE"
         local short = shortBase .. suffix
         if #short <= width then return short end
         return Util.clip(short, width)
@@ -6406,7 +6571,7 @@ local function printCraftDiagnostics()
     local safety = NBTX.rsSafetyState()
     add("RS safety: " .. (safety.latched and "PAUSED" or "healthy"))
     add("Player bridge: " .. tostring(playerBridgeResolvedName or "?"))
-    add("Craft policy: VERIFY EXTRACTION FIRST; RS DESYNC NEVER CRAFTS")
+    add("Craft policy: VERIFY EXTRACTION FIRST; RS STALE NEVER CRAFTS")
 
     local quarantined = 0
     for key, entry in pairs(state.craftFailures or {}) do
@@ -6435,10 +6600,13 @@ local function printCraftDiagnostics()
                 nbtFilter = key:match("|NBT|(.*)$"),
             }
             local _, _, due, wait = NBTX.getRSDesync(candidate)
-            add("RS DESYNC: " .. tostring(entry.item or key) ..
+            local failures = tonumber(entry.failures) or 1
+            add("RS STALE: " .. tostring(entry.item or key) ..
                 " reported=" .. tostring(entry.reported or "?") ..
-                " probe=" .. (due and "DUE" or (tostring(wait) .. "s")))
+                " failures=" .. tostring(failures) ..
+                " retry=" .. (due and "DUE" or (tostring(wait) .. "s")))
             add("  " .. tostring(entry.reason or "source export returned 0"))
+            if failures >= 3 then add("  Recovery: reseat the Player RS storage disk if this persists.") end
         end
     end
     if desynced > 0 then
