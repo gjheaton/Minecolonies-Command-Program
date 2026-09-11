@@ -1,6 +1,6 @@
 --[[
   colony_supply.lua
-  Version 2.37
+  Version 2.38
   Minecraft 1.20.1
   CC:Tweaked + Advanced Peripherals + MineColonies + Refined Storage
 
@@ -164,10 +164,30 @@
   - The short-lived listItems() cache is keyed by stable peripheral name instead of
     bridge wrapper tables, preventing wrapper churn from retaining old cache entries.
 
+  v2.38 transfer confirmation hardening:
+  - Import success is no longer trusted solely from the RS Bridge return value.
+  - When the modem-visible transfer barrel is available, Supply measures the requested
+    item before and after each import and credits only the quantity that physically
+    disappeared from the barrel.
+  - A positive RS Bridge return with no matching barrel movement is treated as a false
+    positive, left pending, and retried instead of being written to transfer history.
+  - Verification uses only scalar locals during the existing bounded retry loop; it
+    adds no persistent snapshots, queues, timers, or unbounded memory structures.
+
+  v2.39 overflow threshold correctness and visibility:
+  - The configured OVERFLOW value is now the hard return floor. Overflow return will
+    never drain an item below that displayed threshold.
+  - Active MineColonies demand may raise the temporary safe floor above OVERFLOW; this
+    is reported as HELD instead of silently looking like the over-limit check failed.
+  - Settings highlight over-limit current stock, and overflow diagnostics now show the
+    effective floor plus transfer-path blockers such as a non-empty shared barrel.
+  - Overflow transfer failures are no longer overwritten by a generic ONLINE message
+    at the end of the same scan. No new persistent tables, timers, or queues are added.
+
 --]]
 
-local PROGRAM_VERSION = "2.37"
-local SUITE_VERSION = "1.1.2"
+local PROGRAM_VERSION = "2.39"
+local SUITE_VERSION = "1.1.4"
 
 local Util = require("colony.lib.util")
 local SharedUI = require("colony.lib.ui")
@@ -3108,8 +3128,57 @@ local function retryImport(importFunction, itemName, count, destinationLabel)
     local lastErr = nil
 
     for attempt = 1, attempts do
-        local moved, err = importFunction(itemName, count)
-        moved = tonumber(moved) or 0
+        -- If the transfer barrel is visible over the wired modem, use it as the
+        -- authoritative transaction boundary. Advanced Peripherals/RS can return
+        -- a positive import count even when the inventory movement has not actually
+        -- occurred. Measuring the barrel prevents those false positives from being
+        -- credited to requests or transfer history.
+        local beforeBarrel = chestItemCount(itemName)
+
+        local reported, err = importFunction(itemName, count)
+        reported = math.max(0, math.floor(tonumber(reported) or 0))
+        local moved = reported
+
+        if beforeBarrel ~= nil then
+            -- Give the inventory/peripheral view the same short settling period used
+            -- by the normal transfer path, then verify the physical barrel delta.
+            transferSleep(CONFIG.transferSettleDelay)
+            local afterBarrel = chestItemCount(itemName)
+
+            if afterBarrel ~= nil then
+                local physicalMoved = math.max(0, beforeBarrel - afterBarrel)
+                physicalMoved = math.min(physicalMoved, math.max(0, math.floor(tonumber(count) or 0)))
+
+                if physicalMoved ~= reported then
+                    writeLog(
+                        "IMPORT VERIFY mismatch item=" .. tostring(itemName) ..
+                        " destination=" .. tostring(destinationLabel) ..
+                        " reported=" .. tostring(reported) ..
+                        " physical=" .. tostring(physicalMoved) ..
+                        " barrel=" .. tostring(beforeBarrel) .. "->" .. tostring(afterBarrel)
+                    )
+                end
+
+                moved = physicalMoved
+                if reported > 0 and moved <= 0 then
+                    lastErr = "RS Bridge reported " .. tostring(reported) ..
+                        " imported, but transfer barrel did not change"
+                elseif moved > 0 then
+                    err = nil
+                end
+            else
+                -- We began with a verifiable barrel, so do not downgrade to trusting
+                -- the bridge return value if the post-import observation disappears.
+                moved = 0
+                lastErr = "Transfer barrel verification unavailable after import"
+                writeLog(
+                    "IMPORT VERIFY unavailable-after item=" .. tostring(itemName) ..
+                    " destination=" .. tostring(destinationLabel) ..
+                    " reported=" .. tostring(reported) ..
+                    " barrelBefore=" .. tostring(beforeBarrel)
+                )
+            end
+        end
 
         if moved > 0 then
             if attempt > 1 then
@@ -3121,11 +3190,12 @@ local function retryImport(importFunction, itemName, count, destinationLabel)
             return moved, nil
         end
 
-        lastErr = err
+        if not lastErr then lastErr = err end
         writeLog("IMPORT retry " .. tostring(attempt) .. "/" .. tostring(attempts) ..
             " moved=0 item=" .. tostring(itemName) ..
             " destination=" .. tostring(destinationLabel) ..
-            " reason=" .. tostring(err or "none"))
+            " reported=" .. tostring(reported) ..
+            " reason=" .. tostring(lastErr or err or "none"))
 
         if attempt < attempts then
             transferSleep(CONFIG.transferRetryDelay)
@@ -3989,33 +4059,72 @@ local function getActiveProtectedDemand()
     return demand
 end
 
+-- Return scalar overflow metrics without allocating per-item tracking tables.
+-- The configured OVERFLOW threshold is always the minimum floor. Active demand
+-- may temporarily raise that floor so overflow return cannot strip stock needed
+-- for an in-flight colony request.
+local function overflowMetrics(row, activeDemand)
+    local current = math.max(0, tonumber(row and row.current) or 0)
+    local target = math.max(0, tonumber(row and row.target) or 0)
+    local overflowFloor = math.max(target, tonumber(row and row.overflow) or target)
+    local protectedDemand = math.max(0,
+        tonumber(activeDemand and row and activeDemand[row.item]) or 0)
+    local demandFloor = target + protectedDemand
+    local safeFloor = math.max(overflowFloor, demandFloor)
+    local overLimit = current > overflowFloor
+    local returnable = overLimit and math.max(0, current - safeFloor) or 0
+    return protectedDemand, overflowFloor, demandFloor, safeFloor, overLimit, returnable
+end
+
+local function passiveOverflowReason(err)
+    err = tostring(err or "")
+    return err == ""
+        or err == "disabled"
+        or err == "no eligible overflow"
+        or err:find("^held for active demand", 1, false) ~= nil
+end
+
 local function processWarehouseOverflow()
     if not (state.settings and state.settings.overflowEnabled == true) then return 0, "disabled" end
     if state.pending then return 0, "pending transfer" end
 
     local activeDemand = getActiveProtectedDemand()
     local best = nil
+    local held = nil
 
     for _, row in ipairs(settingsRows) do
-        local protectedDemand = activeDemand[row.item] or 0
-        local safeFloor = row.target + protectedDemand
+        local protectedDemand, overflowFloor, demandFloor, safeFloor, overLimit, returnable =
+            overflowMetrics(row, activeDemand)
 
-        -- The player's configured overflow threshold remains Target + 2 stacks.
-        -- If there is active demand, never drain below Target + that demand.
-        if row.current > row.overflow then
-            local excess = row.current - safeFloor
-            if excess > 0 and (not best or excess > best.excess) then
+        if overLimit and returnable > 0 then
+            if not best or returnable > best.excess then
                 best = {
                     row = row,
-                    excess = excess,
+                    excess = returnable,
                     protectedDemand = protectedDemand,
+                    overflowFloor = overflowFloor,
+                    demandFloor = demandFloor,
                     safeFloor = safeFloor,
                 }
             end
+        elseif overLimit and protectedDemand > 0 and not held then
+            held = {
+                row = row,
+                protectedDemand = protectedDemand,
+                overflowFloor = overflowFloor,
+                demandFloor = demandFloor,
+                safeFloor = safeFloor,
+            }
         end
     end
 
-    if not best then return 0, "no eligible overflow" end
+    if not best then
+        if held then
+            return 0, "held for active demand: " .. tostring(held.row.item) ..
+                " floor=" .. tostring(math.floor(held.safeFloor))
+        end
+        return 0, "no eligible overflow"
+    end
 
     local amount = math.min(best.excess, tonumber(CONFIG.maxOverflowChunk) or 64)
     local moved, err = performOverflowReturn(best.row.item, amount)
@@ -4024,6 +4133,8 @@ local function processWarehouseOverflow()
         writeLog("OVERFLOW returned " .. moved .. " " .. best.row.item ..
             " current=" .. tostring(best.row.current) ..
             " target=" .. tostring(best.row.target) ..
+            " overflowFloor=" .. tostring(best.overflowFloor) ..
+            " safeFloor=" .. tostring(best.safeFloor) ..
             " protectedDemand=" .. tostring(best.protectedDemand))
         buildSettingsRows()
     elseif err then
@@ -4623,8 +4734,10 @@ local function scanAndProcess()
 
     buildSettingsRows()
     local overflowMoved = 0
+    local overflowErr = nil
     if not state.pending and not state.probeCleanup and not NBTX.isRSSafetyLatched() then
-        overflowMoved = select(1, processWarehouseOverflow()) or 0
+        overflowMoved, overflowErr = processWarehouseOverflow()
+        overflowMoved = tonumber(overflowMoved) or 0
     end
     saveState()
 
@@ -4670,14 +4783,26 @@ local function scanAndProcess()
         else
             -- Hardware is not enough: transfer health remains ONLINE only when
             -- no source-safety or transfer failure was detected this scan.
-            health.transfer = health.playerRS and health.colonyRS
+            local overflowFailure = overflowErr and not passiveOverflowReason(overflowErr)
 
-            if requestError then
-                health.message = "REQUEST ERROR: " ..
-                    tostring(requestError.item or requestError.displayName or "?") ..
-                    " - " .. tostring(requestError.message or "unknown reason")
-            elseif overflowMoved <= 0 and health.transfer then
-                health.message = "Online"
+            if overflowFailure then
+                -- performOverflowReturn() sets the most specific transfer message
+                -- (for example BARREL BLOCKED). Preserve it instead of replacing
+                -- it with the generic Online text at the end of this scan.
+                health.transfer = false
+                if not health.message or health.message == "" or health.message == "Online" then
+                    health.message = "OVERFLOW BLOCKED: " .. tostring(overflowErr)
+                end
+            else
+                health.transfer = health.playerRS and health.colonyRS
+
+                if requestError then
+                    health.message = "REQUEST ERROR: " ..
+                        tostring(requestError.item or requestError.displayName or "?") ..
+                        " - " .. tostring(requestError.message or "unknown reason")
+                elseif overflowMoved <= 0 and health.transfer then
+                    health.message = "Online"
+                end
             end
         end
     end
@@ -5150,13 +5275,17 @@ local function renderSettingsMonitor()
         monitorWrite(columns.sep2X, y, "|", UI.muted, bg)
         monitorWrite(columns.overflowX, y, padRight(formatNumber(row.overflow), columns.overflowW), UI.info, bg)
         monitorWrite(columns.sep3X, y, "|", UI.muted, bg)
-        monitorWrite(columns.currentX, y, padRight(formatNumber(row.current), columns.currentW), UI.text, bg)
+        local currentColor =
+            (state.settings and state.settings.overflowEnabled == true and
+             (tonumber(row.current) or 0) > (tonumber(row.overflow) or 0))
+            and UI.warn or UI.text
+        monitorWrite(columns.currentX, y, padRight(formatNumber(row.current), columns.currentW), currentColor, bg)
 
         y = y + 1
     end
 
     local footer =
-        "Touch row to edit | General " ..
+        "Touch row to edit | Orange CURRENT = over limit | General " ..
         formatNumber(CONFIG.defaultWarehouseTarget) ..
         " | Building " ..
         formatNumber(CONFIG.defaultBuildingTarget)
@@ -6956,37 +7085,67 @@ local function printOverflowDiagnostics()
     local activeDemand = getActiveProtectedDemand()
     local enabled = state.settings and state.settings.overflowEnabled == true
     add("Overflow Return: " .. (enabled and "ON" or "OFF"))
-    add("Threshold: Target + " .. tostring(CONFIG.overflowStacks) .. " stacks")
+    add("Configured limit: Target + " .. tostring(CONFIG.overflowStacks) .. " stacks")
+
+    if state.pending then
+        add("Transfer path: BLOCKED - pending " ..
+            tostring(state.pending.kind or "transfer") .. " of " ..
+            tostring(state.pending.item or "unknown item"))
+    else
+        local empty = chestIsEmpty()
+        if empty == false then
+            add("Transfer path: BLOCKED - barrel contains " ..
+                tostring(chestContentsSummary(2) or "items"))
+        elseif empty == true then
+            add("Transfer path: READY - barrel empty")
+        else
+            add("Transfer path: UNKNOWN - barrel inspection unavailable")
+        end
+    end
     add("")
 
-    -- Fixed-width columns sized for the normal 5x3 monitor. The generic
-    -- viewer wraps only if a smaller monitor is used.
-    add(string.format("%-24s %8s %8s %8s %8s %10s",
-        "ITEM", "CURRENT", "TARGET", "OVERFLOW", "PROTECT", "ELIGIBLE"))
-    add(string.rep("-", 72))
+    add(string.format("%-20s %7s %7s %7s %7s %12s",
+        "ITEM", "CURRENT", "TARGET", "LIMIT", "FLOOR", "RESULT"))
+    add(string.rep("-", 68))
 
     local eligibleCount = 0
+    local heldCount = 0
     for _, row in ipairs(settingsRows) do
-        local protect = activeDemand[row.item] or 0
-        local safeFloor = row.target + protect
-        local excess = math.max(0, row.current - safeFloor)
-        local eligible = enabled and row.current > row.overflow and excess > 0
-        if eligible then eligibleCount = eligibleCount + 1 end
-        add(string.format("%-24s %8d %8d %8d %8d %10s",
-            truncateText(row.displayName, 24),
+        local protect, overflowFloor, _, safeFloor, overLimit, returnable =
+            overflowMetrics(row, activeDemand)
+        local result
+        if not enabled then
+            result = "OFF"
+        elseif not overLimit then
+            result = "NO"
+        elseif returnable > 0 then
+            eligibleCount = eligibleCount + 1
+            result = "YES " .. tostring(math.floor(returnable))
+        elseif protect > 0 then
+            heldCount = heldCount + 1
+            result = "HELD " .. tostring(math.floor(protect))
+        else
+            result = "NO"
+        end
+
+        add(string.format("%-20s %7d %7d %7d %7d %12s",
+            truncateText(row.displayName, 20),
             math.floor(row.current or 0),
             math.floor(row.target or 0),
-            math.floor(row.overflow or 0),
-            math.floor(protect),
-            eligible and ("YES " .. tostring(excess)) or "NO"))
+            math.floor(overflowFloor or 0),
+            math.floor(safeFloor or 0),
+            result))
     end
 
     add("")
     add("Eligible items: " .. eligibleCount)
+    if heldCount > 0 then add("Held for active demand: " .. heldCount) end
     if not enabled then
         add("Overflow Return is OFF. Enable it on Settings.")
-    elseif eligibleCount == 0 then
-        add("Nothing exceeds overflow after protected demand.")
+    elseif eligibleCount == 0 and heldCount == 0 then
+        add("Nothing exceeds the configured overflow limit.")
+    elseif eligibleCount == 0 and heldCount > 0 then
+        add("Over-limit stock exists, but active demand raises the safe floor.")
     else
         add("Normal mode returns up to " .. tostring(CONFIG.maxOverflowChunk) .. " items per scan.")
     end
