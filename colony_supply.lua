@@ -1,6 +1,6 @@
 --[[
   colony_supply.lua
-  Version 2.48
+  Version 2.49
   Minecraft 1.20.1
   CC:Tweaked + Advanced Peripherals + MineColonies + Refined Storage
 
@@ -252,10 +252,18 @@
   - The workaround is limited to pristine-equipment requests with rejected stored copies;
     ordinary item crafting remains registry-name-only.
   - If no safe craftable fingerprint is exposed, Supply falls back to the existing path.
+
+  v2.49 equipment-pattern fingerprint recovery:
+  - Distinguishes stored equipment NBT safety from crafting-pattern identity. Stored
+    opaque-NBT equipment remains unusable unless pristine can be proven, but a unique
+    fingerprint exposed by a craftable pattern may be used to start a clean equipment craft.
+  - Falls back to getPattern() outputs when listCraftableItems() is unavailable/incomplete.
+  - Refuses to guess when multiple distinct craftable fingerprints exist for the same item.
+  - Request diagnostics no longer abort when MineColonies returns repeated/shared tables.
 --]]
 
-local PROGRAM_VERSION = "2.48"
-local SUITE_VERSION = "1.1.13"
+local PROGRAM_VERSION = "2.49"
+local SUITE_VERSION = "1.1.14"
 
 local Util = require("colony.lib.util")
 local SharedUI = require("colony.lib.ui")
@@ -1479,46 +1487,75 @@ function NBTX.getPristineCraftableFingerprint(name)
         return nil, "player bridge unavailable"
     end
 
-    local ok, craftables = safeCall(playerRS, "listCraftableItems")
-    if not ok or type(craftables) ~= "table" then
-        return nil, "listCraftableItems unavailable"
+    -- IMPORTANT: stored-item NBT and craftable-pattern NBT are different safety
+    -- questions. An opaque NBT hash on a STORED item cannot prove that item is
+    -- pristine, so storedEquipmentStackIsPristine() must continue rejecting it.
+    -- For a CRAFTABLE pattern, however, the fingerprint identifies the recipe
+    -- output itself. If there is exactly one craftable output fingerprint for the
+    -- requested registry name, using it is safer than falling back to an ambiguous
+    -- name-only craft that may collide with an enchanted/damaged stored variant.
+    local distinct = {}
+    local ordered = {}
+
+    local function consider(item, source)
+        if type(item) ~= "table" or item.name ~= name then return nil end
+        local fp = item.fingerprint
+        if type(fp) ~= "string" or fp == "" then return nil end
+
+        if not distinct[fp] then
+            distinct[fp] = source or "craftable fingerprint"
+            ordered[#ordered + 1] = fp
+        end
+
+        -- Prefer fingerprints whose metadata explicitly proves a clean/default
+        -- output. This remains the strongest signal when AP exposes readable NBT.
+        local raw = serializedNBTText(item.nbt)
+        local lower = raw:lower()
+        local damage = tonumber(item.damage or item.Damage)
+            or tonumber(lower:match("damage%s*=%s*(-?%d+)"))
+            or tonumber(lower:match("damage%s*:%s*(-?%d+)"))
+        local customized = lower:find("enchant", 1, true)
+            or lower:find("display", 1, true)
+            or lower:find("customname", 1, true)
+            or lower:find("custom_name", 1, true)
+            or lower:find("lore", 1, true)
+            or lower:find("stored_enchant", 1, true)
+            or lower:find("unbreakable", 1, true)
+            or lower:find("trim", 1, true)
+
+        local noNBT = raw == "" or raw == "{}" or raw == "nil"
+        local explicitClean = damage ~= nil and damage == 0 and not customized
+        if not customized and (noNBT or explicitClean) then
+            return fp, (source or "craftable") .. " clean fingerprint"
+        end
+        return nil
     end
 
-    for _, item in pairs(craftables) do
-        if type(item) == "table"
-            and item.name == name
-            and type(item.fingerprint) == "string"
-            and item.fingerprint ~= "" then
-
-            local raw = serializedNBTText(item.nbt)
-            local lower = raw:lower()
-            local damage = tonumber(item.damage or item.Damage)
-                or tonumber(lower:match("damage%s*=%s*(-?%d+)"))
-                or tonumber(lower:match("damage%s*:%s*(-?%d+)"))
-
-            local customized = false
-            local unsafeWords = {
-                "enchant", "display", "customname", "custom_name",
-                "lore", "stored_enchant", "unbreakable", "trim",
-            }
-            for _, word in ipairs(unsafeWords) do
-                if lower:find(word, 1, true) then
-                    customized = true
-                    break
-                end
-            end
-
-            -- Prefer outputs with no NBT at all. Also accept explicit default
-            -- durability metadata as long as no customization is present.
-            local noNBT = raw == "" or raw == "{}" or raw == "nil"
-            local explicitClean = damage ~= nil and damage == 0 and not customized
-            if not customized and (noNBT or explicitClean) then
-                return item.fingerprint, "listCraftableItems fingerprint"
-            end
+    local ok, craftables = safeCall(playerRS, "listCraftableItems")
+    if ok and type(craftables) == "table" then
+        for _, item in pairs(craftables) do
+            local fp, why = consider(item, "listCraftableItems")
+            if fp then return fp, why end
         end
     end
 
-    return nil, "no safe craftable fingerprint"
+    -- Some AP 0.7 builds expose getPattern() even when listCraftableItems() is
+    -- missing or incomplete. Pattern outputs may carry the exact craft fingerprint.
+    local patternOK, pattern = safeCall(playerRS, "getPattern", { name = name })
+    if patternOK and type(pattern) == "table" and type(pattern.outputs) == "table" then
+        for _, item in pairs(pattern.outputs) do
+            local fp, why = consider(item, "getPattern")
+            if fp then return fp, why end
+        end
+    end
+
+    if #ordered == 1 then
+        return ordered[1], tostring(distinct[ordered[1]]) .. " unique fingerprint"
+    elseif #ordered > 1 then
+        return nil, "multiple craftable fingerprints; refusing to guess"
+    end
+
+    return nil, "no craftable fingerprint exposed"
 end
 
 function NBTX.isCraftable(name)
@@ -2103,13 +2140,21 @@ function NBTX.submitCandidateCraft(candidate, count)
         local craftFingerprint
         if candidate.requiresPristine
             and (tonumber(candidate.rejectedEquipmentStock) or 0) > 0 then
-            craftFingerprint = select(1,
-                NBTX.getPristineCraftableFingerprint(candidate.name))
+            local fingerprintReason
+            craftFingerprint, fingerprintReason =
+                NBTX.getPristineCraftableFingerprint(candidate.name)
             if craftFingerprint then
                 writeLog(
                     "CRAFT pristine fingerprint item=" .. tostring(candidate.name) ..
                     " rejectedStored=" .. tostring(candidate.rejectedEquipmentStock) ..
-                    " fingerprint=" .. tostring(craftFingerprint)
+                    " fingerprint=" .. tostring(craftFingerprint) ..
+                    " source=" .. tostring(fingerprintReason or "unknown")
+                )
+            else
+                writeLog(
+                    "CRAFT pristine fingerprint unavailable item=" .. tostring(candidate.name) ..
+                    " rejectedStored=" .. tostring(candidate.rejectedEquipmentStock) ..
+                    " reason=" .. tostring(fingerprintReason or "unknown")
                 )
             end
         end
@@ -3323,7 +3368,12 @@ local function getColonyRequests()
     if CONFIG.debug then
         local h = fs.open(CONFIG.debugRequestsFile, "w")
         if h then
-            h.write(textutils.serialize(requests))
+            local serializedOK, serialized = pcall(textutils.serialize, requests)
+            if serializedOK then
+                h.write(serialized)
+            else
+                h.write("Raw request serialization omitted: " .. tostring(serialized))
+            end
             h.close()
         end
     end
@@ -6723,8 +6773,13 @@ function DIAG.printRequestDiagnostics()
             end
         end
         add("Raw:")
-        local raw = textutils.serialize(request)
-        for rawLine in tostring(raw):gmatch("[^\n]+") do add("  " .. rawLine) end
+        local rawOK, raw = pcall(textutils.serialize, request)
+        if rawOK then
+            for rawLine in tostring(raw):gmatch("[^\n]+") do add("  " .. rawLine) end
+        else
+            add("  <omitted: repeated/shared table references>")
+            add("  " .. tostring(raw))
+        end
         add("")
     end
 
