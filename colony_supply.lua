@@ -1,6 +1,6 @@
 --[[
   colony_supply.lua
-  Version 2.45
+  Version 2.48
   Minecraft 1.20.1
   CC:Tweaked + Advanced Peripherals + MineColonies + Refined Storage
 
@@ -243,10 +243,19 @@
   - This avoids the observed Advanced Peripherals/Refined Storage stale-disk condition
     triggered by interleaving a partial export with crafting the same item.
   - Adds no queue, cache, timer, or persistent allocation.
+
+  v2.48 pristine-equipment craft fingerprint workaround:
+  - When damaged/enchanted equipment with the requested registry name is already stored,
+    Advanced Peripherals/Refined Storage can refuse a name-only craft even though the
+    same recipe crafts normally from the RS Grid. Supply now asks listCraftableItems()
+    for the clean pattern output fingerprint and submits that exact fingerprint instead.
+  - The workaround is limited to pristine-equipment requests with rejected stored copies;
+    ordinary item crafting remains registry-name-only.
+  - If no safe craftable fingerprint is exposed, Supply falls back to the existing path.
 --]]
 
-local PROGRAM_VERSION = "2.47"
-local SUITE_VERSION = "1.1.12"
+local PROGRAM_VERSION = "2.48"
+local SUITE_VERSION = "1.1.13"
 
 local Util = require("colony.lib.util")
 local SharedUI = require("colony.lib.ui")
@@ -1462,6 +1471,56 @@ function NBTX.getCraftability(name)
     return false, "not reported craftable"
 end
 
+-- Return a fingerprint for a normal/pristine craftable output without calling
+-- getItem(). This is used only to disambiguate equipment crafting when an
+-- enchanted/damaged copy with the same registry name is already stored.
+function NBTX.getPristineCraftableFingerprint(name)
+    if not playerRS or type(name) ~= "string" or name == "" then
+        return nil, "player bridge unavailable"
+    end
+
+    local ok, craftables = safeCall(playerRS, "listCraftableItems")
+    if not ok or type(craftables) ~= "table" then
+        return nil, "listCraftableItems unavailable"
+    end
+
+    for _, item in pairs(craftables) do
+        if type(item) == "table"
+            and item.name == name
+            and type(item.fingerprint) == "string"
+            and item.fingerprint ~= "" then
+
+            local raw = serializedNBTText(item.nbt)
+            local lower = raw:lower()
+            local damage = tonumber(item.damage or item.Damage)
+                or tonumber(lower:match("damage%s*=%s*(-?%d+)"))
+                or tonumber(lower:match("damage%s*:%s*(-?%d+)"))
+
+            local customized = false
+            local unsafeWords = {
+                "enchant", "display", "customname", "custom_name",
+                "lore", "stored_enchant", "unbreakable", "trim",
+            }
+            for _, word in ipairs(unsafeWords) do
+                if lower:find(word, 1, true) then
+                    customized = true
+                    break
+                end
+            end
+
+            -- Prefer outputs with no NBT at all. Also accept explicit default
+            -- durability metadata as long as no customization is present.
+            local noNBT = raw == "" or raw == "{}" or raw == "nil"
+            local explicitClean = damage ~= nil and damage == 0 and not customized
+            if not customized and (noNBT or explicitClean) then
+                return item.fingerprint, "listCraftableItems fingerprint"
+            end
+        end
+    end
+
+    return nil, "no safe craftable fingerprint"
+end
+
 function NBTX.isCraftable(name)
     local craftable = NBTX.getCraftability(name)
     return craftable == true
@@ -1840,7 +1899,7 @@ end
 --   success:boolean
 --   message:string
 --   startedCount:number
-function NBTX.submitCraft(name, count)
+function NBTX.submitCraft(name, count, craftFingerprint)
     count = math.max(0, math.floor(tonumber(count) or 0))
 
     if not autoCraftEnabled() then
@@ -1896,13 +1955,21 @@ function NBTX.submitCraft(name, count)
             "CRAFT REQUEST item=" .. tostring(name) ..
             " amount=" .. tostring(amount) ..
             " requested=" .. tostring(count) ..
-            " key=" .. tostring(name)
+            " key=" .. tostring(name) ..
+            (craftFingerprint and (" fingerprint=" .. tostring(craftFingerprint)) or "")
         )
+
+        local craftRequest
+        if type(craftFingerprint) == "string" and craftFingerprint ~= "" then
+            craftRequest = { fingerprint = craftFingerprint, count = amount }
+        else
+            craftRequest = NBTX.craftFilter(name, amount)
+        end
 
         local ok, started, reason = safeCall(
             playerRS,
             "craftItem",
-            NBTX.craftFilter(name, amount)
+            craftRequest
         )
 
         if not ok then
@@ -2033,7 +2100,20 @@ function NBTX.submitCandidateCraft(candidate, count)
     end
 
     if not candidate.exactRequestNBT then
-        return NBTX.submitCraft(candidate.name, count)
+        local craftFingerprint
+        if candidate.requiresPristine
+            and (tonumber(candidate.rejectedEquipmentStock) or 0) > 0 then
+            craftFingerprint = select(1,
+                NBTX.getPristineCraftableFingerprint(candidate.name))
+            if craftFingerprint then
+                writeLog(
+                    "CRAFT pristine fingerprint item=" .. tostring(candidate.name) ..
+                    " rejectedStored=" .. tostring(candidate.rejectedEquipmentStock) ..
+                    " fingerprint=" .. tostring(craftFingerprint)
+                )
+            end
+        end
+        return NBTX.submitCraft(candidate.name, count, craftFingerprint)
     end
 
     count = math.max(0, math.floor(tonumber(count) or 0))
