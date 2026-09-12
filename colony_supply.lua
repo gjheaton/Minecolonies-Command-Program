@@ -1,6 +1,6 @@
 --[[
   colony_supply.lua
-  Version 2.49
+  Version 2.50
   Minecraft 1.20.1
   CC:Tweaked + Advanced Peripherals + MineColonies + Refined Storage
 
@@ -258,12 +258,22 @@
     opaque-NBT equipment remains unusable unless pristine can be proven, but a unique
     fingerprint exposed by a craftable pattern may be used to start a clean equipment craft.
   - Falls back to getPattern() outputs when listCraftableItems() is unavailable/incomplete.
+
+  v2.50 P>WH destination confirmation:
+  - Player->Warehouse supply transfers are no longer credited merely because the shared
+    transfer barrel became empty. Supply now requires fresh Colony-RS destination evidence
+    before incrementing request supplied counts or writing P>WH transfer history.
+  - An empty barrel with no Colony-RS gain becomes DESTINATION UNCONFIRMED and is held
+    briefly for delayed RS visibility/request acknowledgement instead of being false-credited.
+  - Recovery no longer treats an empty barrel during a supply import as automatic proof of
+    success. Existing full-request credits are reconciled when the live MineColonies request
+    remains active and Colony RS has none of the item after the confirmation grace period.
   - Refuses to guess when multiple distinct craftable fingerprints exist for the same item.
   - Request diagnostics no longer abort when MineColonies returns repeated/shared tables.
 --]]
 
-local PROGRAM_VERSION = "2.49"
-local SUITE_VERSION = "1.1.14"
+local PROGRAM_VERSION = "2.50"
+local SUITE_VERSION = "1.1.15"
 
 local Util = require("colony.lib.util")
 local SharedUI = require("colony.lib.ui")
@@ -330,6 +340,13 @@ local CONFIG = {
     transferSettleDelay = 0.25,
     transferImportRetries = 3,
     transferRetryDelay = 0.25,
+
+    -- P>WH destination confirmation. The barrel becoming empty proves only that
+    -- the source inventory lost the item; it does not prove Colony RS/Warehouse
+    -- retained it. Use fresh Colony-RS snapshots before crediting the request.
+    destinationConfirmReads = 3,
+    destinationConfirmDelay = 0.15,
+    destinationConfirmTimeout = 20,
 
     requestRetentionSeconds = 3600,
     enableAutoCrafting = true,
@@ -1328,6 +1345,38 @@ end
 local function getRSAmount(bridge, name)
     local item = getRSItem(bridge, name)
     return item and (tonumber(item.amount) or 0) or 0
+end
+
+-- Force a new listItems() snapshot and return the raw stored amount. This is
+-- deliberately separate from the normal 500 ms cache because destination
+-- confirmation must not validate a transfer from the same pre-import snapshot.
+function NBTX.getFreshRSAmount(bridge, itemName)
+    NBTX.invalidateRSList(bridge)
+    return math.max(0, math.floor(tonumber(getRSAmount(bridge, itemName)) or 0))
+end
+
+-- Confirm that a Player->Warehouse import actually became visible in Colony RS.
+-- The transfer barrel delta is necessary but not sufficient: AP/RS can consume an
+-- item from the barrel while the destination network fails to retain/expose it.
+-- Return only the quantity positively evidenced by fresh Colony-RS snapshots.
+function NBTX.confirmColonyArrival(itemName, beforeStock, expectedMoved, priorMaxSeen)
+    local expected = math.max(0, math.floor(tonumber(expectedMoved) or 0))
+    local baseline = math.max(0, math.floor(tonumber(beforeStock) or 0))
+    local maxSeen = math.max(baseline, math.floor(tonumber(priorMaxSeen) or baseline))
+    local reads = math.max(1, math.min(5, math.floor(tonumber(CONFIG.destinationConfirmReads) or 3)))
+    local delay = math.max(0, math.min(1, tonumber(CONFIG.destinationConfirmDelay) or 0.15))
+    local samples = {}
+
+    for i = 1, reads do
+        local current = NBTX.getFreshRSAmount(colonyRS, itemName)
+        samples[#samples + 1] = tostring(current)
+        if current > maxSeen then maxSeen = current end
+        if math.max(0, maxSeen - baseline) >= expected then break end
+        if i < reads and delay > 0 then sleep(delay) end
+    end
+
+    local confirmed = math.min(expected, math.max(0, maxSeen - baseline))
+    return confirmed, maxSeen, table.concat(samples, ",")
 end
 
 function NBTX.getRSItemByCandidate(bridge, candidate)
@@ -3381,6 +3430,21 @@ local function getColonyRequests()
     return requests, nil
 end
 
+-- Used only for destination-confirmation recovery. A request disappearing is
+-- acknowledgement enough to release an unconfirmed transaction without falsely
+-- incrementing local supplied/history counters.
+function NBTX.isColonyRequestActive(requestId)
+    if not requestId then return false end
+    local requests = getColonyRequests()
+    if type(requests) ~= "table" then return true end -- fail closed
+    for _, request in pairs(requests) do
+        if type(request) == "table" and request.id == requestId and isRequestActive(request) then
+            return true
+        end
+    end
+    return false
+end
+
 --------------------------------------------------------------------------
 -- Transfer timing / retry helpers
 --------------------------------------------------------------------------
@@ -3643,6 +3707,70 @@ local function recoverPendingTransfer()
         return true
     end
 
+    -- v2.50: a supply import whose barrel leg completed but destination gain was
+    -- not confirmed must stay in a short acknowledgement window. Never convert
+    -- "barrel empty" into success by itself.
+    if kind == "supply" and tostring(p.stage or "") == "confirming" then
+        local expected = math.max(0, math.floor(tonumber(p.destinationExpected) or exported))
+        local baseline = math.max(0, math.floor(tonumber(p.destinationBefore) or 0))
+        local already = math.max(0, math.floor(tonumber(p.imported) or 0))
+        local confirmed, maxSeen, samples = NBTX.confirmColonyArrival(
+            itemName, baseline, expected, p.destinationMaxSeen)
+        p.destinationMaxSeen = maxSeen
+
+        if confirmed > already then
+            local newlyConfirmed = confirmed - already
+            p.imported = confirmed
+            finishImportedAmount(requestId, itemName, newlyConfirmed)
+            recordTransferHistory("P>WH", itemName, newlyConfirmed, requestId, "recovered-confirmed")
+            writeLog("RECOVER DEST CONFIRMED item=" .. tostring(itemName) ..
+                " request=" .. tostring(requestId) ..
+                " newly=" .. tostring(newlyConfirmed) ..
+                " total=" .. tostring(confirmed) .. "/" .. tostring(expected) ..
+                " samples=" .. tostring(samples))
+            saveState()
+        end
+
+        if confirmed >= expected and expected > 0 then
+            clearPending("destination confirmation completed")
+            health.transfer = true
+            health.message = "Pending transfer destination confirmed"
+            return true
+        end
+
+        if not NBTX.isColonyRequestActive(requestId) then
+            clearPending("MineColonies request resolved while destination confirmation was pending")
+            health.transfer = true
+            health.message = "Request acknowledged by colony"
+            return true
+        end
+
+        local since = tonumber(p.destinationUnconfirmedSince) or tonumber(p.lastAttempt) or nowSeconds()
+        local timeout = math.max(5, math.floor(tonumber(CONFIG.destinationConfirmTimeout) or 20))
+        if nowSeconds() - since >= timeout then
+            writeLog("DESTINATION CONFIRM TIMEOUT item=" .. tostring(itemName) ..
+                " request=" .. tostring(requestId) ..
+                " confirmed=" .. tostring(confirmed) .. "/" .. tostring(expected) ..
+                " colonyBaseline=" .. tostring(baseline) ..
+                " maxSeen=" .. tostring(maxSeen) ..
+                " - clearing pending WITHOUT credit so live request can retry")
+            clearPending("destination unconfirmed timeout; request remains active")
+            health.transfer = false
+            health.message = "DESTINATION UNCONFIRMED: retrying live request"
+            return true
+        end
+
+        p.lastAttempt = nowSeconds()
+        p.lastError = "waiting for Colony RS destination confirmation; " ..
+            tostring(confirmed) .. "/" .. tostring(expected) ..
+            " samples=" .. tostring(samples)
+        saveState()
+        health.transfer = false
+        health.message = "DESTINATION UNCONFIRMED: " .. tostring(itemName) ..
+            " " .. tostring(confirmed) .. "/" .. tostring(expected)
+        return false
+    end
+
     -- If the modem-connected barrel can be inspected and is empty, recovery
     -- must consider the persisted stage. An empty barrel during "importing"
     -- can confirm the destination already consumed the item; an empty barrel
@@ -3653,17 +3781,28 @@ local function recoverPendingTransfer()
         local ambiguous = math.max(0, exported - imported)
 
         if stage == "importing" and exported > 0 and ambiguous > 0 then
-            -- We had already started the destination import and the monitored
-            -- barrel is now empty. This is the crash window after the import
-            -- completed but before p.imported was persisted. Credit only this
-            -- stage; do NOT blindly clear an exported-but-never-imported item.
+            -- v2.50: empty barrel alone is NOT proof that Colony RS retained a
+            -- supply item. Convert supply recovery to destination-confirmation
+            -- state instead of false-crediting it. Overflow/probe keep their
+            -- destination-specific recovery behavior.
             if kind == "supply" then
-                finishImportedAmount(requestId, itemName, ambiguous)
-                recordTransferHistory("P>WH", itemName, ambiguous, requestId, "recovered-empty")
+                p.stage = "confirming"
+                p.destinationBefore = math.max(0, math.floor(tonumber(p.destinationBefore) or 0))
+                p.destinationMaxSeen = math.max(p.destinationBefore, math.floor(tonumber(p.destinationMaxSeen) or p.destinationBefore))
+                p.destinationExpected = math.max(ambiguous, math.floor(tonumber(p.destinationExpected) or 0))
+                p.destinationUnconfirmedSince = p.destinationUnconfirmedSince or nowSeconds()
+                p.lastAttempt = nowSeconds()
+                p.lastError = "empty barrel after supply import; Colony RS destination unconfirmed"
+                saveState()
+                health.transfer = false
+                health.message = "DESTINATION UNCONFIRMED: " .. tostring(itemName)
+                writeLog("RECOVER supply empty-barrel converted to destination confirmation item=" ..
+                    tostring(itemName) .. " request=" .. tostring(requestId) ..
+                    " amount=" .. tostring(ambiguous))
+                return false
             elseif kind == "overflow" then
                 recordTransferHistory("WH>P", itemName, ambiguous, nil, "recovered-empty")
             elseif kind == "probe" then
-                -- Probe item was being returned to Player RS; no colony accounting.
                 NBTX.clearRSSafety("recovered completed extraction probe")
             end
             p.imported = exported
@@ -3763,12 +3902,59 @@ local function recoverPendingTransfer()
 
     if moved > 0 then
         if kind == "supply" then
-            finishImportedAmount(requestId, itemName, moved)
-            recordTransferHistory("P>WH", itemName, moved, requestId, "recovered")
+            -- For supply recovery, `moved` proves only that the barrel lost items.
+            -- Derive the cumulative amount removed from the barrel when possible,
+            -- then require fresh Colony-RS growth above the pre-import baseline.
+            local baseline = tonumber(p.destinationBefore)
+            if baseline == nil then
+                -- Old pending state may predate v2.50. If some import could already
+                -- have happened, establishing a new baseline now cannot prove it;
+                -- fail closed and let the live request retry after timeout.
+                baseline = NBTX.getFreshRSAmount(colonyRS, itemName)
+                p.destinationBefore = baseline
+            end
+
+            local barrelRemaining = chestItemCount(itemName)
+            local expectedArrival
+            if barrelRemaining ~= nil then
+                expectedArrival = math.max(0, exported - barrelRemaining)
+            else
+                expectedArrival = math.min(exported, imported + moved)
+            end
+
+            local confirmed, maxSeen, samples = NBTX.confirmColonyArrival(
+                itemName, baseline, expectedArrival, p.destinationMaxSeen)
+            p.destinationMaxSeen = maxSeen
+            local newlyConfirmed = math.max(0, confirmed - imported)
+            if newlyConfirmed > 0 then
+                finishImportedAmount(requestId, itemName, newlyConfirmed)
+                recordTransferHistory("P>WH", itemName, newlyConfirmed, requestId, "recovered-confirmed")
+            end
+            p.imported = math.max(imported, confirmed)
+
+            if barrelRemaining ~= nil and barrelRemaining == 0 and p.imported < exported then
+                p.stage = "confirming"
+                p.destinationExpected = exported
+                p.destinationUnconfirmedSince = p.destinationUnconfirmedSince or nowSeconds()
+                p.lastError = "barrel empty after recovery import; Colony RS confirmed " ..
+                    tostring(p.imported) .. "/" .. tostring(exported) ..
+                    " samples=" .. tostring(samples)
+            else
+                p.stage = "importing"
+                p.lastError = nil
+            end
+
+            writeLog("RECOVER supply destination check item=" .. tostring(itemName) ..
+                " barrelMoved=" .. tostring(moved) ..
+                " confirmed=" .. tostring(p.imported) .. "/" .. tostring(exported) ..
+                " barrelRemaining=" .. tostring(barrelRemaining) ..
+                " samples=" .. tostring(samples))
         elseif kind == "overflow" then
             recordTransferHistory("WH>P", itemName, moved, nil, "recovered")
+            p.imported = imported + moved
+        else
+            p.imported = imported + moved
         end
-        p.imported = imported + moved
 
         if exported <= 0 then
             p.exported = p.imported
@@ -3802,8 +3988,19 @@ local function recoverPendingTransfer()
     if observed ~= nil and observed == 0 and exported > imported and p.stage == "importing" then
         local ambiguous = exported - imported
         if kind == "supply" then
-            finishImportedAmount(requestId, itemName, ambiguous)
-            recordTransferHistory("P>WH", itemName, ambiguous, requestId, "recovered-empty")
+            p.stage = "confirming"
+            p.destinationBefore = math.max(0, math.floor(tonumber(p.destinationBefore) or 0))
+            p.destinationMaxSeen = math.max(p.destinationBefore, math.floor(tonumber(p.destinationMaxSeen) or p.destinationBefore))
+            p.destinationExpected = math.max(ambiguous, math.floor(tonumber(p.destinationExpected) or 0))
+            p.destinationUnconfirmedSince = p.destinationUnconfirmedSince or nowSeconds()
+            p.lastAttempt = nowSeconds()
+            p.lastError = "barrel empty after recovery import; Colony RS destination unconfirmed"
+            saveState()
+            health.transfer = false
+            health.message = "DESTINATION UNCONFIRMED: " .. tostring(itemName)
+            writeLog("RECOVER refused empty-barrel supply credit item=" .. tostring(itemName) ..
+                " request=" .. tostring(requestId) .. " amount=" .. tostring(ambiguous))
+            return false
         elseif kind == "overflow" then
             recordTransferHistory("WH>P", itemName, ambiguous, nil, "recovered-empty")
         elseif kind == "probe" then
@@ -3907,16 +4104,77 @@ local function performTransfer(requestId, itemName, amount, candidate)
     -- second RS network observe the inventory change before importing.
     transferSleep(CONFIG.transferSettleDelay)
 
+    -- Capture a fresh destination baseline immediately before the import.
+    -- Only a later increase above this value may be credited as P>WH success.
+    local colonyBefore = NBTX.getFreshRSAmount(colonyRS, itemName)
+    p.destinationBefore = colonyBefore
+    p.destinationMaxSeen = colonyBefore
+    p.destinationExpected = exported
     p.stage = "importing"
     saveState()
 
-    local imported, importErr = retryImport(NBTX.importToColony, itemName, exported, "colony")
-    imported = tonumber(imported) or 0
+    local barrelMoved, importErr = retryImport(NBTX.importToColony, itemName, exported, "colony")
+    barrelMoved = tonumber(barrelMoved) or 0
+    local imported = 0
 
-    if imported > 0 then
-        p.imported = imported
-        finishImportedAmount(requestId, itemName, imported)
-        recordTransferHistory("P>WH", itemName, imported, requestId, "supply")
+    if barrelMoved > 0 then
+        local confirmed, maxSeen, samples = NBTX.confirmColonyArrival(
+            itemName, colonyBefore, barrelMoved, p.destinationMaxSeen)
+        p.destinationMaxSeen = maxSeen
+        imported = math.max(0, math.floor(tonumber(confirmed) or 0))
+
+        if imported > 0 then
+            p.imported = imported
+            finishImportedAmount(requestId, itemName, imported)
+            recordTransferHistory("P>WH", itemName, imported, requestId, "supply-confirmed")
+            writeLog("IMPORT DEST CONFIRMED item=" .. tostring(itemName) ..
+                " request=" .. tostring(requestId) ..
+                " barrelMoved=" .. tostring(barrelMoved) ..
+                " colony=" .. tostring(colonyBefore) .. "->" .. tostring(maxSeen) ..
+                " confirmed=" .. tostring(imported) ..
+                " samples=" .. tostring(samples))
+        end
+
+        if imported < barrelMoved then
+            local barrelRemaining = chestItemCount(itemName)
+            if barrelRemaining ~= nil and barrelRemaining > 0 then
+                -- A partial destination import still has real items in the barrel.
+                -- Keep the transaction in importing state; recovery will retry only
+                -- what the barrel can actually provide and will destination-verify
+                -- each cumulative result before crediting it.
+                p.stage = "importing"
+                p.destinationExpected = math.max(0, exported - barrelRemaining)
+                p.lastError = "partial barrel import destination unconfirmed; barrelRemaining=" ..
+                    tostring(barrelRemaining) .. " colony " ..
+                    tostring(colonyBefore) .. "->" .. tostring(maxSeen) ..
+                    " samples=" .. tostring(samples)
+            else
+                -- The barrel is empty (or became unreadable) but Colony RS has not
+                -- evidenced the complete shipment. Hold for delayed destination
+                -- visibility/request acknowledgement; never credit from emptiness.
+                p.stage = "confirming"
+                p.destinationExpected = exported
+                p.destinationUnconfirmedSince = p.destinationUnconfirmedSince or nowSeconds()
+                p.lastError = "barrel emptied but Colony RS gain unconfirmed; colony " ..
+                    tostring(colonyBefore) .. "->" .. tostring(maxSeen) ..
+                    " samples=" .. tostring(samples)
+            end
+            p.lastAttempt = nowSeconds()
+            saveState()
+            health.transfer = false
+            health.message = "DESTINATION UNCONFIRMED: " .. tostring(itemName) ..
+                " " .. tostring(imported) .. "/" .. tostring(exported)
+            writeLog("IMPORT DEST UNCONFIRMED item=" .. tostring(itemName) ..
+                " request=" .. tostring(requestId) ..
+                " barrelMoved=" .. tostring(barrelMoved) ..
+                " confirmed=" .. tostring(imported) ..
+                " reason=" .. tostring(p.lastError))
+            -- Return zero to the request processor while the transaction remains
+            -- pending. Any positively confirmed amount has already been credited;
+            -- this prevents the caller from starting a craft or reporting completion.
+            return 0, p.lastError, "source_export_ok"
+        end
+
         saveState()
         writeLog("IMPORT BARREL->B " .. imported .. " " .. itemName ..
         " request=" .. requestId ..
@@ -3925,7 +4183,7 @@ local function performTransfer(requestId, itemName, amount, candidate)
     end
 
     if imported >= exported then
-        clearPending("transaction completed")
+        clearPending("transaction completed with destination confirmation")
         health.transfer = true
         return imported, nil, "ok"
     end
@@ -4611,6 +4869,30 @@ local function processSingleRequest(request)
 
     local playerStock = candidate.playerStock or NBTX.getRSAmountByCandidate(playerRS, candidate)
     local warehouseStock = candidate.warehouseStock or NBTX.getRSAmountByCandidate(colonyRS, candidate)
+
+    -- v2.50 recovery for credits created by older barrel-only confirmation. If
+    -- Supply believes it fully satisfied this still-active request, Colony RS
+    -- contains none of the item, and the grace period has elapsed, the local
+    -- credit is stale. Drop only that request's credit so the live request can
+    -- retry; settings/history and unrelated request state are untouched.
+    if supplied >= requested and requested > 0 and warehouseStock <= 0
+        and not state.pending and tonumber(rs.lastTransfer) then
+        local age = nowSeconds() - tonumber(rs.lastTransfer)
+        local grace = math.max(5, math.floor(tonumber(CONFIG.destinationConfirmTimeout) or 20))
+        if age >= grace then
+            writeLog("REQUEST CREDIT RECONCILE id=" .. tostring(id) ..
+                " item=" .. tostring(candidate.name) ..
+                " supplied=" .. tostring(supplied) ..
+                " requested=" .. tostring(requested) ..
+                " warehouse=0 age=" .. tostring(age) ..
+                " - live request still active; clearing stale local credit")
+            rs.supplied = 0
+            rs.lastTransfer = nil
+            supplied = 0
+            saveState()
+        end
+    end
+
     local remaining = effectiveRemaining(requested, supplied, warehouseStock)
 
     local row = {
@@ -6922,14 +7204,18 @@ function DIAG.printTransferTest(itemName)
 
     sleep(0.25)
     add("2/4 Barrel -> Colony RS (" .. CONFIG.chestToColonyDirection .. ")")
+    local colonyStage2Before = NBTX.getFreshRSAmount(colonyRS, itemName)
     local b, berr = NBTX.importToColony(itemName, 1)
-    add("    moved=" .. tostring(b) .. (berr and (" error=" .. tostring(berr)) or ""))
-    if b < 1 then
-        add("FAIL at stage 2: barrel -> Colony RS")
-        add("Attempting recovery to Player RS...")
-        local recovered, rerr = NBTX.importToPlayer(itemName, 1)
-        add("Recovery moved=" .. tostring(recovered) .. (rerr and (" error=" .. tostring(rerr)) or ""))
-        add("Check Warehouse External Storage insert access/filter.")
+    local bConfirmed, colonyStage2After, bSamples = NBTX.confirmColonyArrival(
+        itemName, colonyStage2Before, tonumber(b) or 0, colonyStage2Before)
+    add("    bridge moved=" .. tostring(b) ..
+        " confirmed=" .. tostring(bConfirmed) ..
+        " colony=" .. tostring(colonyStage2Before) .. "->" .. tostring(colonyStage2After) ..
+        (berr and (" error=" .. tostring(berr)) or ""))
+    if bConfirmed < 1 then
+        add("FAIL at stage 2: barrel emptied/import reported, but Colony RS did not gain item")
+        add("Colony samples: " .. tostring(bSamples))
+        add("Check Warehouse External Storage insert access/filter and Colony RS refresh state.")
         finish()
         return
     end
