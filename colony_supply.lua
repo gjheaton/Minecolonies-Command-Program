@@ -233,10 +233,20 @@
     default MineColonies NBT handling, preventing normal default NBT from being
     rejected before stock/craftability checks.
   - Does not relax NBT safety for enchanted, damaged, or customized variants.
+
+  v2.47 partial-stock craft-first safety:
+  - When Player RS has some stock but less than the remaining MineColonies request,
+    and that candidate is craftable, Supply no longer exports the partial stock and
+    then immediately starts a craft for the shortage.
+  - It leaves the partial stock untouched, crafts only the shortage, waits for enough
+    stock to exist, and then starts the normal verified transfer path.
+  - This avoids the observed Advanced Peripherals/Refined Storage stale-disk condition
+    triggered by interleaving a partial export with crafting the same item.
+  - Adds no queue, cache, timer, or persistent allocation.
 --]]
 
-local PROGRAM_VERSION = "2.46"
-local SUITE_VERSION = "1.1.11"
+local PROGRAM_VERSION = "2.47"
+local SUITE_VERSION = "1.1.12"
 
 local Util = require("colony.lib.util")
 local SharedUI = require("colony.lib.ui")
@@ -2127,6 +2137,54 @@ function NBTX.submitCandidateCraft(candidate, count)
     end
 
     return false, lastReason, 0
+end
+
+-- v2.47: Never interleave a partial Player-RS export with crafting the
+-- shortage for the same candidate. That sequence has been observed to leave
+-- Refined Storage/Advanced Peripherals in a stale state which requires reseating
+-- the storage disk. Hold the partial stock in place, craft the shortage first,
+-- and let a later scan transfer only after enough stock is visible.
+function NBTX.deferPartialStockForCraft(row, candidate, playerStock, remaining)
+    playerStock = math.max(0, math.floor(tonumber(playerStock) or 0))
+    remaining = math.max(0, math.floor(tonumber(remaining) or 0))
+
+    if playerStock <= 0 or playerStock >= remaining then return false end
+    if not autoCraftEnabled() or not NBTX.isCandidateCraftable(candidate) then
+        return false
+    end
+
+    local shortage = remaining - playerStock
+    local craftOK, craftMessage, craftStarted =
+        NBTX.submitCandidateCraft(candidate, shortage)
+
+    row.playerStock = playerStock
+    if craftOK then
+        row.status = "CRAFTING"
+        row.message = "Holding " .. tostring(playerStock) ..
+            " in Player RS; " ..
+            tostring(craftMessage or ("crafting " .. tostring(craftStarted or shortage))) ..
+            " before transfer"
+        writeLog(
+            "CRAFT-FIRST item=" .. tostring(candidate.name) ..
+            " held=" .. tostring(playerStock) ..
+            " shortage=" .. tostring(shortage) ..
+            " result=" .. tostring(craftMessage or "started")
+        )
+    else
+        row.status = "WAITING"
+        row.message = "Holding " .. tostring(playerStock) ..
+            " in Player RS; " ..
+            NBTX.craftErrorDisplay(craftMessage, "craft retry pending") ..
+            "; no partial transfer attempted"
+        writeLog(
+            "CRAFT-FIRST RETRY item=" .. tostring(candidate.name) ..
+            " held=" .. tostring(playerStock) ..
+            " shortage=" .. tostring(shortage) ..
+            " reason=" .. tostring(craftMessage or "RS returned false")
+        )
+    end
+
+    return true
 end
 
 -- Build the source-side RS export filter.
@@ -4609,11 +4667,23 @@ local function processSingleRequest(request)
     end
 
     ------------------------------------------------------------------
-    -- v2.25 safety policy: if Player RS reports any stock, prove that the
-    -- stock is actually extractable BEFORE asking Refined Storage to craft a
-    -- shortage. This prevents an extraction-desync condition from feeding
-    -- directly into CraftingCalculator. After a successful transfer below,
-    -- the normal partial-stock path may safely start the remaining craft.
+    -- v2.47 partial-stock craft-first safety:
+    -- If some stock exists but it cannot satisfy the remaining request and the
+    -- candidate is craftable, DO NOT export the partial stock first. Exporting
+    -- and then crafting the same item in the same request cycle has been observed
+    -- to stale/lock RS storage. Craft the shortage while the partial stock remains
+    -- untouched; a later scan transfers only after enough stock is visible.
+    ------------------------------------------------------------------
+    if NBTX.deferPartialStockForCraft(row, candidate, playerStock, remaining) then
+        addRow(row)
+        return
+    end
+
+    ------------------------------------------------------------------
+    -- Source-stock transfer path. At this point either enough stock exists to
+    -- satisfy the remaining request, or the item is not currently craftable.
+    -- A positive stock reading is still verified by the real export operation,
+    -- with the existing RS STALE protections if that export contradicts RS.
     ------------------------------------------------------------------
     if playerStock > 0 then
         row.status = supplied > 0 and "PARTIAL" or "READY"
