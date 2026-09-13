@@ -317,8 +317,15 @@
     Mixed/ambiguous barrel contents remain blocked for manual inspection.
 --]]
 
-local PROGRAM_VERSION = "2.55"
-local SUITE_VERSION = "1.1.20"
+-- v2.56 / suite 1.1.21:
+--   Treat verified physical barrel->Colony movement as a sent shipment and wait
+--   for MineColonies to refresh the request before sending/crafting more. Colony
+--   RS stock snapshots remain diagnostic only because couriers can consume items
+--   before a stable warehouse gain is observable. Partial rejected remainders are
+--   rolled back immediately, history records physical P>WH movement, and dashboard
+--   rows are published during long scans so the monitor stays live.
+local PROGRAM_VERSION = "2.56"
+local SUITE_VERSION = "1.1.21"
 
 local Util = require("colony.lib.util")
 local SharedUI = require("colony.lib.ui")
@@ -3583,9 +3590,16 @@ function NBTX.rollbackPendingSupplyToPlayer(p)
     end
 
     if before <= 0 then
+        -- If part of this shipment already crossed the Colony bridge, preserve
+        -- the request-refresh gate even when the remainder disappeared before
+        -- rollback could inspect it. Never release a sent request for immediate
+        -- duplicate delivery.
+        if (tonumber(p.imported) or 0) > 0 then
+            NBTX.deferAfterDestinationRollback(p, p.lastError)
+        end
         clearPending("rollback found barrel already empty")
         health.transfer = true
-        health.message = "Stranded transfer cleared; request may retry"
+        health.message = "Stranded transfer cleared; request acknowledgement pending"
         return true, "barrel already empty"
     end
 
@@ -3815,6 +3829,148 @@ local function recoverPendingTransfer()
     -- Keep returning the stranded barrel remainder to Player RS until the barrel
     -- is physically empty, then release the transaction for a clean request retry.
     if kind == "supply" and p.rollbackToPlayer == true then
+        return NBTX.rollbackPendingSupplyToPlayer(p)
+    end
+
+    -- v2.56 supply recovery no longer depends on a lasting Colony-RS stock gain.
+    -- The dedicated barrel is the physical ledger for this hop. Any amount that
+    -- left the barrel through the Colony bridge is recorded once as sent, then
+    -- MineColonies request refresh/disappearance gates any further work.
+    if kind == "supply" then
+        local stage = tostring(p.stage or "")
+        local barrelCount = chestItemCount(itemName)
+
+        if barrelCount == nil then
+            p.lastAttempt = nowSeconds()
+            p.lastError = "supply recovery waiting for barrel inspection"
+            saveState()
+            health.transfer = false
+            health.message = "TRANSFER VERIFY WAIT: " .. tostring(itemName)
+            return false
+        end
+
+        if exported <= 0 then
+            if barrelCount <= 0 then
+                clearPending("stale pre-export supply transaction; barrel empty")
+                health.transfer = true
+                health.message = "Cleared stale supply transaction"
+                return true
+            end
+            exported = math.min(planned, barrelCount)
+            p.exported = exported
+            p.stage = "exported"
+            saveState()
+            stage = "exported"
+        end
+
+        -- If import had already begun and the barrel is now empty, the whole
+        -- exported amount physically crossed the Colony bridge. For an old
+        -- v2.50-v2.55 confirming/importing transaction, migrate that movement to
+        -- the request-refresh gate instead of waiting on warehouse stock snapshots.
+        local function creditPhysicalAccepted(physicalAccepted, note)
+            physicalAccepted = math.max(0, math.min(exported,
+                math.floor(tonumber(physicalAccepted) or 0)))
+            local already = math.max(0, math.floor(tonumber(p.sentCredited) or
+                tonumber(p.imported) or 0))
+            if physicalAccepted > already then
+                local delta = physicalAccepted - already
+                finishImportedAmount(requestId, itemName, delta)
+                recordTransferHistory("P>WH", itemName, delta, requestId,
+                    note or "recovered-sent")
+                p.imported = physicalAccepted
+                p.sentCredited = physicalAccepted
+                writeLog("RECOVER SUPPLY SENT item=" .. tostring(itemName) ..
+                    " request=" .. tostring(requestId) ..
+                    " delta=" .. tostring(delta) ..
+                    " total=" .. tostring(physicalAccepted) .. "/" .. tostring(exported))
+                saveState()
+            else
+                p.imported = math.max(tonumber(p.imported) or 0, physicalAccepted)
+                p.sentCredited = math.max(tonumber(p.sentCredited) or 0, physicalAccepted)
+            end
+            return physicalAccepted
+        end
+
+        local accepted = math.max(0, exported - barrelCount)
+        if accepted > 0 and (stage == "importing" or stage == "confirming" or
+            stage == "rollback" or tonumber(p.imported) and tonumber(p.imported) > 0) then
+            accepted = creditPhysicalAccepted(accepted, "recovered-sent")
+        end
+
+        if barrelCount <= 0 then
+            if stage == "exported" and accepted <= 0 and
+                (tonumber(p.sentCredited) or 0) <= 0 and (tonumber(p.imported) or 0) <= 0 then
+                -- Export was persisted but no import attempt was known. Do not
+                -- manufacture a destination success from an unexplained empty barrel.
+                p.attempts = (tonumber(p.attempts) or 0) + 1
+                p.lastAttempt = nowSeconds()
+                p.lastError = "barrel empty in exported stage before Colony import was proven"
+                saveState()
+                health.transfer = false
+                health.message = "TRANSFER UNKNOWN: " .. tostring(itemName)
+                return false
+            end
+
+            accepted = math.max(accepted, tonumber(p.sentCredited) or 0,
+                tonumber(p.imported) or 0)
+            if accepted > 0 then
+                local rs = requestStateFor(requestId)
+                NBTX.markAwaitingRequestRefresh(
+                    rs,
+                    math.max(0, math.floor(tonumber(p.requestedSnapshot) or planned)),
+                    { name = itemName },
+                    accepted
+                )
+            end
+            clearPending("supply barrel empty; awaiting MineColonies request refresh")
+            health.transfer = true
+            health.message = accepted > 0
+                and ("Sent " .. tostring(accepted) .. " " .. tostring(itemName) ..
+                    "; waiting for MineColonies acknowledgement")
+                or "Cleared empty supply transaction"
+            return true
+        end
+
+        -- There is still a physical remainder. Try to drain only that remainder;
+        -- then return anything the Colony bridge still refuses to Player RS.
+        p.stage = "importing"
+        p.lastAttempt = nowSeconds()
+        saveState()
+
+        local moved, err = retryImport(NBTX.importToColony, itemName, barrelCount, "colony-recovery")
+        moved = math.max(0, math.floor(tonumber(moved) or 0))
+        local after = chestItemCount(itemName)
+        if after == nil then
+            p.lastError = err or "barrel verification unavailable after recovery import"
+            saveState()
+            health.transfer = false
+            health.message = "TRANSFER VERIFY WAIT: " .. tostring(itemName)
+            return false
+        end
+
+        accepted = creditPhysicalAccepted(math.max(0, exported - after), "recovered-sent")
+
+        if after <= 0 then
+            if accepted > 0 then
+                local rs = requestStateFor(requestId)
+                NBTX.markAwaitingRequestRefresh(
+                    rs,
+                    math.max(0, math.floor(tonumber(p.requestedSnapshot) or planned)),
+                    { name = itemName },
+                    accepted
+                )
+            end
+            clearPending("recovery drained supply barrel; awaiting MineColonies request refresh")
+            health.transfer = true
+            health.message = "Recovered supply transfer; request acknowledgement pending"
+            return true
+        end
+
+        p.rollbackToPlayer = true
+        p.stage = "rollback"
+        p.lastError = "Colony bridge left " .. tostring(after) ..
+            " in barrel; rolling remainder back to Player RS"
+        saveState()
         return NBTX.rollbackPendingSupplyToPlayer(p)
     end
 
@@ -4195,8 +4351,7 @@ local function performTransfer(requestId, itemName, amount, candidate, requested
         return 0, "Another transfer is pending", "not_started"
     end
 
-    -- If the chest is visible as a CC inventory, refuse to start a new
-    -- transaction while it contains anything. This prevents mixing items.
+    -- Dedicated barrel must be empty before a new transaction starts.
     local empty = chestIsEmpty()
     if empty == false then
         health.transfer = false
@@ -4215,6 +4370,7 @@ local function performTransfer(requestId, itemName, amount, candidate, requested
         planned = amount,
         exported = 0,
         imported = 0,
+        sentCredited = 0,
         stage = "prepared",
         started = nowSeconds(),
         requestedSnapshot = math.max(0, math.floor(tonumber(requestedSnapshot) or 0)),
@@ -4225,8 +4381,7 @@ local function performTransfer(requestId, itemName, amount, candidate, requested
     p.stage = "exporting"
     saveState()
 
-    local exported, exportErr =
-        NBTX.exportFromPlayer(itemName, amount, candidate)
+    local exported, exportErr = NBTX.exportFromPlayer(itemName, amount, candidate)
     exported = tonumber(exported) or 0
 
     if exported <= 0 then
@@ -4236,8 +4391,7 @@ local function performTransfer(requestId, itemName, amount, candidate, requested
             or getRSAmount(playerRS, itemName)
         health.transfer = false
         health.message = "SOURCE BLOCKED: " .. tostring(itemName) ..
-            " stock=" .. tostring(fresh) ..
-            " A->barrel moved=0"
+            " stock=" .. tostring(fresh) .. " A->barrel moved=0"
         writeLog(health.message .. " err=" .. tostring(exportErr or "none"))
         return 0, exportErr or ("Player RS reports " .. tostring(fresh) ..
             " but exported 0 to barrel"), "source_export_zero"
@@ -4252,151 +4406,101 @@ local function performTransfer(requestId, itemName, amount, candidate, requested
         " mode=" .. ((CONFIG.usePeripheralTransfer and CONFIG.transferChestName)
             and "peripheral" or "directional"))
 
-    -- Match the known-good diagnostic behavior: let the barrel and the
-    -- second RS network observe the inventory change before importing.
     transferSleep(CONFIG.transferSettleDelay)
-
-    -- Capture a fresh destination baseline immediately before the import.
-    -- Only a later increase above this value may be credited as P>WH success.
-    local colonyBefore = NBTX.getFreshRSAmount(colonyRS, itemName)
-    p.destinationBefore = colonyBefore
-    p.destinationMaxSeen = colonyBefore
-    p.destinationExpected = exported
     p.stage = "importing"
+    p.lastAttempt = nowSeconds()
     saveState()
 
+    -- v2.56: the physical barrel is authoritative for this hop. Colony RS is an
+    -- External Storage view of a live MineColonies warehouse, so a courier can
+    -- remove an item before a stable +N destination snapshot is observable.
+    -- A verified barrel decrease caused by the Colony bridge therefore means the
+    -- item was sent into the colony network. MineColonies request refresh is the
+    -- acknowledgement gate before this request may send/craft anything else.
     local barrelMoved, importErr = retryImport(NBTX.importToColony, itemName, exported, "colony")
-    barrelMoved = tonumber(barrelMoved) or 0
-    local imported = 0
+    barrelMoved = math.max(0, math.floor(tonumber(barrelMoved) or 0))
 
-    if barrelMoved > 0 then
-        local confirmed, maxSeen, samples = NBTX.confirmColonyArrival(
-            itemName, colonyBefore, barrelMoved, p.destinationMaxSeen)
-        p.destinationMaxSeen = maxSeen
-        imported = math.max(0, math.floor(tonumber(confirmed) or 0))
-
-        if imported > 0 then
-            p.imported = imported
-            finishImportedAmount(requestId, itemName, imported)
-            recordTransferHistory("P>WH", itemName, imported, requestId, "supply-confirmed")
-            writeLog("IMPORT DEST CONFIRMED item=" .. tostring(itemName) ..
-                " request=" .. tostring(requestId) ..
-                " barrelMoved=" .. tostring(barrelMoved) ..
-                " colony=" .. tostring(colonyBefore) .. "->" .. tostring(maxSeen) ..
-                " confirmed=" .. tostring(imported) ..
-                " samples=" .. tostring(samples))
-        end
-
-        if imported < barrelMoved then
-            local barrelRemaining = chestItemCount(itemName)
-            if barrelRemaining ~= nil and barrelRemaining > 0 then
-                -- A partial destination import still has real items in the barrel.
-                -- Keep the transaction in importing state; recovery will retry only
-                -- what the barrel can actually provide and will destination-verify
-                -- each cumulative result before crediting it.
-                p.stage = "importing"
-                p.destinationExpected = math.max(0, exported - barrelRemaining)
-                p.lastError = "partial barrel import destination unconfirmed; barrelRemaining=" ..
-                    tostring(barrelRemaining) .. " colony " ..
-                    tostring(colonyBefore) .. "->" .. tostring(maxSeen) ..
-                    " samples=" .. tostring(samples)
-            else
-                -- The barrel is empty (or became unreadable) but Colony RS has not
-                -- evidenced the complete shipment. Hold for delayed destination
-                -- visibility/request acknowledgement; never credit from emptiness.
-                p.stage = "confirming"
-                p.destinationExpected = exported
-                p.destinationUnconfirmedSince = p.destinationUnconfirmedSince or nowSeconds()
-                p.lastError = "barrel emptied but Colony RS gain unconfirmed; colony " ..
-                    tostring(colonyBefore) .. "->" .. tostring(maxSeen) ..
-                    " samples=" .. tostring(samples)
-            end
-            p.lastAttempt = nowSeconds()
-            saveState()
-            health.transfer = false
-            health.message = "DESTINATION UNCONFIRMED: " .. tostring(itemName) ..
-                " " .. tostring(imported) .. "/" .. tostring(exported)
-            writeLog("IMPORT DEST UNCONFIRMED item=" .. tostring(itemName) ..
-                " request=" .. tostring(requestId) ..
-                " barrelMoved=" .. tostring(barrelMoved) ..
-                " confirmed=" .. tostring(imported) ..
-                " reason=" .. tostring(p.lastError))
-            -- Return zero to the request processor while the transaction remains
-            -- pending. Any positively confirmed amount has already been credited;
-            -- this prevents the caller from starting a craft or reporting completion.
-            return 0, p.lastError, "source_export_ok"
-        end
-
-        saveState()
-        writeLog("IMPORT BARREL->B " .. imported .. " " .. itemName ..
-        " request=" .. requestId ..
-        " mode=" .. ((CONFIG.usePeripheralTransfer and CONFIG.transferChestName)
-            and "peripheral" or "directional"))
+    local physicalRemainder = chestItemCount(itemName)
+    local accepted = barrelMoved
+    if physicalRemainder ~= nil then
+        accepted = math.max(0, math.min(exported, exported - physicalRemainder))
     end
 
+    if accepted > 0 then
+        p.imported = accepted
+        p.sentCredited = accepted
+        finishImportedAmount(requestId, itemName, accepted)
+        recordTransferHistory("P>WH", itemName, accepted, requestId, "supply-sent")
+        writeLog("SUPPLY SENT item=" .. tostring(itemName) ..
+            " request=" .. tostring(requestId) ..
+            " accepted=" .. tostring(accepted) .. "/" .. tostring(exported) ..
+            " barrelRemaining=" .. tostring(physicalRemainder))
+        saveState()
+    end
 
-    -- v2.55: if the destination accepted a verified subset but a physical
-    -- remainder is still in the barrel, do not hold the global queue in TRANSFER.
-    -- The accepted amount is already destination-confirmed; safely return only the
-    -- untouched remainder to Player RS and serialize this request independently.
-    local physicalRemainder = chestItemCount(itemName)
+    -- Anything still physically in the barrel after the bounded destination
+    -- attempts is returned immediately. It must never monopolize the global queue.
     if physicalRemainder ~= nil and physicalRemainder > 0 then
-        if barrelMoved > 0 and imported >= barrelMoved then
-            p.rollbackToPlayer = true
-            p.stage = "rollback"
-            p.lastError = "Colony RS accepted " .. tostring(imported) ..
-                "/" .. tostring(exported) .. "; rolling physical remainder " ..
-                tostring(physicalRemainder) .. " back to Player RS"
-            saveState()
-            writeLog("SUPPLY PARTIAL DESTINATION item=" .. tostring(itemName) ..
-                " confirmed=" .. tostring(imported) .. "/" .. tostring(exported) ..
-                " barrelRemainder=" .. tostring(physicalRemainder) ..
-                " - immediate rollback")
-            local rollbackOK, rollbackErr = NBTX.rollbackPendingSupplyToPlayer(p)
-            if rollbackOK then
-                return imported,
+        p.rollbackToPlayer = true
+        p.stage = "rollback"
+        if accepted > 0 then
+            p.lastError = "Colony bridge accepted " .. tostring(accepted) ..
+                "/" .. tostring(exported) .. "; returning remainder " ..
+                tostring(physicalRemainder) .. " to Player RS"
+        else
+            p.lastError = "Colony bridge accepted 0/" .. tostring(exported) ..
+                "; returning staged shipment to Player RS"
+        end
+        saveState()
+        local rollbackOK, rollbackErr = NBTX.rollbackPendingSupplyToPlayer(p)
+        if rollbackOK then
+            if accepted > 0 then
+                return accepted,
                     "Colony accepted partial shipment; remainder returned to Player RS",
                     "destination_partial_rollback"
             end
-            return imported, rollbackErr or p.lastError, "source_export_ok"
-        elseif barrelMoved <= 0 then
-            -- No item left the barrel after the full bounded import window. Nothing
-            -- reached Colony RS, so the whole staged shipment can be safely returned
-            -- immediately without waiting multiple global scan cycles.
-            p.rollbackToPlayer = true
-            p.stage = "rollback"
-            p.lastError = "Colony RS accepted 0/" .. tostring(exported) ..
-                "; returning staged shipment to Player RS"
-            saveState()
-            writeLog("SUPPLY DESTINATION REJECTED item=" .. tostring(itemName) ..
-                " exported=" .. tostring(exported) ..
-                " barrel=" .. tostring(physicalRemainder) ..
-                " - immediate rollback")
-            local rollbackOK, rollbackErr = NBTX.rollbackPendingSupplyToPlayer(p)
-            if rollbackOK then
-                return 0,
-                    "Colony storage rejected shipment; returned to Player RS",
-                    "destination_rejected_rollback"
-            end
-            return 0, rollbackErr or p.lastError, "source_export_ok"
+            return 0,
+                "Colony storage rejected shipment; returned to Player RS",
+                "destination_rejected_rollback"
         end
+        return accepted, rollbackErr or p.lastError, "source_export_ok"
     end
 
-    if imported >= exported then
-        clearPending("transaction completed with destination confirmation")
+    if physicalRemainder == nil then
+        -- Without physical verification, keep the transaction pending rather than
+        -- guessing. Recovery will resolve it when the barrel becomes readable.
+        p.lastError = importErr or "barrel verification unavailable after Colony import"
+        p.lastAttempt = nowSeconds()
+        saveState()
+        health.transfer = false
+        health.message = "TRANSFER VERIFY WAIT: " .. tostring(itemName)
+        return accepted, p.lastError, "source_export_ok"
+    end
+
+    if accepted > 0 then
+        local rs = requestStateFor(requestId)
+        NBTX.markAwaitingRequestRefresh(
+            rs,
+            p.requestedSnapshot,
+            candidate or { name = itemName },
+            accepted
+        )
+        saveState()
+        clearPending("barrel->Colony physical movement completed; awaiting MineColonies request refresh")
         health.transfer = true
-        return imported, nil, "ok"
+        health.message = "Sent " .. tostring(accepted) .. " " .. tostring(itemName) ..
+            "; waiting for MineColonies acknowledgement"
+        return accepted, nil, "sent_waiting_request_refresh"
     end
 
-    -- Leave pending transaction on disk. The next cycle will retry the
-    -- chest -> colony leg before doing any more player exports.
-    health.transfer = false
-    local left = math.max(0, exported - imported)
-    health.message = "TRANSFER " .. tostring(itemName) ..
-        " barrel->colony " .. tostring(imported) .. "/" .. tostring(exported) ..
-        " (" .. tostring(left) .. " left)"
+    -- A readable empty barrel with accepted==0 should be impossible when exported
+    -- was positive, but fail closed rather than crediting or resending blindly.
+    p.lastError = importErr or "barrel empty but no physical Colony movement was measured"
+    p.lastAttempt = nowSeconds()
     saveState()
-    return imported, importErr or "Partial/blocked colony import", "source_export_ok"
+    health.transfer = false
+    health.message = "TRANSFER UNKNOWN: " .. tostring(itemName)
+    return 0, p.lastError, "source_export_ok"
 end
 
 local function performOverflowReturn(itemName, amount)
@@ -4776,12 +4880,17 @@ local function resetStats()
 end
 
 local function addRow(row)
-    -- While a scan is running, build the next dashboard completely off-screen.
-    -- monitorRefreshLoop() continues rendering the previous complete snapshot.
+    -- During a long scan, publish the in-progress table after the first completed
+    -- row instead of leaving the monitor on the previous scan for minutes. The
+    -- same table keeps growing and is sorted in place when the scan finishes.
     local rows = dashboardBuildRows or dashboardRows
     local targetStats = statsBuild or stats
 
     rows[#rows + 1] = row
+    if dashboardBuildRows and dashboardRows ~= dashboardBuildRows then
+        dashboardRows = dashboardBuildRows
+        stats = targetStats
+    end
     targetStats.active = targetStats.active + 1
     if row.status == "SUPPLIED" or row.status == "IN STOCK" then targetStats.supplied = targetStats.supplied + 1 end
     if row.status == "MISSING" then targetStats.missing = targetStats.missing + 1 end
@@ -5106,7 +5215,8 @@ local function processSingleRequest(request)
     -- credit is stale. Drop only that request's credit so the live request can
     -- retry; settings/history and unrelated request state are untouched.
     if supplied >= requested and requested > 0 and warehouseStock <= 0
-        and not state.pending and tonumber(rs.lastTransfer) then
+        and not state.pending and tonumber(rs.lastTransfer)
+        and type(rs.awaitingRequestRefresh) ~= "table" then
         local age = nowSeconds() - tonumber(rs.lastTransfer)
         local grace = math.max(5, math.floor(tonumber(CONFIG.destinationConfirmTimeout) or 20))
         if age >= grace then
@@ -5164,6 +5274,20 @@ local function processSingleRequest(request)
         saveState()
     end
 
+    -- Every physical P>WH shipment is serialized against the MineColonies request
+    -- snapshot. The warehouse External Storage view can be transient because a
+    -- courier may consume the item immediately, so request refresh/disappearance
+    -- is the authoritative acknowledgement before this request may send/craft more.
+    if type(rs.awaitingRequestRefresh) == "table" then
+        local gate = rs.awaitingRequestRefresh
+        local age = math.max(0, nowSeconds() - (tonumber(gate.since) or nowSeconds()))
+        row.status = "WAITING"
+        row.message = "Sent " .. tostring(gate.moved or 0) ..
+            "; waiting for MineColonies request refresh (" .. tostring(age) .. "s)"
+        addRow(row)
+        return
+    end
+
     if remaining <= 0 then
         if supplied >= requested then
             row.status = "SUPPLIED"
@@ -5175,21 +5299,6 @@ local function processSingleRequest(request)
         addRow(row)
         return
     end
-
-    -- A partial shipment from this exact MineColonies request snapshot has already
-    -- completed. Do not transfer more or start a craft until MineColonies changes
-    -- the request quantity/replaces the request. This is the serialization point
-    -- for multiple colonies sharing one Player RS network.
-    if type(rs.awaitingRequestRefresh) == "table" then
-        local gate = rs.awaitingRequestRefresh
-        local age = math.max(0, nowSeconds() - (tonumber(gate.since) or nowSeconds()))
-        row.status = "WAITING"
-        row.message = "Partial shipment sent; waiting for MineColonies request refresh" ..
-            " (" .. tostring(age) .. "s)"
-        addRow(row)
-        return
-    end
-
 
     -- Destination rejection is isolated to this request. The barrel has already
     -- been returned/cleared, so unrelated requests continue while this one backs
@@ -5367,41 +5476,22 @@ local function processSingleRequest(request)
             if itemDesync then
                 NBTX.clearRSDesync(candidate, "item export retry succeeded")
             end
-            if row.remaining <= 0 then
+
+            -- v2.56: every physical Colony send is acknowledgement-gated.
+            -- performTransfer()/rollback recovery already created the gate; render
+            -- it immediately rather than calling the request SUPPLIED from local
+            -- counters before MineColonies has refreshed the request.
+            if type(rs.awaitingRequestRefresh) == "table" then
+                local gate = rs.awaitingRequestRefresh
+                row.status = row.remaining > 0 and "PARTIAL" or "WAITING"
+                row.message = "Sent " .. tostring(gate.moved or moved) ..
+                    "; waiting for MineColonies request refresh"
+            elseif row.remaining <= 0 then
                 row.status = "SUPPLIED"
                 row.message = "Imported into colony network"
             else
-                -- If the Player RS snapshot did not contain enough stock to cover
-                -- this live MineColonies request, serialize the handoff: ship what
-                -- exists, then wait for MineColonies to publish the new remainder.
-                -- Do not predict/craft the shortage from this old snapshot.
-                if transferState == "destination_partial_rollback" then
-                    NBTX.markAwaitingRequestRefresh(rs, requested, candidate, moved)
-                    saveState()
-                    row.status = "PARTIAL"
-                    row.message = "Moved " .. tostring(moved) ..
-                        "; Colony accepted partial shipment; remainder returned; waiting for request refresh"
-                    writeLog("DESTINATION PARTIAL WAIT request=" .. tostring(id) ..
-                        " item=" .. tostring(candidate.name) ..
-                        " requested=" .. tostring(requested) ..
-                        " moved=" .. tostring(moved))
-                elseif playerStock < remaining then
-                    NBTX.markAwaitingRequestRefresh(rs, requested, candidate, moved)
-                    saveState()
-                    row.status = "PARTIAL"
-                    row.message = "Moved " .. tostring(moved) ..
-                        "; waiting for MineColonies request refresh before crafting"
-                    writeLog(
-                        "PARTIAL WAIT request=" .. tostring(id) ..
-                        " item=" .. tostring(candidate.name) ..
-                        " requested=" .. tostring(requested) ..
-                        " moved=" .. tostring(moved) ..
-                        " playerSnapshot=" .. tostring(playerStock)
-                    )
-                else
-                    row.status = "PARTIAL"
-                    row.message = "Transferred " .. tostring(moved)
-                end
+                row.status = "PARTIAL"
+                row.message = "Transferred " .. tostring(moved)
             end
         else
             local freshStock
@@ -5587,8 +5677,9 @@ local function cleanupOldRequestState(activeIds)
 end
 
 local function scanAndProcess()
-    -- Double-buffer the request dashboard. The one-second render loop keeps
-    -- showing the previous complete snapshot while this scan builds the next.
+    -- Build a fresh request dashboard. addRow() publishes the in-progress table
+    -- after the first completed row so the one-second render loop stays live even
+    -- when a scan contains many transfers/retries.
     dashboardBuildRows = {}
     statsBuild = newStats()
 
