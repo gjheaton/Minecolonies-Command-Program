@@ -1,6 +1,6 @@
 --[[
   colony_supply.lua
-  Version 2.51
+  Version 2.53
   Minecraft 1.20.1
   CC:Tweaked + Advanced Peripherals + MineColonies + Refined Storage
 
@@ -282,10 +282,26 @@
     is reset because the new MineColonies quantity already represents the new remainder.
   - No timeout silently bypasses this gate; a stuck request remains visibly WAITING
     rather than risking another partial-stock/craft race.
+
+  v2.52 shared-helper cleanup:
+  - Reuses shared utility/UI helpers for trimming, clock text, serialized-table reads,
+    terminal setup/color, and update-message rendering.
+  - Removes unused legacy helpers and consolidates repeated page-wrap logic.
+  - No request, crafting, transfer, NBT, overflow, or recovery behavior changes.
+
+  v2.53 damaged-equipment craft guard:
+  - Prevents automatic craftItem() calls for pristine-equipment candidates when
+    same-name Player-RS copies exist but are rejected as damaged/enchanted/unsafe.
+  - Such conflicted candidates no longer count as craft-usable during tool selection,
+    allowing a safer acceptable tool candidate to win when MineColonies provides one.
+  - If no safe alternative exists, the request reports BLOCKED instead of entering
+    Refined Storage's crafting calculator. This contains observed / by zero failures.
+  - Removes the experimental pristine-pattern fingerprint craft workaround; stored
+    bad variants are treated as a hard autocrafting conflict rather than bypassed.
 --]]
 
-local PROGRAM_VERSION = "2.51"
-local SUITE_VERSION = "1.1.16"
+local PROGRAM_VERSION = "2.53"
+local SUITE_VERSION = "1.1.18"
 
 local Util = require("colony.lib.util")
 local SharedUI = require("colony.lib.ui")
@@ -569,28 +585,16 @@ local function nowSeconds()
     return math.floor(nowMs() / 1000)
 end
 
-local function timeString()
-    return os.date("%H:%M:%S")
-end
 
 local clamp = Util.clamp
+local trim = Util.trim
+local timeString = Util.timeString
 
 local function roundDown(n)
     return math.floor(tonumber(n) or 0)
 end
 
-local function shallowCopy(t)
-    local out = {}
-    if type(t) == "table" then
-        for k, v in pairs(t) do out[k] = v end
-    end
-    return out
-end
 
-local function trim(s)
-    s = tostring(s or "")
-    return (s:gsub("^%s+", ""):gsub("%s+$", ""))
-end
 
 local truncateText = Util.truncateText
 local healthWord = Util.healthWord
@@ -618,10 +622,6 @@ local function formatNumber(n)
     return sign .. out
 end
 
-local function nonEmptyTable(t)
-    if type(t) ~= "table" then return false end
-    return next(t) ~= nil
-end
 
 local function itemHasNBT(item)
     if type(item) ~= "table" then return false end
@@ -903,21 +903,10 @@ local function saveState()
     return true
 end
 
-local function readSerializedFile(path)
-    if not fs.exists(path) then return nil end
-    local h = fs.open(path, "r")
-    if not h then return nil end
-    local raw = h.readAll()
-    h.close()
-    local ok, data = pcall(textutils.unserialize, raw)
-    if not ok or type(data) ~= "table" then return nil end
-    return data
-end
-
 local function loadState()
-    local loaded = readSerializedFile(CONFIG.stateFile)
+    local loaded = Util.readSerializedTable(CONFIG.stateFile)
     if not loaded then
-        loaded = readSerializedFile(CONFIG.stateFile .. ".bak")
+        loaded = Util.readSerializedTable(CONFIG.stateFile .. ".bak")
     end
 
     if type(loaded) == "table" then
@@ -1540,85 +1529,6 @@ function NBTX.getCraftability(name)
     return false, "not reported craftable"
 end
 
--- Return a fingerprint for a normal/pristine craftable output without calling
--- getItem(). This is used only to disambiguate equipment crafting when an
--- enchanted/damaged copy with the same registry name is already stored.
-function NBTX.getPristineCraftableFingerprint(name)
-    if not playerRS or type(name) ~= "string" or name == "" then
-        return nil, "player bridge unavailable"
-    end
-
-    -- IMPORTANT: stored-item NBT and craftable-pattern NBT are different safety
-    -- questions. An opaque NBT hash on a STORED item cannot prove that item is
-    -- pristine, so storedEquipmentStackIsPristine() must continue rejecting it.
-    -- For a CRAFTABLE pattern, however, the fingerprint identifies the recipe
-    -- output itself. If there is exactly one craftable output fingerprint for the
-    -- requested registry name, using it is safer than falling back to an ambiguous
-    -- name-only craft that may collide with an enchanted/damaged stored variant.
-    local distinct = {}
-    local ordered = {}
-
-    local function consider(item, source)
-        if type(item) ~= "table" or item.name ~= name then return nil end
-        local fp = item.fingerprint
-        if type(fp) ~= "string" or fp == "" then return nil end
-
-        if not distinct[fp] then
-            distinct[fp] = source or "craftable fingerprint"
-            ordered[#ordered + 1] = fp
-        end
-
-        -- Prefer fingerprints whose metadata explicitly proves a clean/default
-        -- output. This remains the strongest signal when AP exposes readable NBT.
-        local raw = serializedNBTText(item.nbt)
-        local lower = raw:lower()
-        local damage = tonumber(item.damage or item.Damage)
-            or tonumber(lower:match("damage%s*=%s*(-?%d+)"))
-            or tonumber(lower:match("damage%s*:%s*(-?%d+)"))
-        local customized = lower:find("enchant", 1, true)
-            or lower:find("display", 1, true)
-            or lower:find("customname", 1, true)
-            or lower:find("custom_name", 1, true)
-            or lower:find("lore", 1, true)
-            or lower:find("stored_enchant", 1, true)
-            or lower:find("unbreakable", 1, true)
-            or lower:find("trim", 1, true)
-
-        local noNBT = raw == "" or raw == "{}" or raw == "nil"
-        local explicitClean = damage ~= nil and damage == 0 and not customized
-        if not customized and (noNBT or explicitClean) then
-            return fp, (source or "craftable") .. " clean fingerprint"
-        end
-        return nil
-    end
-
-    local ok, craftables = safeCall(playerRS, "listCraftableItems")
-    if ok and type(craftables) == "table" then
-        for _, item in pairs(craftables) do
-            local fp, why = consider(item, "listCraftableItems")
-            if fp then return fp, why end
-        end
-    end
-
-    -- Some AP 0.7 builds expose getPattern() even when listCraftableItems() is
-    -- missing or incomplete. Pattern outputs may carry the exact craft fingerprint.
-    local patternOK, pattern = safeCall(playerRS, "getPattern", { name = name })
-    if patternOK and type(pattern) == "table" and type(pattern.outputs) == "table" then
-        for _, item in pairs(pattern.outputs) do
-            local fp, why = consider(item, "getPattern")
-            if fp then return fp, why end
-        end
-    end
-
-    if #ordered == 1 then
-        return ordered[1], tostring(distinct[ordered[1]]) .. " unique fingerprint"
-    elseif #ordered > 1 then
-        return nil, "multiple craftable fingerprints; refusing to guess"
-    end
-
-    return nil, "no craftable fingerprint exposed"
-end
-
 function NBTX.isCraftable(name)
     local craftable = NBTX.getCraftability(name)
     return craftable == true
@@ -1997,7 +1907,7 @@ end
 --   success:boolean
 --   message:string
 --   startedCount:number
-function NBTX.submitCraft(name, count, craftFingerprint)
+function NBTX.submitCraft(name, count)
     count = math.max(0, math.floor(tonumber(count) or 0))
 
     if not autoCraftEnabled() then
@@ -2053,21 +1963,15 @@ function NBTX.submitCraft(name, count, craftFingerprint)
             "CRAFT REQUEST item=" .. tostring(name) ..
             " amount=" .. tostring(amount) ..
             " requested=" .. tostring(count) ..
-            " key=" .. tostring(name) ..
-            (craftFingerprint and (" fingerprint=" .. tostring(craftFingerprint)) or "")
+            " key=" .. tostring(name)
         )
 
-        local craftRequest
-        if type(craftFingerprint) == "string" and craftFingerprint ~= "" then
-            craftRequest = { fingerprint = craftFingerprint, count = amount }
-        else
-            craftRequest = NBTX.craftFilter(name, amount)
-        end
-
+        -- Ordinary autocrafting intentionally stays registry-name-only. Pristine
+        -- equipment with conflicting stored variants is blocked before reaching here.
         local ok, started, reason = safeCall(
             playerRS,
             "craftItem",
-            craftRequest
+            NBTX.craftFilter(name, amount)
         )
 
         if not ok then
@@ -2197,29 +2101,24 @@ function NBTX.submitCandidateCraft(candidate, count)
         return false, "Invalid craft candidate", 0
     end
 
+    -- v2.53: Refined Storage 1.12.4 can throw CraftingCalculator / by zero
+    -- when a pristine tool/armor craft is requested while damaged/enchanted
+    -- copies with the same registry name already exist in storage. Do not try
+    -- to outsmart that state with a fingerprint craft: avoid craftItem() entirely.
+    if candidate.requiresPristine
+        and (tonumber(candidate.rejectedEquipmentStock) or 0) > 0
+        and (tonumber(candidate.playerStock) or 0) <= 0 then
+        local rejected = math.max(1, math.floor(tonumber(candidate.rejectedEquipmentStock) or 1))
+        local msg = "EQUIPMENT VARIANT CONFLICT: " .. tostring(rejected) ..
+            " damaged/enchanted " .. tostring(candidate.name) ..
+            " in Player RS; autocraft blocked"
+        writeLog("CRAFT BLOCKED variant-conflict item=" .. tostring(candidate.name) ..
+            " rejectedStored=" .. tostring(rejected))
+        return false, msg, 0
+    end
+
     if not candidate.exactRequestNBT then
-        local craftFingerprint
-        if candidate.requiresPristine
-            and (tonumber(candidate.rejectedEquipmentStock) or 0) > 0 then
-            local fingerprintReason
-            craftFingerprint, fingerprintReason =
-                NBTX.getPristineCraftableFingerprint(candidate.name)
-            if craftFingerprint then
-                writeLog(
-                    "CRAFT pristine fingerprint item=" .. tostring(candidate.name) ..
-                    " rejectedStored=" .. tostring(candidate.rejectedEquipmentStock) ..
-                    " fingerprint=" .. tostring(craftFingerprint) ..
-                    " source=" .. tostring(fingerprintReason or "unknown")
-                )
-            else
-                writeLog(
-                    "CRAFT pristine fingerprint unavailable item=" .. tostring(candidate.name) ..
-                    " rejectedStored=" .. tostring(candidate.rejectedEquipmentStock) ..
-                    " reason=" .. tostring(fingerprintReason or "unknown")
-                )
-            end
-        end
-        return NBTX.submitCraft(candidate.name, count, craftFingerprint)
+        return NBTX.submitCraft(candidate.name, count)
     end
 
     count = math.max(0, math.floor(tonumber(count) or 0))
@@ -3136,6 +3035,9 @@ function NBTX.populateCandidateAvailability(candidate)
     candidate.rawCraftable = craftable
     candidate.craftable = autoCraftEnabled() and craftable
     candidate.craftSource = craftSource
+    candidate.equipmentCraftConflict = candidate.requiresPristine == true
+        and (tonumber(candidate.rejectedEquipmentStock) or 0) > 0
+        and (tonumber(candidate.playerStock) or 0) <= 0
 end
 
 function NBTX.candidateAvailabilityTier(candidate, remaining)
@@ -3143,7 +3045,7 @@ function NBTX.candidateAvailabilityTier(candidate, remaining)
         return 4
     elseif candidate.playerStock > 0 then
         return 3
-    elseif candidate.craftable then
+    elseif candidate.craftable and not candidate.equipmentCraftConflict then
         return 2
     elseif candidate.warehouseStock > 0 then
         return 1
@@ -3311,12 +3213,6 @@ local function requestCandidates(request)
     return out
 end
 
-local function candidateExists(candidates, name)
-    for _, c in ipairs(candidates) do
-        if c.name == name then return c end
-    end
-    return nil
-end
 
 local function chooseCandidate(request, requestState, remaining)
     local candidates = requestCandidates(request)
@@ -4952,7 +4848,8 @@ local function processSingleRequest(request)
             " craftSource=" .. tostring(candidate.craftSource or "?") ..
             " autoCraft=" .. tostring(autoCraftEnabled()) ..
             " pristineRequired=" .. tostring(candidate.requiresPristine == true) ..
-            " rejectedEquipmentStock=" .. tostring(candidate.rejectedEquipmentStock or 0)
+            " rejectedEquipmentStock=" .. tostring(candidate.rejectedEquipmentStock or 0) ..
+            " equipmentCraftConflict=" .. tostring(candidate.equipmentCraftConflict == true)
         )
         saveState()
     end
@@ -5262,19 +5159,26 @@ local function processSingleRequest(request)
             row.message = prefix .. (craftMessage or
                 ("Crafting " .. tostring(craftStarted or remaining)))
         else
-            -- The item is confirmed craftable. A temporary craftItem(false)
-            -- result should be retried instead of marking the colony request
-            -- failed/error.
-            row.status = "WAITING"
-            row.message = NBTX.craftErrorDisplay(
-                craftMessage,
-                "Craft start retry pending"
-            )
-            writeLog(
-                "CRAFT RETRY item=" .. tostring(candidate.name) ..
-                " need=" .. tostring(remaining) ..
-                " reason=" .. tostring(craftMessage or "RS returned false")
-            )
+            if tostring(craftMessage or ""):find("^EQUIPMENT VARIANT CONFLICT:") then
+                row.status = "BLOCKED"
+                row.message = tostring(craftMessage)
+                health.message = "CRAFT BLOCKED " .. tostring(candidate.name) ..
+                    ": damaged/enchanted same-name copies in Player RS"
+            else
+                -- The item is confirmed craftable. A temporary craftItem(false)
+                -- result should be retried instead of marking the colony request
+                -- failed/error.
+                row.status = "WAITING"
+                row.message = NBTX.craftErrorDisplay(
+                    craftMessage,
+                    "Craft start retry pending"
+                )
+                writeLog(
+                    "CRAFT RETRY item=" .. tostring(candidate.name) ..
+                    " need=" .. tostring(remaining) ..
+                    " reason=" .. tostring(craftMessage or "RS returned false")
+                )
+            end
         end
 
         addRow(row)
@@ -5551,15 +5455,10 @@ local UPDATE = SuiteUpdater.new({
     displayName = "SUPPLY MANAGER",
     checkSeconds = CONFIG.updateCheckSeconds,
     drawMessage = function(title, message, color)
-        if not monitor then return end
-        local w, h = monitorUI.size()
-        if not w or not h then return end
-        local mid = math.max(5, math.floor(h / 2))
-        monitorFillRow(mid - 1, UI.panel, UI.text)
-        monitorFillRow(mid, UI.panel, UI.text)
-        monitorFillRow(mid + 1, UI.panel, UI.text)
-        monitorCenter(mid - 1, tostring(title or "UPDATE"), color or UI.title, UI.panel, w)
-        monitorCenter(mid, tostring(message or ""), UI.text, UI.panel, w)
+        monitorUI.drawMessagePanel({
+            title = title, message = message, titleColor = color or UI.title,
+            bg = UI.panel, fg = UI.text,
+        })
     end,
 })
 
@@ -6358,17 +6257,11 @@ end
 -- Terminal rendering
 --------------------------------------------------------------------------
 
-local function terminalColor(color)
-    if term.isColor and term.isColor() then term.setTextColor(color) end
-end
 
 local function renderTerminal()
     if not CONFIG.mirrorTerminal then return end
 
-    term.setBackgroundColor(colors.black)
-    terminalColor(colors.white)
-    term.clear()
-    term.setCursorPos(1, 1)
+    SharedUI.resetTerminal(colors.white, colors.black)
 
     local transferPathOnline = health.playerRS and health.colonyRS and health.transfer
     local overallHealthy =
@@ -6381,10 +6274,10 @@ local function renderTerminal()
     print("Control Suite: v" .. SUITE_VERSION)
     print("Colony: " .. tostring(colonyName or "Unknown Colony"))
 
-    terminalColor(overallHealthy and colors.lime or colors.orange)
+    SharedUI.setTerminalColor(overallHealthy and colors.lime or colors.orange)
     print("HEALTH:      " .. (overallHealthy and "ONLINE" or "DEGRADED"))
 
-    terminalColor(colors.white)
+    SharedUI.setTerminalColor(colors.white)
     print("Player RS:   " .. healthWord(health.playerRS) ..
         "  [" .. tostring(playerBridgeResolvedName or "?") .. "]")
     print("Colony RS:   " .. healthWord(health.colonyRS) ..
@@ -6395,17 +6288,17 @@ local function renderTerminal()
     print("Status:      " .. tostring(health.message))
 
     local updateText, updateColor = UPDATE.terminalStatus()
-    terminalColor(updateColor)
+    SharedUI.setTerminalColor(updateColor)
     print("UPDATE:      " .. tostring(updateText))
 
-    terminalColor(colors.white)
+    SharedUI.setTerminalColor(colors.white)
     print("Suite source: " .. tostring(UPDATE.sourceLabel()))
     print(string.rep("-", 50))
 
     local maxRows = 10
     for i = 1, math.min(#dashboardRows, maxRows) do
         local row = dashboardRows[i]
-        terminalColor(statusColor(row.status))
+        SharedUI.setTerminalColor(statusColor(row.status))
         print(string.format(
             "%-22s %5d/%-5d %-13s",
             truncateText(row.displayName, 22),
@@ -6415,7 +6308,7 @@ local function renderTerminal()
         ))
     end
 
-    terminalColor(colors.white)
+    SharedUI.setTerminalColor(colors.white)
 end
 
 --------------------------------------------------------------------------
@@ -6434,45 +6327,44 @@ local function monitorRowsPerPage()
     return rows, pages
 end
 
+local function shiftedPage(page, pages, delta)
+    pages = math.max(1, tonumber(pages) or 1)
+    return ((tonumber(page) or 1) - 1 + delta) % pages + 1
+end
+
 local function nextPage()
     local _, pages = monitorRowsPerPage()
-    currentPage = currentPage + 1
-    if currentPage > pages then currentPage = 1 end
+    currentPage = shiftedPage(currentPage, pages, 1)
     lastManualPageChange = nowSeconds()
 end
 
 local function previousPage()
     local _, pages = monitorRowsPerPage()
-    currentPage = currentPage - 1
-    if currentPage < 1 then currentPage = pages end
+    currentPage = shiftedPage(currentPage, pages, -1)
     lastManualPageChange = nowSeconds()
 end
 
 local function nextHistoryPage()
     local _, pages = historyRowsPerPage()
-    historyPage = historyPage + 1
-    if historyPage > pages then historyPage = 1 end
+    historyPage = shiftedPage(historyPage, pages, 1)
     lastManualPageChange = nowSeconds()
 end
 
 local function previousHistoryPage()
     local _, pages = historyRowsPerPage()
-    historyPage = historyPage - 1
-    if historyPage < 1 then historyPage = pages end
+    historyPage = shiftedPage(historyPage, pages, -1)
     lastManualPageChange = nowSeconds()
 end
 
 local function nextSettingsPage()
     local _, pages = settingsRowsPerPage()
-    settingsPage = settingsPage + 1
-    if settingsPage > pages then settingsPage = 1 end
+    settingsPage = shiftedPage(settingsPage, pages, 1)
     lastManualPageChange = nowSeconds()
 end
 
 local function previousSettingsPage()
     local _, pages = settingsRowsPerPage()
-    settingsPage = settingsPage - 1
-    if settingsPage < 1 then settingsPage = pages end
+    settingsPage = shiftedPage(settingsPage, pages, -1)
     lastManualPageChange = nowSeconds()
 end
 
@@ -6858,10 +6750,7 @@ function DIAG.renderDiagnosticMonitor(title, lines, page)
 end
 
 function DIAG.terminalDiagnosticFallback(title, lines)
-    term.setBackgroundColor(colors.black)
-    terminalColor(colors.white)
-    term.clear()
-    term.setCursorPos(1, 1)
+    SharedUI.resetTerminal(colors.white, colors.black)
     print("=== " .. tostring(title) .. " ===")
     for _, line in ipairs(lines or {}) do print(tostring(line)) end
 end

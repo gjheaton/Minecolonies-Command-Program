@@ -1,25 +1,11 @@
 -- MineColonies Control Suite - shared suite updater
--- Component version: 1.1.0
+-- Component version: 1.1.1
 local Version = require("colony.lib.version")
+local Util = require("colony.lib.util")
 
 local M = {}
-M.COMPONENT_VERSION = "1.1.0"
+M.COMPONENT_VERSION = "1.1.1"
 
-local function readTable(path)
-    if not fs.exists(path) then return nil end
-    local h = fs.open(path, "r")
-    if not h then return nil end
-    local text = h.readAll()
-    h.close()
-    local ok, value = pcall(textutils.unserialize, text)
-    if ok and type(value) == "table" then return value end
-    return nil
-end
-
-local function nowText()
-    if os.date then return os.date("%H:%M:%S") end
-    return textutils.formatTime(os.time(), true)
-end
 
 local function cacheBust(url)
     url = tostring(url or "")
@@ -96,7 +82,7 @@ function M.new(opts)
     }
 
     function self.getSourceUrl()
-        local cfg = readTable(self.configPath) or {}
+        local cfg = Util.readSerializedTable(self.configPath) or {}
         return cfg.suiteSourceUrl or opts.suiteSourceUrl
     end
 
@@ -114,7 +100,7 @@ function M.new(opts)
     end
 
     function self.check()
-        self.lastCheckedText = nowText()
+        self.lastCheckedText = Util.timeString()
         self.availableVersion = nil
         self.remoteVersion = nil
         self.remoteSuiteVersion = nil

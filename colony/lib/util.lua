@@ -1,7 +1,7 @@
 -- MineColonies Control Suite - shared utility helpers
--- Component version: 1.0.1
+-- Component version: 1.1.0
 local M = {}
-M.COMPONENT_VERSION = "1.0.1"
+M.COMPONENT_VERSION = "1.1.0"
 
 function M.clamp(n, lo, hi)
     if n < lo then return lo end
@@ -12,6 +12,22 @@ end
 function M.trim(s)
     s = tostring(s or "")
     return (s:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+function M.timeString()
+    if os.date then return os.date("%H:%M:%S") end
+    return textutils.formatTime(os.time(), true)
+end
+
+function M.readSerializedTable(path)
+    if not path or not fs.exists(path) then return nil end
+    local h = fs.open(path, "r")
+    if not h then return nil end
+    local text = h.readAll()
+    h.close()
+    local ok, value = pcall(textutils.unserialize, text)
+    if ok and type(value) == "table" then return value end
+    return nil
 end
 
 function M.clip(s, width)

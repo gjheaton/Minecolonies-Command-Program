@@ -2,13 +2,13 @@
 -- Minecraft 1.20.1
 -- Requires: CC:Tweaked + Advanced Peripherals + MineColonies
 -- Display: Advanced Monitor
--- v2.14: Suppress the sick-colony alarm when a staffed hospital can treat citizens.
+-- v2.15: Shared-helper cleanup; no functional behavior changes.
 
 local REFRESH_SECONDS = 10
 local RAID_BLINK_SECONDS = 0.75
 local TEXT_SCALE = 0.5
-local PROGRAM_VERSION = "2.14"
-local SUITE_VERSION = "1.1.16"
+local PROGRAM_VERSION = "2.15"
+local SUITE_VERSION = "1.1.18"
 
 local Util = require("colony.lib.util")
 local SharedUI = require("colony.lib.ui")
@@ -98,10 +98,6 @@ local monitorUI = SharedUI.newMonitor({ monitor = monitor, theme = C, protected 
 -- Small helpers
 -- =========================
 
-local function nvl(v, fallback)
-    if v == nil then return fallback end
-    return v
-end
 
 local function tostr(v, fallback)
     if v == nil then return fallback or "" end
@@ -415,12 +411,6 @@ local function normalizeOrderedList(t)
     return out
 end
 
-local function countTable(t)
-    local n = 0
-    if type(t) ~= "table" then return 0 end
-    for _ in pairs(t) do n = n + 1 end
-    return n
-end
 
 local function sortByName(list, field)
     table.sort(list, function(a, b)
@@ -1099,9 +1089,6 @@ end
 -- Update check / terminal startup summary
 -- =========================
 
-local function terminalColor(color)
-    if term.isColor and term.isColor() then term.setTextColor(color) end
-end
 
 local UPDATE = SuiteUpdater.new({
     appId = "command",
@@ -1110,11 +1097,10 @@ local UPDATE = SuiteUpdater.new({
     displayName = "COMMAND CENTER",
     checkSeconds = UPDATE_CHECK_SECONDS,
     drawMessage = function(title, message, color)
-        local w, h = size()
-        local mid = math.max(5, math.floor(h / 2))
-        fill(1, mid - 1, w, mid + 1, C.panel)
-        center(mid - 1, tostring(title or "UPDATE"), color or C.title, C.panel)
-        center(mid, clip(tostring(message or ""), math.max(1, w - 2)), C.text, C.panel)
+        monitorUI.drawMessagePanel({
+            title = title, message = message, titleColor = color or C.title,
+            bg = C.panel, fg = C.text,
+        })
     end,
 })
 
@@ -1126,10 +1112,7 @@ local function renderTerminalStartup(updateText, statusText)
     local monitorW, monitorH = monitor.getSize()
     local errors = errorCount()
 
-    term.setBackgroundColor(colors.black)
-    terminalColor(colors.white)
-    term.clear()
-    term.setCursorPos(1, 1)
+    SharedUI.resetTerminal(colors.white, colors.black)
 
     print("MineColonies Command Center v" .. PROGRAM_VERSION)
     print("Control Suite: v" .. SUITE_VERSION)
@@ -1142,28 +1125,28 @@ local function renderTerminalStartup(updateText, statusText)
     print("Sick trigger: " .. sickTriggerHardwareText(D.sick, D.sickAlarmSuppressed))
 
     if errors == 0 then
-        terminalColor(colors.lime)
+        SharedUI.setTerminalColor(colors.lime)
         print("Health:       OK")
     else
-        terminalColor(colors.orange)
+        SharedUI.setTerminalColor(colors.orange)
         print("Health:       WARNING (" .. tostring(errors) .. " API error(s))")
     end
 
     local updateLine = tostring(updateText or "NOT CHECKED")
     if updateLine:find("UPDATE AVAILABLE", 1, true) then
-        terminalColor(colors.yellow)
+        SharedUI.setTerminalColor(colors.yellow)
     elseif updateLine:find("ERROR:", 1, true) then
-        terminalColor(colors.orange)
+        SharedUI.setTerminalColor(colors.orange)
     elseif updateLine:find("CURRENT", 1, true) then
-        terminalColor(colors.lime)
+        SharedUI.setTerminalColor(colors.lime)
     elseif updateLine:find("LOCAL NEWER", 1, true) then
-        terminalColor(colors.cyan)
+        SharedUI.setTerminalColor(colors.cyan)
     else
-        terminalColor(colors.cyan)
+        SharedUI.setTerminalColor(colors.cyan)
     end
     print("Update check: " .. updateLine)
 
-    terminalColor(colors.white)
+    SharedUI.setTerminalColor(colors.white)
     print("Status:       " .. tostring(statusText or "RUNNING"))
     print(string.rep("-", 50))
 end

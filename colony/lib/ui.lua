@@ -1,9 +1,9 @@
 -- MineColonies Control Suite - shared monitor UI framework
--- Component version: 1.0.0
+-- Component version: 1.1.0
 local Util = require("colony.lib.util")
 
 local M = {}
-M.COMPONENT_VERSION = "1.0.0"
+M.COMPONENT_VERSION = "1.1.0"
 
 local BASE = {
     bg = colors.black,
@@ -43,6 +43,17 @@ function M.theme()
     local out = {}
     for k, v in pairs(BASE) do out[k] = v end
     return out
+end
+
+function M.setTerminalColor(color)
+    if term.isColor and term.isColor() then term.setTextColor(color) end
+end
+
+function M.resetTerminal(fg, bg)
+    term.setBackgroundColor(bg or colors.black)
+    M.setTerminalColor(fg or colors.white)
+    term.clear()
+    term.setCursorPos(1, 1)
 end
 
 function M.newMonitor(options)
@@ -174,6 +185,20 @@ function M.newMonitor(options)
             if x >= b.x1 and x <= b.x2 and y >= b.y1 and y <= b.y2 then return b end
         end
         return nil
+    end
+
+    function ctx.drawMessagePanel(opts)
+        opts = opts or {}
+        local w, h = ctx.size()
+        if not w or not h then return false end
+        local mid = opts.midY or math.max(5, math.floor(h / 2))
+        local bg = opts.bg or theme.panel
+        local fg = opts.fg or theme.text
+        ctx.fill(1, math.max(1, mid - 1), w, math.min(h, mid + 1), bg, fg)
+        ctx.center(mid - 1, tostring(opts.title or "UPDATE"),
+            opts.titleColor or theme.title, bg)
+        ctx.center(mid, tostring(opts.message or ""), fg, bg, 1, w)
+        return true
     end
 
     function ctx.drawHeader(opts)
