@@ -1,6 +1,6 @@
 --[[
   colony_supply.lua
-  Version 2.50
+  Version 2.51
   Minecraft 1.20.1
   CC:Tweaked + Advanced Peripherals + MineColonies + Refined Storage
 
@@ -270,10 +270,22 @@
     remains active and Colony RS has none of the item after the confirmation grace period.
   - Refuses to guess when multiple distinct craftable fingerprints exist for the same item.
   - Request diagnostics no longer abort when MineColonies returns repeated/shared tables.
+
+  v2.51 shared-RS partial-request serialization:
+  - Reverses the v2.47 craft-first policy for partial stock. When Player RS has some
+    stock but less than the live MineColonies request, Supply transfers the available
+    stock first and NEVER starts the shortage craft from that same request snapshot.
+  - After a partial shipment, Supply waits for MineColonies to reduce/replace the
+    request before crafting. This lets MineColonies provide the authoritative remainder
+    and avoids two colonies reserving the same visible Player-RS stock concurrently.
+  - If the same request ID is reused with a changed quantity, old local supplied credit
+    is reset because the new MineColonies quantity already represents the new remainder.
+  - No timeout silently bypasses this gate; a stuck request remains visibly WAITING
+    rather than risking another partial-stock/craft race.
 --]]
 
-local PROGRAM_VERSION = "2.50"
-local SUITE_VERSION = "1.1.15"
+local PROGRAM_VERSION = "2.51"
+local SUITE_VERSION = "1.1.16"
 
 local Util = require("colony.lib.util")
 local SharedUI = require("colony.lib.ui")
@@ -2313,51 +2325,33 @@ function NBTX.submitCandidateCraft(candidate, count)
     return false, lastReason, 0
 end
 
--- v2.47: Never interleave a partial Player-RS export with crafting the
--- shortage for the same candidate. That sequence has been observed to leave
--- Refined Storage/Advanced Peripherals in a stale state which requires reseating
--- the storage disk. Hold the partial stock in place, craft the shortage first,
--- and let a later scan transfer only after enough stock is visible.
-function NBTX.deferPartialStockForCraft(row, candidate, playerStock, remaining)
-    playerStock = math.max(0, math.floor(tonumber(playerStock) or 0))
-    remaining = math.max(0, math.floor(tonumber(remaining) or 0))
+-- v2.51: Shared-RS partial request serialization.
+--
+-- When two colonies share one Player RS network, a scan that sees partial stock must
+-- not both leave that stock visible and start a shortage craft. Each colony could make
+-- the same allocation decision against the same snapshot. Instead, ship available
+-- stock first, then wait for MineColonies to publish the authoritative remainder.
+function NBTX.markAwaitingRequestRefresh(rs, requested, candidate, moved)
+    if type(rs) ~= "table" or type(candidate) ~= "table" then return end
+    rs.awaitingRequestRefresh = {
+        requested = math.max(0, math.floor(tonumber(requested) or 0)),
+        item = tostring(candidate.name or ""),
+        moved = math.max(0, math.floor(tonumber(moved) or 0)),
+        since = nowSeconds(),
+    }
+end
 
-    if playerStock <= 0 or playerStock >= remaining then return false end
-    if not autoCraftEnabled() or not NBTX.isCandidateCraftable(candidate) then
+function NBTX.clearAwaitingRequestRefresh(rs, reason)
+    if type(rs) ~= "table" or type(rs.awaitingRequestRefresh) ~= "table" then
         return false
     end
-
-    local shortage = remaining - playerStock
-    local craftOK, craftMessage, craftStarted =
-        NBTX.submitCandidateCraft(candidate, shortage)
-
-    row.playerStock = playerStock
-    if craftOK then
-        row.status = "CRAFTING"
-        row.message = "Holding " .. tostring(playerStock) ..
-            " in Player RS; " ..
-            tostring(craftMessage or ("crafting " .. tostring(craftStarted or shortage))) ..
-            " before transfer"
-        writeLog(
-            "CRAFT-FIRST item=" .. tostring(candidate.name) ..
-            " held=" .. tostring(playerStock) ..
-            " shortage=" .. tostring(shortage) ..
-            " result=" .. tostring(craftMessage or "started")
-        )
-    else
-        row.status = "WAITING"
-        row.message = "Holding " .. tostring(playerStock) ..
-            " in Player RS; " ..
-            NBTX.craftErrorDisplay(craftMessage, "craft retry pending") ..
-            "; no partial transfer attempted"
-        writeLog(
-            "CRAFT-FIRST RETRY item=" .. tostring(candidate.name) ..
-            " held=" .. tostring(playerStock) ..
-            " shortage=" .. tostring(shortage) ..
-            " reason=" .. tostring(craftMessage or "RS returned false")
-        )
-    end
-
+    local gate = rs.awaitingRequestRefresh
+    writeLog(
+        "REQUEST REFRESH gate cleared item=" .. tostring(gate.item or "?") ..
+        " oldRequested=" .. tostring(gate.requested or "?") ..
+        " reason=" .. tostring(reason or "request changed")
+    )
+    rs.awaitingRequestRefresh = nil
     return true
 end
 
@@ -4798,6 +4792,24 @@ local function processSingleRequest(request)
     local requested = getRequestedCount(request)
     local rs = requestStateFor(id)
 
+    -- v2.51: If MineColonies reuses the same request ID but changes the requested
+    -- quantity after a partial delivery, the new quantity is already the authoritative
+    -- remainder. Clear the old local supplied credit before candidate selection so we
+    -- never subtract the same delivery twice.
+    if type(rs.awaitingRequestRefresh) == "table" then
+        local oldRequested = math.max(0, math.floor(tonumber(rs.awaitingRequestRefresh.requested) or 0))
+        if requested ~= oldRequested then
+            NBTX.clearAwaitingRequestRefresh(
+                rs,
+                "MineColonies quantity changed " .. tostring(oldRequested) ..
+                    "->" .. tostring(requested)
+            )
+            rs.supplied = 0
+            rs.lastTransfer = nil
+            saveState()
+        end
+    end
+
     if requested <= 0 then
         addRow({
             id = id,
@@ -4862,6 +4874,18 @@ local function processSingleRequest(request)
             " reason=" .. tostring(reason)
         )
         return
+    end
+
+    if type(rs.awaitingRequestRefresh) == "table"
+        and tostring(rs.awaitingRequestRefresh.item or "") ~= tostring(candidate.name or "") then
+        NBTX.clearAwaitingRequestRefresh(
+            rs,
+            "selected candidate changed to " .. tostring(candidate.name or "?")
+        )
+        rs.supplied = 0
+        rs.lastTransfer = nil
+        supplied = 0
+        saveState()
     end
 
     rs.item = candidate.name
@@ -4941,6 +4965,20 @@ local function processSingleRequest(request)
             row.status = "IN STOCK"
             row.message = "Warehouse stock covers request"
         end
+        addRow(row)
+        return
+    end
+
+    -- A partial shipment from this exact MineColonies request snapshot has already
+    -- completed. Do not transfer more or start a craft until MineColonies changes
+    -- the request quantity/replaces the request. This is the serialization point
+    -- for multiple colonies sharing one Player RS network.
+    if type(rs.awaitingRequestRefresh) == "table" then
+        local gate = rs.awaitingRequestRefresh
+        local age = math.max(0, nowSeconds() - (tonumber(gate.since) or nowSeconds()))
+        row.status = "WAITING"
+        row.message = "Partial shipment sent; waiting for MineColonies request refresh" ..
+            " (" .. tostring(age) .. "s)"
         addRow(row)
         return
     end
@@ -5052,44 +5090,21 @@ local function processSingleRequest(request)
     ------------------------------------------------------------------
     local probeCleanup, probeRemaining = NBTX.probeCleanupStatus()
     if probeCleanup and playerStock > 0 then
-        local shortage = math.max(0, remaining - playerStock)
-        if shortage > 0
-            and autoCraftEnabled()
-            and NBTX.isCandidateCraftable(candidate) then
-            local craftOK, craftMessage, craftStarted =
-                NBTX.submitCandidateCraft(candidate, shortage)
-            if craftOK then
-                row.status = "CRAFTING"
-                row.message = "Probe item stuck in barrel; " ..
-                    tostring(craftMessage or ("crafting " .. tostring(craftStarted or shortage))) ..
-                    "; transfer waiting"
-            else
-                row.status = "BLOCKED"
-                row.message = "Probe item stuck in barrel; transfer waiting; " ..
-                    NBTX.craftErrorDisplay(craftMessage, "craft retry pending")
-            end
-        else
-            row.status = "BLOCKED"
-            row.message = "Probe item stuck in barrel: " ..
-                tostring(probeCleanup.item or "?") .. " x" .. tostring(probeRemaining) ..
-                "; transfer waiting"
-        end
+        row.status = "BLOCKED"
+        row.message = "Probe item stuck in barrel: " ..
+            tostring(probeCleanup.item or "?") .. " x" .. tostring(probeRemaining) ..
+            "; partial stock must transfer before shortage crafting"
         addRow(row)
         return
     end
 
     ------------------------------------------------------------------
-    -- v2.47 partial-stock craft-first safety:
-    -- If some stock exists but it cannot satisfy the remaining request and the
-    -- candidate is craftable, DO NOT export the partial stock first. Exporting
-    -- and then crafting the same item in the same request cycle has been observed
-    -- to stale/lock RS storage. Craft the shortage while the partial stock remains
-    -- untouched; a later scan transfers only after enough stock is visible.
+    -- v2.51 shared-RS policy:
+    -- Partial stock is transferred first. If Player RS has less than the live
+    -- request, do not craft the shortage from this same request snapshot. After
+    -- the shipment is confirmed, wait for MineColonies to publish the reduced
+    -- remainder before any craft decision is made.
     ------------------------------------------------------------------
-    if NBTX.deferPartialStockForCraft(row, candidate, playerStock, remaining) then
-        addRow(row)
-        return
-    end
 
     ------------------------------------------------------------------
     -- Source-stock transfer path. At this point either enough stock exists to
@@ -5123,40 +5138,26 @@ local function processSingleRequest(request)
                 row.status = "SUPPLIED"
                 row.message = "Imported into colony network"
             else
-                local shortage = math.max(
-                    0,
-                    (tonumber(row.remaining) or 0) -
-                    (tonumber(row.playerStock) or 0)
-                )
-
-                if shortage > 0
-                    and autoCraftEnabled()
-                    and NBTX.isCandidateCraftable(candidate) then
-
-                    local craftOK, craftMessage, craftStarted =
-                        NBTX.submitCandidateCraft(candidate, shortage)
-
-                    if craftOK then
-                        row.status = "CRAFTING"
-                        row.message = "Moved " .. tostring(moved) ..
-                            "; " .. tostring(craftMessage or
-                                ("crafting " .. tostring(craftStarted or shortage)))
-                    else
-                        -- This is not a failed request. We already transferred
-                        -- available stock, and the item remains craftable.
-                        -- Leave it PARTIAL and retry crafting on later scans.
-                        row.status = "PARTIAL"
-                        row.message = "Moved " .. tostring(moved) ..
-                            "; " .. NBTX.craftErrorDisplay(craftMessage, "craft retry pending")
-                        writeLog(
-                            "CRAFT RETRY pending item=" .. tostring(candidate.name) ..
-                            " shortage=" .. tostring(shortage) ..
-                            " reason=" .. tostring(craftMessage or "RS returned false")
-                        )
-                    end
+                -- If the Player RS snapshot did not contain enough stock to cover
+                -- this live MineColonies request, serialize the handoff: ship what
+                -- exists, then wait for MineColonies to publish the new remainder.
+                -- Do not predict/craft the shortage from this old snapshot.
+                if playerStock < remaining then
+                    NBTX.markAwaitingRequestRefresh(rs, requested, candidate, moved)
+                    saveState()
+                    row.status = "PARTIAL"
+                    row.message = "Moved " .. tostring(moved) ..
+                        "; waiting for MineColonies request refresh before crafting"
+                    writeLog(
+                        "PARTIAL WAIT request=" .. tostring(id) ..
+                        " item=" .. tostring(candidate.name) ..
+                        " requested=" .. tostring(requested) ..
+                        " moved=" .. tostring(moved) ..
+                        " playerSnapshot=" .. tostring(playerStock)
+                    )
                 else
                     row.status = "PARTIAL"
-                    row.message = "Transferred " .. moved
+                    row.message = "Transferred " .. tostring(moved)
                 end
             end
         else
