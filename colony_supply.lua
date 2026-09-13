@@ -299,6 +299,12 @@
   - Removes the experimental pristine-pattern fingerprint craft workaround; stored
     bad variants are treated as a hard autocrafting conflict rather than bypassed.
 
+  v2.55 partial destination drain/rollback isolation:
+    - import retries now continue draining after partial positive movement
+    - confirmed partial destination accepts immediately roll physical remainder back
+    - zero destination accepts immediately roll the staged shipment back
+    - only the affected request backs off; unrelated requests keep using the barrel
+
   v2.54 stranded-barrel rollback recovery:
   - Bounds repeated Player->Warehouse barrel->Colony import failures instead of
     leaving one pending transaction alive forever and blocking the shared barrel.
@@ -311,8 +317,8 @@
     Mixed/ambiguous barrel contents remain blocked for manual inspection.
 --]]
 
-local PROGRAM_VERSION = "2.54"
-local SUITE_VERSION = "1.1.19"
+local PROGRAM_VERSION = "2.55"
+local SUITE_VERSION = "1.1.20"
 
 local Util = require("colony.lib.util")
 local SharedUI = require("colony.lib.ui")
@@ -392,7 +398,10 @@ local CONFIG = {
     -- One recovery cycle already performs transferImportRetries import attempts.
     -- After this many failed recovery cycles, roll the stranded remainder back to
     -- Player RS and let the still-live MineColonies request retry cleanly.
-    pendingImportRollbackAttempts = 8,
+    pendingImportRollbackAttempts = 2,
+    -- After a destination-side rejection is safely rolled back, defer only that
+    -- request briefly so other requests can use the shared barrel.
+    destinationRetryCooldownSeconds = 30,
 
     requestRetentionSeconds = 3600,
     enableAutoCrafting = true,
@@ -3364,29 +3373,31 @@ end
 
 local function retryImport(importFunction, itemName, count, destinationLabel)
     local attempts = math.max(1, math.floor(tonumber(CONFIG.transferImportRetries) or 1))
+    local target = math.max(0, math.floor(tonumber(count) or 0))
+    local movedTotal = 0
     local lastErr = nil
 
-    for attempt = 1, attempts do
-        -- If the transfer barrel is visible over the wired modem, use it as the
-        -- authoritative transaction boundary. Advanced Peripherals/RS can return
-        -- a positive import count even when the inventory movement has not actually
-        -- occurred. Measuring the barrel prevents those false positives from being
-        -- credited to requests or transfer history.
-        local beforeBarrel = chestItemCount(itemName)
+    if target <= 0 then return 0, "Nothing to import" end
 
-        local reported, err = importFunction(itemName, count)
+    for attempt = 1, attempts do
+        local remaining = math.max(0, target - movedTotal)
+        if remaining <= 0 then return movedTotal, nil end
+
+        -- Measure every leg against the physical barrel. A partial positive import
+        -- is progress, not completion: continue draining the remainder within this
+        -- same bounded retry window instead of returning on the first moved>0.
+        local beforeBarrel = chestItemCount(itemName)
+        local reported, err = importFunction(itemName, remaining)
         reported = math.max(0, math.floor(tonumber(reported) or 0))
         local moved = reported
 
         if beforeBarrel ~= nil then
-            -- Give the inventory/peripheral view the same short settling period used
-            -- by the normal transfer path, then verify the physical barrel delta.
             transferSleep(CONFIG.transferSettleDelay)
             local afterBarrel = chestItemCount(itemName)
 
             if afterBarrel ~= nil then
                 local physicalMoved = math.max(0, beforeBarrel - afterBarrel)
-                physicalMoved = math.min(physicalMoved, math.max(0, math.floor(tonumber(count) or 0)))
+                physicalMoved = math.min(physicalMoved, remaining)
 
                 if physicalMoved ~= reported then
                     writeLog(
@@ -3406,8 +3417,6 @@ local function retryImport(importFunction, itemName, count, destinationLabel)
                     err = nil
                 end
             else
-                -- We began with a verifiable barrel, so do not downgrade to trusting
-                -- the bridge return value if the post-import observation disappears.
                 moved = 0
                 lastErr = "Transfer barrel verification unavailable after import"
                 writeLog(
@@ -3420,27 +3429,36 @@ local function retryImport(importFunction, itemName, count, destinationLabel)
         end
 
         if moved > 0 then
-            if attempt > 1 then
-                writeLog("IMPORT retry succeeded attempt=" .. tostring(attempt) ..
-                    " item=" .. tostring(itemName) ..
-                    " moved=" .. tostring(moved) ..
-                    " destination=" .. tostring(destinationLabel))
-            end
-            return moved, nil
-        end
+            movedTotal = math.min(target, movedTotal + moved)
+            lastErr = nil
+            writeLog("IMPORT progress attempt=" .. tostring(attempt) .. "/" .. tostring(attempts) ..
+                " item=" .. tostring(itemName) ..
+                " moved=" .. tostring(moved) ..
+                " total=" .. tostring(movedTotal) .. "/" .. tostring(target) ..
+                " destination=" .. tostring(destinationLabel))
 
-        if not lastErr then lastErr = err end
-        writeLog("IMPORT retry " .. tostring(attempt) .. "/" .. tostring(attempts) ..
-            " moved=0 item=" .. tostring(itemName) ..
-            " destination=" .. tostring(destinationLabel) ..
-            " reported=" .. tostring(reported) ..
-            " reason=" .. tostring(lastErr or err or "none"))
+            if movedTotal >= target then
+                return movedTotal, nil
+            end
+        else
+            if not lastErr then lastErr = err end
+            writeLog("IMPORT retry " .. tostring(attempt) .. "/" .. tostring(attempts) ..
+                " moved=0 item=" .. tostring(itemName) ..
+                " remaining=" .. tostring(remaining) ..
+                " destination=" .. tostring(destinationLabel) ..
+                " reported=" .. tostring(reported) ..
+                " reason=" .. tostring(lastErr or err or "none"))
+        end
 
         if attempt < attempts then
             transferSleep(CONFIG.transferRetryDelay)
         end
     end
 
+    if movedTotal > 0 then
+        return movedTotal, lastErr or ("Partial import " .. tostring(movedTotal) ..
+            "/" .. tostring(target) .. " after retries")
+    end
     return 0, lastErr or "Import returned 0 after retries"
 end
 
@@ -3477,6 +3495,40 @@ local function clearPending(reason)
     end
     state.pending = nil
     saveState()
+end
+
+
+-- A destination-side partial/rejected import must never monopolize the shared
+-- barrel. Once the physical remainder has safely returned to Player RS, either
+-- wait for MineColonies to republish a reduced request (when some amount arrived)
+-- or briefly back off only this request (when nothing arrived).
+function NBTX.deferAfterDestinationRollback(p, detail)
+    if type(p) ~= "table" or not p.requestId then return end
+    local rs = requestStateFor(p.requestId)
+    local delivered = math.max(0, math.floor(tonumber(p.imported) or 0))
+    local requestedSnapshot = math.max(0,
+        math.floor(tonumber(p.requestedSnapshot) or 0))
+
+    if delivered > 0 and requestedSnapshot > 0 then
+        NBTX.markAwaitingRequestRefresh(
+            rs,
+            requestedSnapshot,
+            { name = tostring(p.item or "") },
+            delivered
+        )
+        rs.destinationRetryAfter = nil
+        rs.destinationRetryItem = nil
+        rs.destinationRetryRequested = nil
+        rs.destinationRetryReason = nil
+    else
+        local cooldown = math.max(5,
+            math.floor(tonumber(CONFIG.destinationRetryCooldownSeconds) or 30))
+        rs.destinationRetryAfter = nowSeconds() + cooldown
+        rs.destinationRetryItem = tostring(p.item or "")
+        rs.destinationRetryRequested = requestedSnapshot
+        rs.destinationRetryReason = tostring(detail or
+            "Colony RS could not accept the staged shipment")
+    end
 end
 
 -- Return the one distinct item currently present in the dedicated transfer barrel.
@@ -3561,10 +3613,11 @@ function NBTX.rollbackPendingSupplyToPlayer(p)
         " reason=" .. tostring(err or "none"))
 
     if after ~= nil and after <= 0 then
+        NBTX.deferAfterDestinationRollback(p, p.lastError)
         clearPending("stranded supply remainder rolled back to Player RS")
         health.transfer = true
         health.message = "ROLLED BACK: " .. tostring(itemName) ..
-            " returned to Player RS; request may retry"
+            " returned to Player RS; request released"
         return true, "rolled back"
     end
 
@@ -4134,7 +4187,7 @@ local function recoverPendingTransfer()
     return false
 end
 
-local function performTransfer(requestId, itemName, amount, candidate)
+local function performTransfer(requestId, itemName, amount, candidate, requestedSnapshot)
     amount = math.min(roundDown(amount), CONFIG.maxTransferChunk)
     if amount <= 0 then return 0, "Nothing to transfer", "not_started" end
 
@@ -4164,6 +4217,7 @@ local function performTransfer(requestId, itemName, amount, candidate)
         imported = 0,
         stage = "prepared",
         started = nowSeconds(),
+        requestedSnapshot = math.max(0, math.floor(tonumber(requestedSnapshot) or 0)),
     }
     state.pending = p
     saveState()
@@ -4278,6 +4332,54 @@ local function performTransfer(requestId, itemName, amount, candidate)
         " request=" .. requestId ..
         " mode=" .. ((CONFIG.usePeripheralTransfer and CONFIG.transferChestName)
             and "peripheral" or "directional"))
+    end
+
+
+    -- v2.55: if the destination accepted a verified subset but a physical
+    -- remainder is still in the barrel, do not hold the global queue in TRANSFER.
+    -- The accepted amount is already destination-confirmed; safely return only the
+    -- untouched remainder to Player RS and serialize this request independently.
+    local physicalRemainder = chestItemCount(itemName)
+    if physicalRemainder ~= nil and physicalRemainder > 0 then
+        if barrelMoved > 0 and imported >= barrelMoved then
+            p.rollbackToPlayer = true
+            p.stage = "rollback"
+            p.lastError = "Colony RS accepted " .. tostring(imported) ..
+                "/" .. tostring(exported) .. "; rolling physical remainder " ..
+                tostring(physicalRemainder) .. " back to Player RS"
+            saveState()
+            writeLog("SUPPLY PARTIAL DESTINATION item=" .. tostring(itemName) ..
+                " confirmed=" .. tostring(imported) .. "/" .. tostring(exported) ..
+                " barrelRemainder=" .. tostring(physicalRemainder) ..
+                " - immediate rollback")
+            local rollbackOK, rollbackErr = NBTX.rollbackPendingSupplyToPlayer(p)
+            if rollbackOK then
+                return imported,
+                    "Colony accepted partial shipment; remainder returned to Player RS",
+                    "destination_partial_rollback"
+            end
+            return imported, rollbackErr or p.lastError, "source_export_ok"
+        elseif barrelMoved <= 0 then
+            -- No item left the barrel after the full bounded import window. Nothing
+            -- reached Colony RS, so the whole staged shipment can be safely returned
+            -- immediately without waiting multiple global scan cycles.
+            p.rollbackToPlayer = true
+            p.stage = "rollback"
+            p.lastError = "Colony RS accepted 0/" .. tostring(exported) ..
+                "; returning staged shipment to Player RS"
+            saveState()
+            writeLog("SUPPLY DESTINATION REJECTED item=" .. tostring(itemName) ..
+                " exported=" .. tostring(exported) ..
+                " barrel=" .. tostring(physicalRemainder) ..
+                " - immediate rollback")
+            local rollbackOK, rollbackErr = NBTX.rollbackPendingSupplyToPlayer(p)
+            if rollbackOK then
+                return 0,
+                    "Colony storage rejected shipment; returned to Player RS",
+                    "destination_rejected_rollback"
+            end
+            return 0, rollbackErr or p.lastError, "source_export_ok"
+        end
     end
 
     if imported >= exported then
@@ -5088,6 +5190,32 @@ local function processSingleRequest(request)
         return
     end
 
+
+    -- Destination rejection is isolated to this request. The barrel has already
+    -- been returned/cleared, so unrelated requests continue while this one backs
+    -- off briefly instead of immediately bouncing the same stack again.
+    if tonumber(rs.destinationRetryAfter) then
+        local sameItem = tostring(rs.destinationRetryItem or "") == tostring(candidate.name or "")
+        local oldRequested = math.max(0,
+            math.floor(tonumber(rs.destinationRetryRequested) or 0))
+        local requestChanged = oldRequested > 0 and requested ~= oldRequested
+        local wait = math.max(0, math.floor(tonumber(rs.destinationRetryAfter) - nowSeconds()))
+
+        if not sameItem or requestChanged or wait <= 0 then
+            rs.destinationRetryAfter = nil
+            rs.destinationRetryItem = nil
+            rs.destinationRetryRequested = nil
+            rs.destinationRetryReason = nil
+            saveState()
+        else
+            row.status = "WAITING"
+            row.message = "Colony storage rejected previous shipment; retry in " ..
+                tostring(wait) .. "s; other requests continue"
+            addRow(row)
+            return
+        end
+    end
+
     if state.pending and state.pending.requestId == id then
         row.status = "TRANSFER"
         local p = state.pending
@@ -5222,7 +5350,7 @@ local function processSingleRequest(request)
 
         local transferAmount = math.min(remaining, playerStock, CONFIG.maxTransferChunk)
         local moved, err, transferState =
-            performTransfer(id, candidate.name, transferAmount, candidate)
+            performTransfer(id, candidate.name, transferAmount, candidate, requested)
 
         row.supplied = tonumber(requestStateFor(id).supplied) or supplied
         row.remaining = effectiveRemaining(requested, row.supplied, NBTX.getRSAmountByCandidate(colonyRS, candidate))
@@ -5247,7 +5375,17 @@ local function processSingleRequest(request)
                 -- this live MineColonies request, serialize the handoff: ship what
                 -- exists, then wait for MineColonies to publish the new remainder.
                 -- Do not predict/craft the shortage from this old snapshot.
-                if playerStock < remaining then
+                if transferState == "destination_partial_rollback" then
+                    NBTX.markAwaitingRequestRefresh(rs, requested, candidate, moved)
+                    saveState()
+                    row.status = "PARTIAL"
+                    row.message = "Moved " .. tostring(moved) ..
+                        "; Colony accepted partial shipment; remainder returned; waiting for request refresh"
+                    writeLog("DESTINATION PARTIAL WAIT request=" .. tostring(id) ..
+                        " item=" .. tostring(candidate.name) ..
+                        " requested=" .. tostring(requested) ..
+                        " moved=" .. tostring(moved))
+                elseif playerStock < remaining then
                     NBTX.markAwaitingRequestRefresh(rs, requested, candidate, moved)
                     saveState()
                     row.status = "PARTIAL"
@@ -5274,7 +5412,15 @@ local function processSingleRequest(request)
                 freshStock = NBTX.getRSAmountByCandidate(playerRS, candidate)
             end
 
-            if transferState == "source_export_ok" then
+            if transferState == "destination_rejected_rollback" then
+                row.status = "WAITING"
+                local wait = math.max(0, math.floor(
+                    (tonumber(rs.destinationRetryAfter) or nowSeconds()) - nowSeconds()))
+                row.message = "Colony storage rejected shipment; returned to Player RS" ..
+                    (wait > 0 and ("; retry in " .. tostring(wait) .. "s") or "") ..
+                    "; other requests continue"
+
+            elseif transferState == "source_export_ok" then
                 -- Player RS extraction succeeded. Any failure now is on the
                 -- barrel -> colony side, so never classify it as RS source desync
                 -- and never start another craft while the pending transfer exists.
