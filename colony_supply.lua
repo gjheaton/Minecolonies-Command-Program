@@ -317,15 +317,17 @@
     Mixed/ambiguous barrel contents remain blocked for manual inspection.
 --]]
 
--- v2.56 / suite 1.1.21:
---   Treat verified physical barrel->Colony movement as a sent shipment and wait
---   for MineColonies to refresh the request before sending/crafting more. Colony
---   RS stock snapshots remain diagnostic only because couriers can consume items
---   before a stable warehouse gain is observable. Partial rejected remainders are
---   rolled back immediately, history records physical P>WH movement, and dashboard
---   rows are published during long scans so the monitor stays live.
-local PROGRAM_VERSION = "2.56"
-local SUITE_VERSION = "1.1.21"
+-- v2.57 / suite 1.1.22:
+--   Shared-Player-RS stability pass for two colony Supply computers:
+--   * remove the permanent v2.56 request-refresh gate;
+--   * defer only partial-stock/craftable requests, and only for a bounded window;
+--   * limit each scan to one Player-RS mutation (export or craft start);
+--   * rotate request processing for fairness and stagger computers by ID;
+--   * require repeated export=0 failures across separate scans before RS STALE;
+--   * avoid the immediate multi-read stale probe after a single export failure;
+--   * add explicit history diagnostics/newest timestamp without auto-changing pages.
+local PROGRAM_VERSION = "2.57"
+local SUITE_VERSION = "1.1.22"
 
 local Util = require("colony.lib.util")
 local SharedUI = require("colony.lib.ui")
@@ -421,15 +423,26 @@ local CONFIG = {
     craftErrorCooldownSeconds = 300,
     craftErrorMaxCooldownSeconds = 3600,
 
-    -- If Player RS reports stock but exportItem() moves 0, do not immediately
-    -- trust either side of the contradiction. Invalidate the cached listItems()
-    -- snapshot and require several stable fresh reads before quarantining only
-    -- that item as RS STALE. Unrelated requests continue normally.
+    -- Shared Player-RS stability controls. With two colony computers using the
+    -- same RS network, a single export=0 can simply mean that another consumer won
+    -- the race. Do not hammer the bridge with immediate verification reads.
     rsDesyncProbeSeconds = 30,
-    rsStaleVerifyReads = 3,
-    rsStaleVerifyDelay = 0.10,
+    rsExportZeroFailuresBeforeStale = 3,
+    rsExportZeroFailureWindowSeconds = 120,
     rsStaleRetentionSeconds = 3600,
     rsStaleMaxEntries = 64,
+
+    -- v2.57: the v2.56 MineColonies acknowledgement gate was too strict because
+    -- many requests keep the same numeric count while couriers fulfill them.
+    -- Only the risky partial-stock + craftable-shortage case is deferred, and the
+    -- defer expires if MineColonies does not republish the request.
+    requestRefreshDeferSeconds = 10,
+
+    -- Reduce contention when two Supply Managers mutate one Player RS network.
+    -- A scan may either export one supply item OR start one craft, not both/many.
+    maxPlayerRSMutationsPerScan = 1,
+    processorStaggerStepSeconds = 0.35,
+    processorStaggerSlots = 5,
 
     -- MineColonies getRequests() is already the authoritative list of
     -- outstanding requests. Warehouse stock is therefore DISPLAYED but
@@ -907,6 +920,12 @@ local function recordTransferHistory(direction, itemName, amount, requestId, not
     while #state.history > maxEntries do
         table.remove(state.history)
     end
+
+    writeLog("HISTORY " .. tostring(direction or "?") ..
+        " item=" .. tostring(itemName or "?") ..
+        " amount=" .. tostring(amount) ..
+        " note=" .. tostring(note or "none") ..
+        " entries=" .. tostring(#state.history))
 end
 
 local function saveState()
@@ -1315,8 +1334,9 @@ end
 -- getItem() bugs for RS Bridge:
 --   1. craftable-but-not-stored items can report phantom nonzero amounts;
 --   2. getItem() with NBT can lock the matching RS stack so exportItem() returns 0.
--- Use listItems() as the source of truth for ACTUALLY STORED stock. Cache the
--- snapshot briefly because a request scan asks for the same bridge repeatedly.
+-- Use listItems() as the source of truth for ACTUALLY STORED stock. During a
+-- processor scan, reuse one snapshot until an actual mutation invalidates it;
+-- outside a scan (diagnostics), retain the original short 500 ms cache.
 function NBTX.rsListCacheKey(bridge)
     if not bridge then return nil end
     local ok, name = pcall(peripheral.getName, bridge)
@@ -1334,9 +1354,11 @@ function NBTX.getRSListItems(bridge, force)
     local now = nowMs()
     local cacheKey = NBTX.rsListCacheKey(bridge)
     local cached = cacheKey and NBTX.rsListCache[cacheKey] or nil
+    local scanSeq = tonumber(NBTX.scanSequence)
     if not force and type(cached) == "table"
         and type(cached.items) == "table"
-        and now - (tonumber(cached.time) or 0) <= 500 then
+        and ((scanSeq ~= nil and tonumber(cached.scanSequence) == scanSeq)
+            or (scanSeq == nil and now - (tonumber(cached.time) or 0) <= 500)) then
         return cached.items
     end
 
@@ -1344,7 +1366,11 @@ function NBTX.getRSListItems(bridge, force)
     if not ok or type(items) ~= "table" then return nil end
 
     if cacheKey then
-        NBTX.rsListCache[cacheKey] = { time = now, items = items }
+        NBTX.rsListCache[cacheKey] = {
+            time = now,
+            items = items,
+            scanSequence = scanSeq,
+        }
     end
     return items
 end
@@ -3003,49 +3029,9 @@ function NBTX.getPristineEquipmentVariants(bridge, candidate)
     return variants, total, rejected, matching
 end
 
--- Return a fresh Player-RS stock count for a request candidate. Cache is
--- explicitly invalidated first, so every call below corresponds to a new
--- listItems() snapshot rather than the normal 500 ms shared scan cache.
-function NBTX.getFreshPlayerStock(candidate)
-    NBTX.invalidateRSList(playerRS)
-    if type(candidate) == "table" and candidate.requiresPristine then
-        local _, cleanStock = NBTX.getPristineEquipmentVariants(playerRS, candidate)
-        return math.max(0, tonumber(cleanStock) or 0)
-    end
-    return math.max(0, tonumber(NBTX.getRSAmountByCandidate(playerRS, candidate)) or 0)
-end
-
--- Verify an apparent export=0 contradiction without retaining snapshots. The
--- stock value must remain positive and unchanged across all fresh reads to be
--- classified as an RS STALE item. Any change means RS is actively refreshing,
--- so the caller simply retries on a later scan instead of creating a latch.
-function NBTX.confirmRSStale(candidate, baselineStock)
-    local reads = math.max(2, math.min(5, math.floor(tonumber(CONFIG.rsStaleVerifyReads) or 3)))
-    local delay = math.max(0, math.min(1, tonumber(CONFIG.rsStaleVerifyDelay) or 0.10))
-    local baseline = math.max(0, math.floor(tonumber(baselineStock) or 0))
-    local previous = baseline
-    local current = baseline
-    local samples = ""
-
-    for i = 1, reads do
-        current = math.floor(NBTX.getFreshPlayerStock(candidate))
-        samples = samples .. (i > 1 and "," or "") .. tostring(current)
-
-        if current <= 0 then
-            return false, current, "fresh stock disappeared; samples=" .. samples
-        end
-        if previous > 0 and current ~= previous then
-            return false, current, "fresh stock changed; samples=" .. samples
-        end
-
-        previous = current
-        if i < reads and delay > 0 then sleep(delay) end
-    end
-
-    return true, current, "stable positive stock across " .. tostring(reads) ..
-        " fresh reads; samples=" .. samples
-end
-
+-- v2.57: immediate multi-read RS stale verification was removed.
+-- Normal request processing now waits for repeated export=0 failures across
+-- separate scans before quarantining an item as RS STALE.
 function NBTX.populateCandidateAvailability(candidate)
     if candidate.requiresPristine then
         local playerVariants, playerClean, playerRejected, playerMatching =
@@ -3516,7 +3502,7 @@ function NBTX.deferAfterDestinationRollback(p, detail)
     local requestedSnapshot = math.max(0,
         math.floor(tonumber(p.requestedSnapshot) or 0))
 
-    if delivered > 0 and requestedSnapshot > 0 then
+    if delivered > 0 and requestedSnapshot > 0 and p.deferForRefresh == true then
         NBTX.markAwaitingRequestRefresh(
             rs,
             requestedSnapshot,
@@ -4343,7 +4329,7 @@ local function recoverPendingTransfer()
     return false
 end
 
-local function performTransfer(requestId, itemName, amount, candidate, requestedSnapshot)
+local function performTransfer(requestId, itemName, amount, candidate, requestedSnapshot, deferForRefresh)
     amount = math.min(roundDown(amount), CONFIG.maxTransferChunk)
     if amount <= 0 then return 0, "Nothing to transfer", "not_started" end
 
@@ -4374,6 +4360,7 @@ local function performTransfer(requestId, itemName, amount, candidate, requested
         stage = "prepared",
         started = nowSeconds(),
         requestedSnapshot = math.max(0, math.floor(tonumber(requestedSnapshot) or 0)),
+        deferForRefresh = deferForRefresh == true,
     }
     state.pending = p
     saveState()
@@ -4479,18 +4466,25 @@ local function performTransfer(requestId, itemName, amount, candidate, requested
 
     if accepted > 0 then
         local rs = requestStateFor(requestId)
-        NBTX.markAwaitingRequestRefresh(
-            rs,
-            p.requestedSnapshot,
-            candidate or { name = itemName },
-            accepted
-        )
-        saveState()
-        clearPending("barrel->Colony physical movement completed; awaiting MineColonies request refresh")
+        if p.deferForRefresh == true then
+            NBTX.markAwaitingRequestRefresh(
+                rs,
+                p.requestedSnapshot,
+                candidate or { name = itemName },
+                accepted
+            )
+            saveState()
+            clearPending("barrel->Colony movement completed; partial-stock request defer armed")
+            health.transfer = true
+            health.message = "Sent " .. tostring(accepted) .. " " .. tostring(itemName) ..
+                "; short MineColonies refresh defer"
+            return accepted, nil, "sent_waiting_request_refresh"
+        end
+
+        clearPending("barrel->Colony physical movement completed")
         health.transfer = true
-        health.message = "Sent " .. tostring(accepted) .. " " .. tostring(itemName) ..
-            "; waiting for MineColonies acknowledgement"
-        return accepted, nil, "sent_waiting_request_refresh"
+        health.message = "Sent " .. tostring(accepted) .. " " .. tostring(itemName)
+        return accepted, nil, "sent"
     end
 
     -- A readable empty barrel with accepted==0 should be impossible when exported
@@ -4843,9 +4837,10 @@ local STATUS_PRIORITY = {
     CRAFTING = 6,
     READY = 7,
     TRANSFER = 8,
-    WAITING = 9,
-    SUPPLIED = 10,
-    ["IN STOCK"] = 11,
+    QUEUED = 9,
+    WAITING = 10,
+    SUPPLIED = 11,
+    ["IN STOCK"] = 12,
 }
 
 local STATUS_COLORS = {
@@ -4859,6 +4854,7 @@ local STATUS_COLORS = {
     CRAFTING = colors.lightBlue,
     READY = colors.lime,
     TRANSFER = colors.cyan,
+    QUEUED = colors.lightGray,
     WAITING = colors.orange,
     SUPPLIED = colors.green,
     ["IN STOCK"] = colors.green,
@@ -5107,23 +5103,39 @@ local function processSingleRequest(request)
     local requested = getRequestedCount(request)
     local rs = requestStateFor(id)
 
-    -- v2.51: If MineColonies reuses the same request ID but changes the requested
-    -- quantity after a partial delivery, the new quantity is already the authoritative
-    -- remainder. Clear the old local supplied credit before candidate selection so we
-    -- never subtract the same delivery twice.
-    if type(rs.awaitingRequestRefresh) == "table" then
-        local oldRequested = math.max(0, math.floor(tonumber(rs.awaitingRequestRefresh.requested) or 0))
-        if requested ~= oldRequested then
+    -- v2.57 request-snapshot accounting. MineColonies may keep the same request
+    -- count while couriers are fulfilling it, so an unchanged count must NOT erase
+    -- our sent credit. If the same request ID publishes a different numeric count,
+    -- that new count is authoritative (typically the remaining amount after a
+    -- partial delivery), so reset the old local credit exactly once.
+    local gateRequested = type(rs.awaitingRequestRefresh) == "table"
+        and tonumber(rs.awaitingRequestRefresh.requested) or nil
+    local previousRequested = math.max(0,
+        math.floor(tonumber(rs.lastRequested) or gateRequested or 0))
+    if previousRequested > 0 and requested ~= previousRequested then
+        if type(rs.awaitingRequestRefresh) == "table" then
             NBTX.clearAwaitingRequestRefresh(
                 rs,
-                "MineColonies quantity changed " .. tostring(oldRequested) ..
+                "MineColonies quantity changed " .. tostring(previousRequested) ..
                     "->" .. tostring(requested)
             )
-            rs.supplied = 0
-            rs.lastTransfer = nil
-            saveState()
         end
+        if (tonumber(rs.supplied) or 0) > 0 then
+            writeLog("REQUEST SNAPSHOT changed id=" .. tostring(id) ..
+                " requested=" .. tostring(previousRequested) ..
+                "->" .. tostring(requested) ..
+                " clearing local supplied=" .. tostring(rs.supplied))
+        end
+        rs.supplied = 0
+        rs.lastTransfer = nil
+        rs.destinationRetryAfter = nil
+        rs.destinationRetryItem = nil
+        rs.destinationRetryRequested = nil
+        rs.destinationRetryReason = nil
+        rs.exportZeroFailures = nil
+        rs.exportZeroLast = nil
     end
+    rs.lastRequested = requested
 
     if requested <= 0 then
         addRow({
@@ -5209,29 +5221,10 @@ local function processSingleRequest(request)
     local playerStock = candidate.playerStock or NBTX.getRSAmountByCandidate(playerRS, candidate)
     local warehouseStock = candidate.warehouseStock or NBTX.getRSAmountByCandidate(colonyRS, candidate)
 
-    -- v2.50 recovery for credits created by older barrel-only confirmation. If
-    -- Supply believes it fully satisfied this still-active request, Colony RS
-    -- contains none of the item, and the grace period has elapsed, the local
-    -- credit is stale. Drop only that request's credit so the live request can
-    -- retry; settings/history and unrelated request state are untouched.
-    if supplied >= requested and requested > 0 and warehouseStock <= 0
-        and not state.pending and tonumber(rs.lastTransfer)
-        and type(rs.awaitingRequestRefresh) ~= "table" then
-        local age = nowSeconds() - tonumber(rs.lastTransfer)
-        local grace = math.max(5, math.floor(tonumber(CONFIG.destinationConfirmTimeout) or 20))
-        if age >= grace then
-            writeLog("REQUEST CREDIT RECONCILE id=" .. tostring(id) ..
-                " item=" .. tostring(candidate.name) ..
-                " supplied=" .. tostring(supplied) ..
-                " requested=" .. tostring(requested) ..
-                " warehouse=0 age=" .. tostring(age) ..
-                " - live request still active; clearing stale local credit")
-            rs.supplied = 0
-            rs.lastTransfer = nil
-            supplied = 0
-            saveState()
-        end
-    end
+    -- v2.57: do NOT clear sent credit merely because Warehouse/Colony RS shows
+    -- zero stock. Couriers can consume a delivery before that External Storage
+    -- view is sampled. Numeric MineColonies request changes (handled above) are
+    -- the authoritative signal that a new remainder snapshot was published.
 
     local remaining = effectiveRemaining(requested, supplied, warehouseStock)
 
@@ -5274,18 +5267,30 @@ local function processSingleRequest(request)
         saveState()
     end
 
-    -- Every physical P>WH shipment is serialized against the MineColonies request
-    -- snapshot. The warehouse External Storage view can be transient because a
-    -- courier may consume the item immediately, so request refresh/disappearance
-    -- is the authoritative acknowledgement before this request may send/craft more.
+    -- v2.57: only partial-stock + craftable-shortage shipments use this gate.
+    -- MineColonies often keeps the same numeric request count while couriers are
+    -- fulfilling it, so the gate is bounded. If no refreshed request arrives,
+    -- keep our local supplied credit and continue from fresh stock after the defer.
     if type(rs.awaitingRequestRefresh) == "table" then
         local gate = rs.awaitingRequestRefresh
         local age = math.max(0, nowSeconds() - (tonumber(gate.since) or nowSeconds()))
-        row.status = "WAITING"
-        row.message = "Sent " .. tostring(gate.moved or 0) ..
-            "; waiting for MineColonies request refresh (" .. tostring(age) .. "s)"
-        addRow(row)
-        return
+        local deferSeconds = math.max(2,
+            math.floor(tonumber(CONFIG.requestRefreshDeferSeconds) or 10))
+
+        if age < deferSeconds then
+            row.status = "WAITING"
+            row.message = "Sent " .. tostring(gate.moved or 0) ..
+                "; short request refresh defer (" .. tostring(age) ..
+                "/" .. tostring(deferSeconds) .. "s)"
+            addRow(row)
+            return
+        end
+
+        NBTX.clearAwaitingRequestRefresh(
+            rs,
+            "bounded refresh defer elapsed; retaining local supplied credit"
+        )
+        saveState()
     end
 
     if remaining <= 0 then
@@ -5457,9 +5462,28 @@ local function processSingleRequest(request)
     if playerStock > 0 then
         row.status = supplied > 0 and "PARTIAL" or "READY"
 
+        local mutationLimit = math.max(1,
+            math.floor(tonumber(CONFIG.maxPlayerRSMutationsPerScan) or 1))
+        local mutationCount = math.max(0, tonumber(NBTX.scanPlayerRSMutations) or 0)
+        if mutationCount >= mutationLimit then
+            row.status = "QUEUED"
+            row.message = "Player RS mutation slot used this scan; queued for next scan"
+            addRow(row)
+            return
+        end
+
+        -- Only the partial-stock + craftable-shortage case needs the short
+        -- MineColonies refresh defer. Full-stock transfers use local supplied
+        -- accounting and do not wait forever for the request count to change.
+        local deferForRefresh =
+            candidate.craftable == true and playerStock < remaining
+
+        NBTX.scanPlayerRSMutations = mutationCount + 1
+
         local transferAmount = math.min(remaining, playerStock, CONFIG.maxTransferChunk)
         local moved, err, transferState =
-            performTransfer(id, candidate.name, transferAmount, candidate, requested)
+            performTransfer(id, candidate.name, transferAmount, candidate, requested,
+                deferForRefresh)
 
         row.supplied = tonumber(requestStateFor(id).supplied) or supplied
         row.remaining = effectiveRemaining(requested, row.supplied, NBTX.getRSAmountByCandidate(colonyRS, candidate))
@@ -5473,14 +5497,14 @@ local function processSingleRequest(request)
         end
 
         if moved > 0 then
+            rs.exportZeroFailures = nil
+            rs.exportZeroLast = nil
             if itemDesync then
                 NBTX.clearRSDesync(candidate, "item export retry succeeded")
             end
 
-            -- v2.56: every physical Colony send is acknowledgement-gated.
-            -- performTransfer()/rollback recovery already created the gate; render
-            -- it immediately rather than calling the request SUPPLIED from local
-            -- counters before MineColonies has refreshed the request.
+            -- v2.57: only partial-stock + craftable-shortage sends are
+            -- acknowledgement-deferred. Full-stock sends use local supplied credit.
             if type(rs.awaitingRequestRefresh) == "table" then
                 local gate = rs.awaitingRequestRefresh
                 row.status = row.remaining > 0 and "PARTIAL" or "WAITING"
@@ -5534,39 +5558,56 @@ local function processSingleRequest(request)
                 )
 
             elseif transferState == "source_export_zero" then
-                -- A real export contradicted the positive stock snapshot. Do not
-                -- globally latch on one contradiction. First require multiple
-                -- stable, uncached listItems() reads. If RS changes underneath us,
-                -- treat it as a transient refresh and retry on the next scan.
-                local baseline = math.max(tonumber(freshStock) or 0, tonumber(playerStock) or 0)
-                local staleConfirmed, verifiedStock, verifyDetail =
-                    NBTX.confirmRSStale(candidate, baseline)
+                -- With two Supply computers sharing Player RS, another consumer
+                -- can legitimately win between our stock read and export call.
+                -- Do NOT immediately hammer listItems() several more times here.
+                local now = nowSeconds()
+                local window = math.max(10,
+                    math.floor(tonumber(CONFIG.rsExportZeroFailureWindowSeconds) or 120))
+                local threshold = math.max(2,
+                    math.floor(tonumber(CONFIG.rsExportZeroFailuresBeforeStale) or 3))
 
-                if staleConfirmed then
+                if not tonumber(rs.exportZeroLast)
+                    or now - tonumber(rs.exportZeroLast) > window then
+                    rs.exportZeroFailures = 0
+                end
+
+                rs.exportZeroFailures = math.max(0,
+                    math.floor(tonumber(rs.exportZeroFailures) or 0)) + 1
+                rs.exportZeroLast = now
+                NBTX.invalidateRSList(playerRS)
+                saveState()
+
+                local failures = rs.exportZeroFailures
+                local baseline = math.max(tonumber(freshStock) or 0,
+                    tonumber(playerStock) or 0)
+
+                if failures >= threshold then
                     NBTX.markRSDesync(
                         candidate,
-                        verifiedStock,
+                        baseline,
                         remaining,
-                        err or verifyDetail or "Player RS export returned 0 with stable positive stock"
+                        err or ("Player RS export returned 0 on " ..
+                            tostring(failures) .. " separate scans")
                     )
                     row.status = "RS STALE"
                     local _, _, retryDue, retryWait = NBTX.getRSDesync(candidate)
                     row.rsCountdown = retryDue and 0 or retryWait
-                    local entry = select(1, NBTX.getRSDesync(candidate))
-                    local failures = type(entry) == "table" and (tonumber(entry.failures) or 1) or 1
-                    row.message = "Player RS reports " .. tostring(verifiedStock) ..
-                        " but export moved 0; stale retry " .. tostring(failures) ..
-                        "; other requests continue" ..
-                        (failures >= 3 and "; reseat RS storage disk if persistent" or "")
+                    row.message = "Player RS export returned 0 on " ..
+                        tostring(failures) .. " scans; backing off this item" ..
+                        (failures >= threshold and
+                            "; reseat RS storage disk if Grid item is unresponsive" or "")
                 else
-                    NBTX.clearRSDesync(candidate, verifyDetail or "fresh RS stock changed")
                     row.status = "WAITING"
                     row.rsCountdown = nil
-                    row.message = "RS inventory refreshed after export=0; retrying next scan"
-                    writeLog("RS STALE NOT CONFIRMED item=" .. tostring(candidate.name) ..
-                        " baseline=" .. tostring(baseline) ..
-                        " verified=" .. tostring(verifiedStock) ..
-                        " detail=" .. tostring(verifyDetail or "none"))
+                    row.message = "Player RS stock changed/busy; export=0 (" ..
+                        tostring(failures) .. "/" .. tostring(threshold) ..
+                        "), retry next scan"
+                    writeLog("SOURCE EXPORT ZERO transient item=" ..
+                        tostring(candidate.name) ..
+                        " failures=" .. tostring(failures) ..
+                        "/" .. tostring(threshold) ..
+                        " reported=" .. tostring(baseline))
                 end
 
             else
@@ -5591,6 +5632,17 @@ local function processSingleRequest(request)
     end
 
     if autoCraftEnabled() and candidate.craftable then
+        local mutationLimit = math.max(1,
+            math.floor(tonumber(CONFIG.maxPlayerRSMutationsPerScan) or 1))
+        local mutationCount = math.max(0, tonumber(NBTX.scanPlayerRSMutations) or 0)
+        if mutationCount >= mutationLimit then
+            row.status = "QUEUED"
+            row.message = "Player RS mutation slot used this scan; craft queued"
+            addRow(row)
+            return
+        end
+
+        NBTX.scanPlayerRSMutations = mutationCount + 1
         local craftOK, craftMessage, craftStarted =
             NBTX.submitCandidateCraft(candidate, remaining)
 
@@ -5677,6 +5729,9 @@ local function cleanupOldRequestState(activeIds)
 end
 
 local function scanAndProcess()
+    NBTX.scanPlayerRSMutations = 0
+    NBTX.scanSequence = math.max(0, math.floor(tonumber(NBTX.scanSequence) or 0)) + 1
+
     -- Build a fresh request dashboard. addRow() publishes the in-progress table
     -- after the first completed row so the one-second render loop stays live even
     -- when a scan contains many transfers/retries.
@@ -5690,9 +5745,12 @@ local function scanAndProcess()
         return false
     end
 
-    -- Probe-return cleanup is independent of RS source health. Retry it every
-    -- scan; a manually emptied barrel is recognized immediately.
+    -- Recovery/cleanup gets the scan's Player-RS mutation slot. Do not recover
+    -- an item into Player RS and then immediately start another export/craft in
+    -- the same scan; that burst behavior is undesirable on a shared RS network.
     if state.probeCleanup then
+        NBTX.scanPlayerRSMutations = math.max(1,
+            tonumber(NBTX.scanPlayerRSMutations) or 0)
         NBTX.tryProbeCleanup()
     end
 
@@ -5700,10 +5758,17 @@ local function scanAndProcess()
     -- the dedicated transfer barrel still contained a stranded supply item.
     -- Recover one unambiguous orphan back to Player RS before processing requests.
     if not state.pending then
+        local orphanEmpty = chestIsEmpty()
+        if orphanEmpty == false then
+            NBTX.scanPlayerRSMutations = math.max(1,
+                tonumber(NBTX.scanPlayerRSMutations) or 0)
+        end
         NBTX.recoverOrphanedBarrel()
     end
 
     if state.pending then
+        NBTX.scanPlayerRSMutations = math.max(1,
+            tonumber(NBTX.scanPlayerRSMutations) or 0)
         if not recoverPendingTransfer() then
             -- Still show requests, but do not perform new A->chest exports.
             -- recoverPendingTransfer() sets a detailed health.message which
@@ -5733,24 +5798,43 @@ local function scanAndProcess()
     end
 
     local activeIds = {}
+    local activeRequests = {}
 
     for _, request in pairs(requests) do
         if isRequestActive(request) then
             activeIds[request.id] = true
-            local ok, processErr = pcall(processSingleRequest, request)
-            if not ok then
-                writeLog("REQUEST ERROR id=" .. tostring(request.id) .. " " .. tostring(processErr))
-                addRow({
-                    id = request.id,
-                    displayName = request.name or "Request error",
-                    requested = getRequestedCount(request),
-                    supplied = 0,
-                    playerStock = 0,
-                    warehouseStock = 0,
-                    status = "ERROR",
-                    message = tostring(processErr),
-                })
-            end
+            activeRequests[#activeRequests + 1] = request
+        end
+    end
+
+    -- Rotate the first processed request each scan. With one Player-RS mutation
+    -- slot per scan this prevents a stable request ordering from starving later
+    -- requests indefinitely.
+    table.sort(activeRequests, function(a, b)
+        return tostring(a.id or "") < tostring(b.id or "")
+    end)
+
+    local requestCount = #activeRequests
+    local startIndex = requestCount > 0
+        and ((math.max(1, tonumber(NBTX.scanSequence) or 1) - 1) % requestCount) + 1
+        or 1
+
+    for step = 0, requestCount - 1 do
+        local index = ((startIndex + step - 1) % requestCount) + 1
+        local request = activeRequests[index]
+        local ok, processErr = pcall(processSingleRequest, request)
+        if not ok then
+            writeLog("REQUEST ERROR id=" .. tostring(request.id) .. " " .. tostring(processErr))
+            addRow({
+                id = request.id,
+                displayName = request.name or "Request error",
+                requested = getRequestedCount(request),
+                supplied = 0,
+                playerStock = 0,
+                warehouseStock = 0,
+                status = "ERROR",
+                message = tostring(processErr),
+            })
         end
     end
 
@@ -5766,7 +5850,8 @@ local function scanAndProcess()
     buildSettingsRows()
     local overflowMoved = 0
     local overflowErr = nil
-    if not state.pending and not state.probeCleanup and not NBTX.isRSSafetyLatched() then
+    if not state.pending and not state.probeCleanup and not NBTX.isRSSafetyLatched()
+        and math.max(0, tonumber(NBTX.scanPlayerRSMutations) or 0) == 0 then
         overflowMoved, overflowErr = processWarehouseOverflow()
         overflowMoved = tonumber(overflowMoved) or 0
     end
@@ -6353,11 +6438,13 @@ local function renderHistoryMonitor()
     local rowsPerPage, totalPages = historyRowsPerPage()
     historyPage = clamp(historyPage, 1, totalPages)
 
+    local newestTime = (#history > 0 and tostring(history[1].time or "--:--:--"))
+        or "--:--:--"
     drawSupplyHeader(
         w,
         "TRANSFER HISTORY  (" .. tostring(#history) .. ")  PAGE " ..
             tostring(historyPage) .. "/" .. tostring(totalPages),
-        "P>WH = SUPPLY  |  WH>P = OVERFLOW  |  Newest first",
+        "P>WH=SUPPLY | WH>P=OVERFLOW | Newest " .. newestTime,
         UI.muted
     )
 
@@ -7085,6 +7172,16 @@ end
 --------------------------------------------------------------------------
 
 local function processorLoop()
+    -- Deterministic phase offset reduces the chance that two colony computers
+    -- started together will hit the shared Player RS bridge at the same instant.
+    local slots = math.max(1,
+        math.floor(tonumber(CONFIG.processorStaggerSlots) or 5))
+    local step = math.max(0,
+        tonumber(CONFIG.processorStaggerStepSeconds) or 0.35)
+    local computerId = tonumber(os.getComputerID and os.getComputerID() or 0) or 0
+    local initialDelay = (computerId % slots) * step
+    if initialDelay > 0 then sleep(initialDelay) end
+
     while true do
         local ok, err = pcall(scanAndProcess)
         if not ok then
