@@ -298,10 +298,21 @@
     Refined Storage's crafting calculator. This contains observed / by zero failures.
   - Removes the experimental pristine-pattern fingerprint craft workaround; stored
     bad variants are treated as a hard autocrafting conflict rather than bypassed.
+
+  v2.54 stranded-barrel rollback recovery:
+  - Bounds repeated Player->Warehouse barrel->Colony import failures instead of
+    leaving one pending transaction alive forever and blocking the shared barrel.
+  - After repeated failed Colony imports, any remainder still physically present in
+    the dedicated transfer barrel is returned to Player RS without crediting the
+    MineColonies request; the live request may then retry from authoritative state.
+  - A pending transaction is cleared only after rollback physically empties the barrel.
+  - If the program starts with no pending transaction but finds exactly one item type
+    orphaned in the dedicated transfer barrel, it safely returns that item to Player RS.
+    Mixed/ambiguous barrel contents remain blocked for manual inspection.
 --]]
 
-local PROGRAM_VERSION = "2.53"
-local SUITE_VERSION = "1.1.18"
+local PROGRAM_VERSION = "2.54"
+local SUITE_VERSION = "1.1.19"
 
 local Util = require("colony.lib.util")
 local SharedUI = require("colony.lib.ui")
@@ -375,6 +386,13 @@ local CONFIG = {
     destinationConfirmReads = 3,
     destinationConfirmDelay = 0.15,
     destinationConfirmTimeout = 20,
+
+    -- A Player->Warehouse import that repeatedly leaves the same items physically
+    -- in the dedicated transfer barrel must not block the entire suite forever.
+    -- One recovery cycle already performs transferImportRetries import attempts.
+    -- After this many failed recovery cycles, roll the stranded remainder back to
+    -- Player RS and let the still-live MineColonies request retry cleanly.
+    pendingImportRollbackAttempts = 8,
 
     requestRetentionSeconds = 3600,
     enableAutoCrafting = true,
@@ -3461,6 +3479,148 @@ local function clearPending(reason)
     saveState()
 end
 
+-- Return the one distinct item currently present in the dedicated transfer barrel.
+-- Multiple stacks of the same registry item are combined. Mixed contents are
+-- intentionally not guessed at because an orphan recovery must be fail-closed.
+function NBTX.singleBarrelItem()
+    local chest = getTransferChest()
+    if not chest then return nil, nil, "barrel inspection unavailable" end
+
+    local ok, list = safeCall(chest, "list")
+    if not ok or type(list) ~= "table" then
+        return nil, nil, "barrel list unavailable"
+    end
+
+    local itemName = nil
+    local total = 0
+    for _, stack in pairs(list) do
+        if type(stack) == "table" and stack.name and (tonumber(stack.count) or 0) > 0 then
+            if itemName and itemName ~= stack.name then
+                return nil, nil, "mixed barrel contents"
+            end
+            itemName = stack.name
+            total = total + math.max(0, math.floor(tonumber(stack.count) or 0))
+        end
+    end
+
+    if not itemName then return nil, 0, nil end
+    return itemName, total, nil
+end
+
+-- Once a supply transaction has proven unable to import its stranded remainder
+-- into Colony RS, fail safely back toward the source. This never increments the
+-- MineColonies supplied counter: items returned here were never destination-confirmed.
+function NBTX.rollbackPendingSupplyToPlayer(p)
+    if type(p) ~= "table" or (p.kind or "supply") ~= "supply" then
+        return false, "not a supply transaction"
+    end
+
+    local itemName = tostring(p.item or "")
+    if itemName == "" then return false, "rollback item missing" end
+
+    local before = chestItemCount(itemName)
+    if before == nil then
+        p.rollbackToPlayer = true
+        p.stage = "rollback"
+        p.lastError = "rollback waiting for barrel inspection"
+        p.lastAttempt = nowSeconds()
+        saveState()
+        health.transfer = false
+        health.message = "ROLLBACK WAIT: barrel inspection unavailable"
+        return false, p.lastError
+    end
+
+    if before <= 0 then
+        clearPending("rollback found barrel already empty")
+        health.transfer = true
+        health.message = "Stranded transfer cleared; request may retry"
+        return true, "barrel already empty"
+    end
+
+    p.rollbackToPlayer = true
+    p.stage = "rollback"
+    p.rollbackAttempts = (tonumber(p.rollbackAttempts) or 0) + 1
+    p.lastAttempt = nowSeconds()
+    saveState()
+
+    local moved, err = retryImport(NBTX.importToPlayer, itemName, before, "player-rollback")
+    moved = tonumber(moved) or 0
+    transferSleep(CONFIG.transferSettleDelay)
+
+    local after = chestItemCount(itemName)
+    local physicalMoved = moved
+    if after ~= nil then
+        physicalMoved = math.max(0, before - after)
+    end
+
+    writeLog("SUPPLY ROLLBACK item=" .. tostring(itemName) ..
+        " barrel=" .. tostring(before) .. "->" .. tostring(after) ..
+        " apiMoved=" .. tostring(moved) ..
+        " physicalMoved=" .. tostring(physicalMoved) ..
+        " attempt=" .. tostring(p.rollbackAttempts) ..
+        " reason=" .. tostring(err or "none"))
+
+    if after ~= nil and after <= 0 then
+        clearPending("stranded supply remainder rolled back to Player RS")
+        health.transfer = true
+        health.message = "ROLLED BACK: " .. tostring(itemName) ..
+            " returned to Player RS; request may retry"
+        return true, "rolled back"
+    end
+
+    p.lastError = "rollback to Player RS incomplete; barrel " ..
+        tostring(after ~= nil and after or "?") .. " remains"
+    saveState()
+    health.transfer = false
+    health.message = "ROLLBACK BLOCKED: " .. tostring(itemName) ..
+        " x" .. tostring(after ~= nil and after or before)
+    return false, p.lastError
+end
+
+-- A dedicated transfer barrel should never contain an item when there is no
+-- transaction record. This can occur after older recovery code releases the
+-- software lock before the physical item is resolved. Recover one unambiguous
+-- item type back to Player RS; never guess when mixed contents are present.
+function NBTX.recoverOrphanedBarrel()
+    if state.pending then return true end
+
+    local itemName, count, reason = NBTX.singleBarrelItem()
+    if count == 0 then return true end
+    if not itemName or not count then
+        if reason then
+            health.transfer = false
+            health.message = "BARREL ORPHAN BLOCKED: " .. tostring(reason)
+            writeLog(health.message)
+        end
+        return false
+    end
+
+    local before = count
+    local moved, err = retryImport(NBTX.importToPlayer, itemName, before, "player-orphan-recovery")
+    moved = tonumber(moved) or 0
+    transferSleep(CONFIG.transferSettleDelay)
+    local after = chestItemCount(itemName)
+    local physicalMoved = after ~= nil and math.max(0, before - after) or moved
+
+    writeLog("ORPHAN BARREL RECOVERY item=" .. tostring(itemName) ..
+        " barrel=" .. tostring(before) .. "->" .. tostring(after) ..
+        " apiMoved=" .. tostring(moved) ..
+        " physicalMoved=" .. tostring(physicalMoved) ..
+        " reason=" .. tostring(err or "none"))
+
+    if after ~= nil and after <= 0 then
+        health.transfer = true
+        health.message = "Recovered orphaned barrel item to Player RS: " ..
+            tostring(itemName) .. " x" .. tostring(before)
+        return true
+    end
+
+    health.transfer = false
+    health.message = "BARREL ORPHAN BLOCKED: " .. tostring(itemName) ..
+        " x" .. tostring(after ~= nil and after or before)
+    return false
+end
+
 -- A successful health-probe export proves Player-RS source extraction. If the
 -- one test item cannot be returned to Player RS, keep that cleanup separate
 -- from the normal transfer transaction lock. This lets crafting continue and
@@ -3595,6 +3755,14 @@ local function recoverPendingTransfer()
         clearPending("invalid pending transaction")
         health.transfer = true
         return true
+    end
+
+    -- v2.54: once recovery has switched a failed supply transaction into
+    -- rollback mode, never try the Colony destination again from this snapshot.
+    -- Keep returning the stranded barrel remainder to Player RS until the barrel
+    -- is physically empty, then release the transaction for a clean request retry.
+    if kind == "supply" and p.rollbackToPlayer == true then
+        return NBTX.rollbackPendingSupplyToPlayer(p)
     end
 
     -- v2.50: a supply import whose barrel leg completed but destination gain was
@@ -3771,6 +3939,26 @@ local function recoverPendingTransfer()
     end
 
     if remainingInChest <= 0 then
+        -- v2.54: counters are never allowed to release a supply transaction
+        -- while the dedicated barrel still physically contains that item. Older
+        -- false-positive bookkeeping can otherwise orphan the item and hard-block
+        -- every later request. Roll the physical remainder back to Player RS.
+        if kind == "supply" then
+            local physicalRemaining = chestItemCount(itemName)
+            if physicalRemaining ~= nil and physicalRemaining > 0 then
+                p.rollbackToPlayer = true
+                p.stage = "rollback"
+                p.lastError = "bookkeeping complete but barrel still contains " ..
+                    tostring(physicalRemaining)
+                saveState()
+                writeLog("SUPPLY COUNTER/PHYSICAL MISMATCH item=" .. tostring(itemName) ..
+                    " exported=" .. tostring(exported) ..
+                    " imported=" .. tostring(imported) ..
+                    " barrel=" .. tostring(physicalRemaining))
+                return NBTX.rollbackPendingSupplyToPlayer(p)
+            end
+        end
+
         clearPending("nothing remains in transfer chest")
         if kind == "probe" then
             NBTX.clearRSSafety("probe recovery found nothing remaining in barrel")
@@ -3909,6 +4097,26 @@ local function recoverPendingTransfer()
     p.lastError = err or "import returned 0"
     p.lastAttempt = nowSeconds()
     saveState()
+
+    -- v2.54: a real supply item that remains physically in the barrel after
+    -- repeated Colony-import recovery cycles is safe to roll back to Player RS.
+    -- This prevents one destination-side failure from wedging the shared barrel
+    -- and turning every unrelated request into WAITING/BLOCKED indefinitely.
+    if kind == "supply" then
+        local rollbackAfter = math.max(2, math.floor(tonumber(CONFIG.pendingImportRollbackAttempts) or 8))
+        local barrelCount = chestItemCount(itemName)
+        if barrelCount ~= nil and barrelCount > 0 and p.attempts >= rollbackAfter then
+            p.rollbackToPlayer = true
+            p.stage = "rollback"
+            p.lastError = "Colony import failed " .. tostring(p.attempts) ..
+                " recovery cycles; rolling stranded remainder back to Player RS"
+            saveState()
+            writeLog("SUPPLY ROLLBACK ARMED item=" .. tostring(itemName) ..
+                " barrel=" .. tostring(barrelCount) ..
+                " attempts=" .. tostring(p.attempts))
+            return NBTX.rollbackPendingSupplyToPlayer(p)
+        end
+    end
 
     health.transfer = false
     local remaining = math.max(0, (tonumber(p.exported) or planned) - (tonumber(p.imported) or 0))
@@ -5249,6 +5457,13 @@ local function scanAndProcess()
     -- scan; a manually emptied barrel is recognized immediately.
     if state.probeCleanup then
         NBTX.tryProbeCleanup()
+    end
+
+    -- v2.54 migration/recovery: older versions could release state.pending while
+    -- the dedicated transfer barrel still contained a stranded supply item.
+    -- Recover one unambiguous orphan back to Player RS before processing requests.
+    if not state.pending then
+        NBTX.recoverOrphanedBarrel()
     end
 
     if state.pending then
