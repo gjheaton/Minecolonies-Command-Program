@@ -324,6 +324,17 @@
 --   * suppresses routine successful-transfer messages from the terminal because
 --     transfer history/newest-transfer information is already available on the monitor.
 --
+-- v2.63 / suite 1.1.28:
+--   * Separates physically SENT-but-unacknowledged quantity from MineColonies
+--     acknowledgement. Physical barrel->Colony movement no longer increments the
+--     acknowledged/supplied ledger.
+--   * Active request demand is reduced by sentPending so deliveries are not
+--     duplicated while acknowledgement is pending.
+--   * If the same request remains unchanged after a bounded acknowledgement
+--     window and the shipment is no longer visible above its Warehouse baseline,
+--     Supply retries the request. Retries are capped to prevent infinite duplicates.
+--   * Existing v2.62 local supplied credit migrates conservatively to sentPending.
+--
 -- v2.62 / suite 1.1.27:
 --   * Active MineColonies requests are no longer labeled SUPPLIED solely because
 --     the local sent counter reached the requested quantity. Full local delivery
@@ -341,8 +352,8 @@
 --   * only positively classified WARNING or ERROR conditions are shown at the bottom;
 --   * routine transfer/activity text remains monitor/history-only.
 --   No transfer, crafting, request, lock, or monitor behavior changes.
-local PROGRAM_VERSION = "2.62"
-local SUITE_VERSION = "1.1.27"
+local PROGRAM_VERSION = "2.63"
+local SUITE_VERSION = "1.1.28"
 
 local Util = require("colony.lib.util")
 local SharedUI = require("colony.lib.ui")
@@ -452,6 +463,14 @@ local CONFIG = {
     -- Only the risky partial-stock + craftable-shortage case is deferred, and the
     -- defer expires if MineColonies does not republish the request.
     requestRefreshDeferSeconds = 10,
+
+    -- A physical barrel->Colony movement is SENT, not yet MineColonies-acknowledged.
+    -- If the exact same request remains open this long with no quantity change and
+    -- the shipment is no longer visible above the Warehouse baseline, allow a
+    -- bounded resend. This fixes false local completion without creating an
+    -- unlimited duplicate-delivery loop.
+    requestAckTimeoutSeconds = 60,
+    requestAckMaxRetries = 2,
 
     -- Reduce contention when two Supply Managers mutate one Player RS network.
     -- A scan may either export one supply item OR start one craft, not both/many.
@@ -3966,21 +3985,50 @@ local function requestStateFor(id)
     if type(rs) ~= "table" then
         rs = {
             supplied = 0,
+            sentPending = 0,
             firstSeen = nowSeconds(),
             lastSeen = nowSeconds(),
         }
         state.requests[id] = rs
     end
-    rs.supplied = tonumber(rs.supplied) or 0
+
+    -- v2.63 migration: prior builds used `supplied` as a local physical-send
+    -- counter. That was not a MineColonies acknowledgement. Preserve the safety
+    -- against duplicate sends by migrating that credit to sentPending exactly once.
+    if rs.sentPending == nil then
+        local legacySent = math.max(0, math.floor(tonumber(rs.supplied) or 0))
+        rs.sentPending = legacySent
+        if legacySent > 0 then
+            rs.ackWaitSince = tonumber(rs.lastTransfer) or nowSeconds()
+            rs.ackRetryCount = math.max(0, math.floor(tonumber(rs.ackRetryCount) or 0))
+            rs.ackRequested = math.max(0, math.floor(tonumber(rs.lastRequested) or 0))
+            rs.ackItem = tostring(rs.item or "")
+            writeLog("REQUEST LEDGER migrate id=" .. tostring(id) ..
+                " legacySent=" .. tostring(legacySent) .. " -> sentPending")
+        end
+        rs.supplied = 0
+    end
+
+    rs.supplied = math.max(0, math.floor(tonumber(rs.supplied) or 0))
+    rs.sentPending = math.max(0, math.floor(tonumber(rs.sentPending) or 0))
+    rs.ackRetryCount = math.max(0, math.floor(tonumber(rs.ackRetryCount) or 0))
     rs.lastSeen = nowSeconds()
     return rs
 end
 
-local function finishImportedAmount(requestId, itemName, amount)
+local function finishImportedAmount(requestId, itemName, amount, requestedSnapshot, warehouseBaseline)
+    amount = math.max(0, math.floor(tonumber(amount) or 0))
     if amount <= 0 then return end
     local rs = requestStateFor(requestId)
     rs.item = rs.item or itemName
-    rs.supplied = (tonumber(rs.supplied) or 0) + amount
+    rs.sentPending = (tonumber(rs.sentPending) or 0) + amount
+    rs.ackWaitSince = nowSeconds()
+    rs.ackRequested = math.max(0, math.floor(tonumber(requestedSnapshot) or
+        tonumber(rs.lastRequested) or 0))
+    rs.ackItem = tostring(itemName or rs.item or "")
+    if warehouseBaseline ~= nil then
+        rs.ackWarehouseBaseline = math.max(0, math.floor(tonumber(warehouseBaseline) or 0))
+    end
     rs.lastTransfer = nowSeconds()
 end
 
@@ -4056,7 +4104,7 @@ end
 
 -- Once a supply transaction has proven unable to import its stranded remainder
 -- into Colony RS, fail safely back toward the source. This never increments the
--- MineColonies supplied counter: items returned here were never destination-confirmed.
+-- sentPending ledger: items returned here never reached the Colony side and must not be credited as sent.
 function NBTX.rollbackPendingSupplyToPlayer(p)
     if type(p) ~= "table" or (p.kind or "supply") ~= "supply" then
         return false, "not a supply transaction"
@@ -4362,7 +4410,7 @@ local function recoverPendingTransfer()
                 tonumber(p.imported) or 0))
             if physicalAccepted > already then
                 local delta = physicalAccepted - already
-                finishImportedAmount(requestId, itemName, delta)
+                finishImportedAmount(requestId, itemName, delta, p.requestedSnapshot, p.warehouseBaseline or p.destinationBefore)
                 recordTransferHistory("P>WH", itemName, delta, requestId,
                     note or "recovered-sent")
                 p.imported = physicalAccepted
@@ -4476,7 +4524,7 @@ local function recoverPendingTransfer()
         if confirmed > already then
             local newlyConfirmed = confirmed - already
             p.imported = confirmed
-            finishImportedAmount(requestId, itemName, newlyConfirmed)
+            finishImportedAmount(requestId, itemName, newlyConfirmed, p.requestedSnapshot, p.warehouseBaseline or p.destinationBefore)
             recordTransferHistory("P>WH", itemName, newlyConfirmed, requestId, "recovered-confirmed")
             writeLog("RECOVER DEST CONFIRMED item=" .. tostring(itemName) ..
                 " request=" .. tostring(requestId) ..
@@ -4702,7 +4750,7 @@ local function recoverPendingTransfer()
             p.destinationMaxSeen = maxSeen
             local newlyConfirmed = math.max(0, confirmed - imported)
             if newlyConfirmed > 0 then
-                finishImportedAmount(requestId, itemName, newlyConfirmed)
+                finishImportedAmount(requestId, itemName, newlyConfirmed, p.requestedSnapshot, p.warehouseBaseline or p.destinationBefore)
                 recordTransferHistory("P>WH", itemName, newlyConfirmed, requestId, "recovered-confirmed")
             end
             p.imported = math.max(imported, confirmed)
@@ -4831,7 +4879,7 @@ local function recoverPendingTransfer()
     return false
 end
 
-local function performTransfer(requestId, itemName, amount, candidate, requestedSnapshot, deferForRefresh)
+local function performTransfer(requestId, itemName, amount, candidate, requestedSnapshot, deferForRefresh, warehouseBaseline)
     amount = math.min(roundDown(amount), CONFIG.maxTransferChunk)
     if amount <= 0 then return 0, "Nothing to transfer", "not_started" end
 
@@ -4862,6 +4910,8 @@ local function performTransfer(requestId, itemName, amount, candidate, requested
         stage = "prepared",
         started = nowSeconds(),
         requestedSnapshot = math.max(0, math.floor(tonumber(requestedSnapshot) or 0)),
+        warehouseBaseline = warehouseBaseline ~= nil
+            and math.max(0, math.floor(tonumber(warehouseBaseline) or 0)) or nil,
         deferForRefresh = deferForRefresh == true,
     }
     state.pending = p
@@ -4918,7 +4968,7 @@ local function performTransfer(requestId, itemName, amount, candidate, requested
     if accepted > 0 then
         p.imported = accepted
         p.sentCredited = accepted
-        finishImportedAmount(requestId, itemName, accepted)
+        finishImportedAmount(requestId, itemName, accepted, p.requestedSnapshot, p.warehouseBaseline)
         recordTransferHistory("P>WH", itemName, accepted, requestId, "supply-sent")
         writeLog("SUPPLY SENT item=" .. tostring(itemName) ..
             " request=" .. tostring(requestId) ..
@@ -5592,8 +5642,8 @@ end
 -- Request processing
 --------------------------------------------------------------------------
 
-local function effectiveRemaining(requested, supplied, warehouseStock)
-    local remaining = math.max(0, requested - supplied)
+local function effectiveRemaining(requested, sentPending, warehouseStock)
+    local remaining = math.max(0, requested - sentPending)
     if CONFIG.subtractWarehouseStock then
         remaining = math.max(0, remaining - warehouseStock)
     end
@@ -5605,11 +5655,10 @@ local function processSingleRequest(request)
     local requested = getRequestedCount(request)
     local rs = requestStateFor(id)
 
-    -- v2.57 request-snapshot accounting. MineColonies may keep the same request
-    -- count while couriers are fulfilling it, so an unchanged count must NOT erase
-    -- our sent credit. If the same request ID publishes a different numeric count,
-    -- that new count is authoritative (typically the remaining amount after a
-    -- partial delivery), so reset the old local credit exactly once.
+    -- v2.63 acknowledgement ledger. A numeric request change is authoritative:
+    -- MineColonies has published a new outstanding-demand snapshot. Any physical
+    -- sends tracked against the previous snapshot are therefore acknowledged/retired,
+    -- and the new requested quantity starts with no local sent credit.
     local gateRequested = type(rs.awaitingRequestRefresh) == "table"
         and tonumber(rs.awaitingRequestRefresh.requested) or nil
     local previousRequested = math.max(0,
@@ -5622,13 +5671,20 @@ local function processSingleRequest(request)
                     "->" .. tostring(requested)
             )
         end
-        if (tonumber(rs.supplied) or 0) > 0 then
-            writeLog("REQUEST SNAPSHOT changed id=" .. tostring(id) ..
+        local pendingAck = math.max(0, math.floor(tonumber(rs.sentPending) or 0))
+        if pendingAck > 0 then
+            writeLog("REQUEST ACK quantity-change id=" .. tostring(id) ..
                 " requested=" .. tostring(previousRequested) ..
                 "->" .. tostring(requested) ..
-                " clearing local supplied=" .. tostring(rs.supplied))
+                " retiring sentPending=" .. tostring(pendingAck))
         end
+        rs.sentPending = 0
         rs.supplied = 0
+        rs.ackWaitSince = nil
+        rs.ackRequested = nil
+        rs.ackItem = nil
+        rs.ackWarehouseBaseline = nil
+        rs.ackRetryCount = 0
         rs.lastTransfer = nil
         rs.destinationRetryAfter = nil
         rs.destinationRetryItem = nil
@@ -5644,7 +5700,7 @@ local function processSingleRequest(request)
             id = id,
             displayName = request.name or "Unknown request",
             requested = 0,
-            supplied = rs.supplied,
+            supplied = rs.sentPending,
             playerStock = 0,
             warehouseStock = 0,
             status = "ERROR",
@@ -5653,8 +5709,8 @@ local function processSingleRequest(request)
         return
     end
 
-    local supplied = tonumber(rs.supplied) or 0
-    local provisionalRemaining = math.max(0, requested - supplied)
+    local sentPending = math.max(0, math.floor(tonumber(rs.sentPending) or 0))
+    local provisionalRemaining = math.max(0, requested - sentPending)
     local candidate = chooseCandidate(request, rs, provisionalRemaining)
 
     if not candidate then
@@ -5690,7 +5746,7 @@ local function processSingleRequest(request)
             id = id,
             displayName = request.name or request.desc or "Unsupported request",
             requested = requested,
-            supplied = supplied,
+            supplied = sentPending,
             playerStock = 0,
             warehouseStock = 0,
             status = "ERROR",
@@ -5711,9 +5767,15 @@ local function processSingleRequest(request)
             rs,
             "selected candidate changed to " .. tostring(candidate.name or "?")
         )
+        rs.sentPending = 0
         rs.supplied = 0
+        rs.ackWaitSince = nil
+        rs.ackRequested = nil
+        rs.ackItem = nil
+        rs.ackWarehouseBaseline = nil
+        rs.ackRetryCount = 0
         rs.lastTransfer = nil
-        supplied = 0
+        sentPending = 0
         saveState()
     end
 
@@ -5728,14 +5790,14 @@ local function processSingleRequest(request)
     -- view is sampled. Numeric MineColonies request changes (handled above) are
     -- the authoritative signal that a new remainder snapshot was published.
 
-    local remaining = effectiveRemaining(requested, supplied, warehouseStock)
+    local remaining = effectiveRemaining(requested, sentPending, warehouseStock)
 
     local row = {
         id = id,
         item = candidate.name,
         displayName = candidate.displayName or candidate.name,
         requested = requested,
-        supplied = supplied,
+        supplied = sentPending,
         remaining = remaining,
         playerStock = playerStock,
         warehouseStock = warehouseStock,
@@ -5769,10 +5831,84 @@ local function processSingleRequest(request)
         saveState()
     end
 
+    ------------------------------------------------------------------
+    -- v2.63 physical-send acknowledgement watchdog. sentPending prevents
+    -- duplicate sends while MineColonies catches up, but it is NOT proof that
+    -- the request was fulfilled. If the exact same request remains active past
+    -- the grace period, and the delivered quantity is no longer visible above
+    -- the Warehouse baseline, retire that unacknowledged credit and retry.
+    -- Retries are bounded so a broken request cannot absorb infinite duplicates.
+    ------------------------------------------------------------------
+    if sentPending >= requested and requested > 0 and tonumber(rs.ackWaitSince) then
+        local ackAge = math.max(0, nowSeconds() - tonumber(rs.ackWaitSince))
+        local ackTimeout = math.max(15,
+            math.floor(tonumber(CONFIG.requestAckTimeoutSeconds) or 60))
+        local ackRetries = math.max(0, math.floor(tonumber(rs.ackRetryCount) or 0))
+        local ackMaxRetries = math.max(0,
+            math.floor(tonumber(CONFIG.requestAckMaxRetries) or 2))
+        local sameAckItem = tostring(rs.ackItem or candidate.name or "") ==
+            tostring(candidate.name or "")
+        local ackRequested = math.max(0, math.floor(tonumber(rs.ackRequested) or 0))
+        local sameAckRequest = ackRequested <= 0 or ackRequested == requested
+
+        if sameAckItem and sameAckRequest and ackAge >= ackTimeout then
+            local baseline = math.max(0,
+                math.floor(tonumber(rs.ackWarehouseBaseline) or 0))
+            local warehouseGain = math.max(0, math.floor(tonumber(warehouseStock) or 0) - baseline)
+
+            if warehouseGain > 0 then
+                -- Positive Warehouse evidence means the shipment is still in the
+                -- colony logistics path. Do not resend it. Restart the grace window.
+                rs.ackWaitSince = nowSeconds()
+                saveState()
+                row.status = "WAITING"
+                row.message = "Sent " .. tostring(sentPending) ..
+                    "; visible in Warehouse, awaiting MineColonies acknowledgement"
+                addRow(row)
+                return
+            end
+
+            if ackRetries < ackMaxRetries then
+                rs.ackRetryCount = ackRetries + 1
+                writeLog("REQUEST ACK TIMEOUT id=" .. tostring(id) ..
+                    " item=" .. tostring(candidate.name) ..
+                    " requested=" .. tostring(requested) ..
+                    " sentPending=" .. tostring(sentPending) ..
+                    " retry=" .. tostring(rs.ackRetryCount) ..
+                    "/" .. tostring(ackMaxRetries) ..
+                    " warehouse=" .. tostring(warehouseStock) ..
+                    " baseline=" .. tostring(baseline))
+                rs.sentPending = 0
+                rs.supplied = 0
+                rs.ackWaitSince = nil
+                rs.ackRequested = nil
+                rs.ackItem = nil
+                rs.ackWarehouseBaseline = nil
+                sentPending = 0
+                remaining = effectiveRemaining(requested, 0, warehouseStock)
+                row.supplied = 0
+                row.remaining = remaining
+                row.status = "WAITING"
+                row.message = "MineColonies did not acknowledge prior send; retry armed next scan (" ..
+                    tostring(rs.ackRetryCount) .. "/" .. tostring(ackMaxRetries) .. ")"
+                saveState()
+                addRow(row)
+                return
+            end
+
+            row.status = "BLOCKED"
+            row.message = "MineColonies did not acknowledge " ..
+                tostring(ackMaxRetries + 1) ..
+                " deliveries; inspect request/warehouse before retrying"
+            addRow(row)
+            return
+        end
+    end
+
     -- v2.57: only partial-stock + craftable-shortage shipments use this gate.
     -- MineColonies often keeps the same numeric request count while couriers are
     -- fulfilling it, so the gate is bounded. If no refreshed request arrives,
-    -- keep our local supplied credit and continue from fresh stock after the defer.
+    -- keep our local sentPending credit and continue from fresh stock after the defer.
     if type(rs.awaitingRequestRefresh) == "table" then
         local gate = rs.awaitingRequestRefresh
         local age = math.max(0, nowSeconds() - (tonumber(gate.since) or nowSeconds()))
@@ -5790,19 +5926,21 @@ local function processSingleRequest(request)
 
         NBTX.clearAwaitingRequestRefresh(
             rs,
-            "bounded refresh defer elapsed; retaining local supplied credit"
+            "bounded refresh defer elapsed; retaining sentPending credit"
         )
         saveState()
     end
 
     if remaining <= 0 then
-        if supplied >= requested then
-            -- Local accounting proves only that Supply sent the requested amount.
-            -- MineColonies still reports this request as active, so calling it
-            -- SUPPLIED would be a false acknowledgement. Keep it WAITING until
-            -- MineColonies changes/resolves the request.
+        if sentPending >= requested then
             row.status = "WAITING"
-            row.message = "Full quantity sent; awaiting MineColonies acknowledgement"
+            local ackAge = tonumber(rs.ackWaitSince)
+                and math.max(0, nowSeconds() - tonumber(rs.ackWaitSince)) or 0
+            local ackTimeout = math.max(15,
+                math.floor(tonumber(CONFIG.requestAckTimeoutSeconds) or 60))
+            local left = math.max(0, ackTimeout - ackAge)
+            row.message = "Full quantity sent; awaiting MineColonies acknowledgement" ..
+                (left > 0 and (" (recheck in " .. tostring(left) .. "s)") or "")
         else
             row.status = "IN STOCK"
             row.message = "Warehouse stock covers request"
@@ -5966,7 +6104,7 @@ local function processSingleRequest(request)
     -- with the existing RS STALE protections if that export contradicts RS.
     ------------------------------------------------------------------
     if playerStock > 0 then
-        row.status = supplied > 0 and "PARTIAL" or "READY"
+        row.status = sentPending > 0 and "PARTIAL" or "READY"
 
         local mutationLimit = math.max(1,
             math.floor(tonumber(CONFIG.maxPlayerRSMutationsPerScan) or 1))
@@ -5979,8 +6117,8 @@ local function processSingleRequest(request)
         end
 
         -- Only the partial-stock + craftable-shortage case needs the short
-        -- MineColonies refresh defer. Full-stock transfers use local supplied
-        -- accounting and do not wait forever for the request count to change.
+        -- MineColonies refresh defer. Full-stock transfers use sentPending
+        -- accounting and are later revalidated by the acknowledgement watchdog.
         local deferForRefresh =
             candidate.craftable == true and playerStock < remaining
 
@@ -5989,9 +6127,9 @@ local function processSingleRequest(request)
         local transferAmount = math.min(remaining, playerStock, CONFIG.maxTransferChunk)
         local moved, err, transferState =
             performTransfer(id, candidate.name, transferAmount, candidate, requested,
-                deferForRefresh)
+                deferForRefresh, warehouseStock)
 
-        row.supplied = tonumber(requestStateFor(id).supplied) or supplied
+        row.supplied = math.max(0, math.floor(tonumber(requestStateFor(id).sentPending) or sentPending))
         row.remaining = effectiveRemaining(requested, row.supplied, NBTX.getRSAmountByCandidate(colonyRS, candidate))
         if candidate.requiresPristine then
             NBTX.populateCandidateAvailability(candidate)
@@ -6010,7 +6148,7 @@ local function processSingleRequest(request)
             end
 
             -- v2.57: only partial-stock + craftable-shortage sends are
-            -- acknowledgement-deferred. Full-stock sends use local supplied credit.
+            -- acknowledgement-deferred. Full-stock sends use sentPending credit.
             if type(rs.awaitingRequestRefresh) == "table" then
                 local gate = rs.awaitingRequestRefresh
                 row.status = row.remaining > 0 and "PARTIAL" or "WAITING"
@@ -6228,6 +6366,22 @@ local function cleanupOldRequestState(activeIds)
     local cutoff = nowSeconds() - CONFIG.requestRetentionSeconds
     for id, rs in pairs(state.requests) do
         if not activeIds[id] and id ~= (state.pending and state.pending.requestId) then
+            -- Request disappearance/resolution is the strongest acknowledgement
+            -- MineColonies exposes to us. Retire any in-flight sent ledger now so
+            -- a reused/stale request ID cannot inherit old physical-send credit.
+            local pendingAck = math.max(0, math.floor(tonumber(rs.sentPending) or 0))
+            if pendingAck > 0 then
+                writeLog("REQUEST ACK resolved id=" .. tostring(id) ..
+                    " retiring sentPending=" .. tostring(pendingAck))
+                rs.sentPending = 0
+                rs.supplied = 0
+                rs.ackWaitSince = nil
+                rs.ackRequested = nil
+                rs.ackItem = nil
+                rs.ackWarehouseBaseline = nil
+                rs.ackRetryCount = 0
+            end
+
             local lastSeen = tonumber(rs.lastSeen) or 0
             if lastSeen < cutoff then
                 state.requests[id] = nil
@@ -8471,7 +8625,7 @@ function DIAG.printCraftDiagnostics()
         if isRequestActive(request) then
             local requested = getRequestedCount(request)
             local rs = requestStateFor(request.id)
-            local supplied = tonumber(rs.supplied) or 0
+            local supplied = math.max(0, math.floor(tonumber(rs.sentPending) or 0))
             local remaining = math.max(0, requested - supplied)
             local candidates = requestCandidates(request)
             local selected = chooseCandidate(request, rs, remaining)
@@ -8479,7 +8633,7 @@ function DIAG.printCraftDiagnostics()
             requestCount = requestCount + 1
             add("REQUEST: " .. tostring(request.name or request.desc or request.id))
             add("Need=" .. tostring(requested) ..
-                " Supplied=" .. tostring(supplied) ..
+                " SentPending=" .. tostring(supplied) ..
                 " Remaining=" .. tostring(remaining))
 
             if #candidates == 0 then
@@ -8563,7 +8717,7 @@ function DIAG.printBlockedDiagnostics()
             local id = request.id
             local rsState = requestStateFor(id)
             local requested = getRequestedCount(request)
-            local supplied = tonumber(rsState.supplied) or 0
+            local supplied = math.max(0, math.floor(tonumber(rsState.sentPending) or 0))
             local remaining = math.max(0, requested - supplied)
             local candidate = chooseCandidate(request, rsState, remaining)
 
@@ -8780,7 +8934,7 @@ function DIAG.printOverflowDiagnostics()
             if isRequestActive(request) then
                 local requested = getRequestedCount(request)
                 local rs = requestStateFor(request.id)
-                local supplied = tonumber(rs.supplied) or 0
+                local supplied = math.max(0, math.floor(tonumber(rs.sentPending) or 0))
                 local provisionalRemaining = math.max(0, requested - supplied)
                 local candidate = chooseCandidate(request, rs, provisionalRemaining)
                 if candidate then

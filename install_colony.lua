@@ -1,5 +1,5 @@
 -- MineColonies Control Suite Installer
--- Suite package version 1.1.27
+-- Suite package version 1.1.28
 --
 -- Modular GitHub installer.
 -- The repository layout mirrors the CC:Tweaked filesystem.
@@ -9,15 +9,15 @@
 local mode, arg2, arg3 = ...
 
 local SUITE_INFO = {
-    suiteVersion = "1.1.27",
-    installerVersion = "1.1.27",
+    suiteVersion = "1.1.28",
+    installerVersion = "1.1.28",
     apps = {
         command = { version = "2.16", program = "/colony_command.lua", displayName = "MineColonies Command Center" },
-        supply = { version = "2.62", program = "/colony_supply.lua", displayName = "MineColonies Supply Manager" },
+        supply = { version = "2.63", program = "/colony_supply.lua", displayName = "MineColonies Supply Manager" },
     },
     components = {
         startup = "1.0.0", util = "1.1.0", ui = "1.1.0",
-        version = "1.0.0", updater = "1.1.1", installer = "1.1.27",
+        version = "1.0.0", updater = "1.1.1", installer = "1.1.28",
     },
 }
 
