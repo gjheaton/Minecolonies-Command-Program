@@ -317,17 +317,16 @@
     Mixed/ambiguous barrel contents remain blocked for manual inspection.
 --]]
 
--- v2.58 / suite 1.1.23:
---   Distributed Player-RS lease lock for two Supply computers:
---   * serializes the entire normal Player-RS scan/API window across computers;
---   * auto-discovers peer Supply Managers over CC:Tweaked rednet;
---   * elects the lowest active computer ID as lock coordinator;
---   * uses renewable leases so a crashed owner cannot hold the lock forever;
---   * fails closed when the peer/link is unavailable instead of allowing split-brain RS access;
---   * leaves Colony RS, transfer-barrel, monitor, and Command Center behavior unchanged.
---   v2.57 queue/race protections remain in place inside the serialized scan.
-local PROGRAM_VERSION = "2.58"
-local SUITE_VERSION = "1.1.23"
+-- v2.59 / suite 1.1.24:
+--   Terminal visibility cleanup for the distributed Player-RS lock:
+--   * shows the remote Supply link as UP/DOWN with the peer computer ID when known;
+--   * shows this computer's lock role as MASTER or SLAVE and identifies the master ID;
+--   * suppresses routine successful-transfer messages from the terminal because
+--     transfer history/newest-transfer information is already available on the monitor;
+--   * preserves abnormal health messages on the terminal as ALERT lines.
+--   No transfer, crafting, request, lock, Command Center, or monitor behavior changes.
+local PROGRAM_VERSION = "2.59"
+local SUITE_VERSION = "1.1.24"
 
 local Util = require("colony.lib.util")
 local SharedUI = require("colony.lib.ui")
@@ -7289,12 +7288,31 @@ local function renderTerminal()
 
     SharedUI.resetTerminal(colors.white, colors.black)
 
+    -- Keep the lock/link display current even between processor scans.  This is
+    -- display-only: recomputing membership does not acquire or release a lease.
+    if CONFIG.playerRSLockEnabled == true and RSLOCK.initialized then
+        RSLOCK.recomputeMembership()
+    end
+
+    local peerId = nil
+    if CONFIG.playerRSLockEnabled == true then
+        for id in pairs(RSLOCK.peers or {}) do
+            if RSLOCK.peerIsActive(id)
+                and (peerId == nil or tonumber(id) < tonumber(peerId)) then
+                peerId = tonumber(id)
+            end
+        end
+    end
+
+    local lockLinkUp = CONFIG.playerRSLockEnabled ~= true
+        or (RSLOCK.modemCount > 0 and RSLOCK.peerCount > 0 and peerId ~= nil)
     local transferPathOnline = health.playerRS and health.colonyRS and health.transfer
     local overallHealthy =
         health.playerRS
         and health.colonyRS
         and health.warehouse
         and transferPathOnline
+        and lockLinkUp
 
     print("MineColonies Supply Manager v" .. PROGRAM_VERSION)
     print("Control Suite: v" .. SUITE_VERSION)
@@ -7302,6 +7320,30 @@ local function renderTerminal()
 
     SharedUI.setTerminalColor(overallHealthy and colors.lime or colors.orange)
     print("HEALTH:      " .. (overallHealthy and "ONLINE" or "DEGRADED"))
+
+    if CONFIG.playerRSLockEnabled == true then
+        SharedUI.setTerminalColor(lockLinkUp and colors.lime or colors.red)
+        print("Remote Link: " .. (lockLinkUp and "UP" or "DOWN") ..
+            (peerId and ("  [peer " .. tostring(peerId) .. "]") or ""))
+
+        local role = "UNKNOWN"
+        local roleDetail = ""
+        if RSLOCK.coordinatorId ~= nil then
+            if tonumber(RSLOCK.coordinatorId) == tonumber(RSLOCK.id) then
+                role = "MASTER"
+                roleDetail = "  [ID " .. tostring(RSLOCK.id) .. "]"
+            else
+                role = "SLAVE"
+                roleDetail = "  [master " .. tostring(RSLOCK.coordinatorId) .. "]"
+            end
+        end
+        SharedUI.setTerminalColor(role == "UNKNOWN" and colors.orange or colors.cyan)
+        print("RS Lock Role: " .. role .. roleDetail)
+    else
+        SharedUI.setTerminalColor(colors.orange)
+        print("Remote Link: DISABLED")
+        print("RS Lock Role: DISABLED")
+    end
 
     SharedUI.setTerminalColor(colors.white)
     print("Player RS:   " .. healthWord(health.playerRS) ..
@@ -7311,7 +7353,25 @@ local function renderTerminal()
     print("Warehouse:   " .. healthWord(health.warehouse))
     print("Transfer:    " .. healthWord(transferPathOnline))
     print("Barrel:      " .. tostring(transferChestResolvedName or "NOT DETECTED"))
-    print("Status:      " .. tostring(health.message))
+
+    -- Routine success messages (for example "Sent 64 ...") duplicate the
+    -- monitor's transfer history/newest-transfer display. Keep only actionable
+    -- warnings/errors on the computer terminal.
+    local terminalMessage = tostring(health.message or "")
+    local routineMessage =
+        terminalMessage == ""
+        or terminalMessage == "Online"
+        or terminalMessage == "RS extraction healthy"
+        or terminalMessage == "Pending transfer destination confirmed"
+        or terminalMessage == "Request acknowledged by colony"
+        or terminalMessage:match("^Sent ") ~= nil
+        or terminalMessage:match("^Returned ") ~= nil
+        or terminalMessage:match("^OVERFLOW TRANSFER ") ~= nil
+
+    if not routineMessage then
+        SharedUI.setTerminalColor(colors.orange)
+        print("Alert:       " .. terminalMessage)
+    end
 
     local updateText, updateColor = UPDATE.terminalStatus()
     SharedUI.setTerminalColor(updateColor)
