@@ -317,17 +317,17 @@
     Mixed/ambiguous barrel contents remain blocked for manual inspection.
 --]]
 
--- v2.57 / suite 1.1.22:
---   Shared-Player-RS stability pass for two colony Supply computers:
---   * remove the permanent v2.56 request-refresh gate;
---   * defer only partial-stock/craftable requests, and only for a bounded window;
---   * limit each scan to one Player-RS mutation (export or craft start);
---   * rotate request processing for fairness and stagger computers by ID;
---   * require repeated export=0 failures across separate scans before RS STALE;
---   * avoid the immediate multi-read stale probe after a single export failure;
---   * add explicit history diagnostics/newest timestamp without auto-changing pages.
-local PROGRAM_VERSION = "2.57"
-local SUITE_VERSION = "1.1.22"
+-- v2.58 / suite 1.1.23:
+--   Distributed Player-RS lease lock for two Supply computers:
+--   * serializes the entire normal Player-RS scan/API window across computers;
+--   * auto-discovers peer Supply Managers over CC:Tweaked rednet;
+--   * elects the lowest active computer ID as lock coordinator;
+--   * uses renewable leases so a crashed owner cannot hold the lock forever;
+--   * fails closed when the peer/link is unavailable instead of allowing split-brain RS access;
+--   * leaves Colony RS, transfer-barrel, monitor, and Command Center behavior unchanged.
+--   v2.57 queue/race protections remain in place inside the serialized scan.
+local PROGRAM_VERSION = "2.58"
+local SUITE_VERSION = "1.1.23"
 
 local Util = require("colony.lib.util")
 local SharedUI = require("colony.lib.ui")
@@ -443,6 +443,25 @@ local CONFIG = {
     maxPlayerRSMutationsPerScan = 1,
     processorStaggerStepSeconds = 0.35,
     processorStaggerSlots = 5,
+
+    --------------------------------------------------------------------
+    -- Distributed shared-Player-RS lock (v2.58)
+    --
+    -- Both Supply computers MUST be able to exchange rednet traffic. This can
+    -- use a common wired-modem network or wireless modems in range. The lock
+    -- deliberately fails closed: if the peer/link disappears, Player-RS
+    -- automation pauses instead of allowing two independent bridge clients to
+    -- touch the shared RS network at the same time.
+    --------------------------------------------------------------------
+    playerRSLockEnabled = true,
+    playerRSLockProtocol = "minecolonies_supply_player_rs_lock_v1",
+    playerRSLockRequirePeer = true,
+    playerRSLockHelloSeconds = 1.0,
+    playerRSLockPeerTimeoutSeconds = 8.0,
+    playerRSLockMembershipSettleSeconds = 3.0,
+    playerRSLockLeaseSeconds = 12.0,
+    playerRSLockHeartbeatSeconds = 1.0,
+    playerRSLockAcquireTimeoutSeconds = 20.0,
 
     -- MineColonies getRequests() is already the authoritative list of
     -- outstanding requests. Warehouse stock is therefore DISPLAYED but
@@ -1005,6 +1024,474 @@ local function loadState()
             },
         }
         writeLog("Starting with new state")
+    end
+end
+
+--------------------------------------------------------------------------
+-- Distributed Player-RS lease lock (v2.58)
+--
+-- Two Colony Supply computers share one Player RS network. Refined Storage /
+-- Advanced Peripherals has proven unsafe under independent concurrent bridge
+-- access in this installation, so the NORMAL runtime processor serializes its
+-- entire scan behind this lease. Colony RS and transfer-barrel operations remain
+-- local to each colony, but they occur inside the same protected scan window so
+-- no unguarded Player-RS call can slip between reads and writes.
+--
+-- The lowest active computer ID is the coordinator. Requests are queued FIFO.
+-- The owner renews its lease while a scan is running; if it crashes, the lease
+-- expires. Membership changes impose a settle period. With requirePeer=true,
+-- loss of the other Supply computer/link pauses Player-RS automation rather than
+-- risking split-brain access.
+--------------------------------------------------------------------------
+
+local RSLOCK = {
+    id = tonumber(os.getComputerID and os.getComputerID() or 0) or 0,
+    protocol = tostring(CONFIG.playerRSLockProtocol or
+        "minecolonies_supply_player_rs_lock_v1"),
+    initialized = false,
+    modemCount = 0,
+    peers = {},
+    peerSignature = "",
+    peerCount = 0,
+    coordinatorId = nil,
+    membershipBlockedUntil = 0,
+    queue = {},
+    queued = {},
+    ownerId = nil,
+    ownerToken = nil,
+    ownerExpires = 0,
+    requestSequence = 0,
+    requestedToken = nil,
+    grantedToken = nil,
+    activeToken = nil,
+    haveLease = false,
+    lastHello = 0,
+    lastRenew = 0,
+    lastRequestSend = 0,
+    lastStatus = "starting",
+}
+
+function RSLOCK.now()
+    return os.epoch("utc") / 1000
+end
+
+function RSLOCK.openModems()
+    if CONFIG.playerRSLockEnabled ~= true then
+        RSLOCK.modemCount = 0
+        return true
+    end
+
+    local opened = 0
+    for _, name in ipairs(peripheral.getNames()) do
+        if hasPeripheralType(name, "modem") then
+            local ok = pcall(rednet.open, name)
+            if ok then
+                local okOpen, isOpen = pcall(rednet.isOpen, name)
+                if okOpen and isOpen == true then opened = opened + 1 end
+            end
+        end
+    end
+    RSLOCK.modemCount = opened
+    return opened > 0
+end
+
+function RSLOCK.send(recipient, message)
+    if CONFIG.playerRSLockEnabled ~= true then return true end
+    if RSLOCK.modemCount <= 0 then return false end
+    local ok, sent = pcall(rednet.send, recipient, message, RSLOCK.protocol)
+    return ok and sent == true
+end
+
+function RSLOCK.broadcast(message)
+    if CONFIG.playerRSLockEnabled ~= true then return true end
+    if RSLOCK.modemCount <= 0 then return false end
+    local ok, sent = pcall(rednet.broadcast, message, RSLOCK.protocol)
+    return ok and sent == true
+end
+
+function RSLOCK.broadcastHello()
+    local now = RSLOCK.now()
+    RSLOCK.lastHello = now
+    RSLOCK.broadcast({
+        kind = "hello",
+        version = 1,
+        id = RSLOCK.id,
+        supplyVersion = PROGRAM_VERSION,
+    })
+end
+
+function RSLOCK.notePeer(sender)
+    sender = tonumber(sender)
+    if not sender or sender == RSLOCK.id then return end
+    RSLOCK.peers[sender] = RSLOCK.now()
+end
+
+function RSLOCK.peerIsActive(id)
+    local seen = tonumber(RSLOCK.peers[tonumber(id)]) or 0
+    local timeout = math.max(2,
+        tonumber(CONFIG.playerRSLockPeerTimeoutSeconds) or 8)
+    return seen > 0 and (RSLOCK.now() - seen) <= timeout
+end
+
+function RSLOCK.recomputeMembership()
+    local now = RSLOCK.now()
+    local timeout = math.max(2,
+        tonumber(CONFIG.playerRSLockPeerTimeoutSeconds) or 8)
+    local ids = { RSLOCK.id }
+    local peerCount = 0
+
+    for id, seen in pairs(RSLOCK.peers) do
+        id = tonumber(id)
+        seen = tonumber(seen) or 0
+        if id and id ~= RSLOCK.id and now - seen <= timeout then
+            ids[#ids + 1] = id
+            peerCount = peerCount + 1
+        elseif id then
+            RSLOCK.peers[id] = nil
+        end
+    end
+
+    table.sort(ids)
+    local signature = table.concat(ids, ",")
+    local newCoordinator = ids[1]
+
+    if signature ~= RSLOCK.peerSignature then
+        local oldSignature = RSLOCK.peerSignature
+        local oldCoordinator = RSLOCK.coordinatorId
+        RSLOCK.peerSignature = signature
+        RSLOCK.peerCount = peerCount
+        RSLOCK.coordinatorId = newCoordinator
+        RSLOCK.membershipBlockedUntil = now + math.max(1,
+            tonumber(CONFIG.playerRSLockMembershipSettleSeconds) or 3)
+
+        -- Any coordinator change invalidates outstanding grants. A scan which
+        -- already owns a lease may finish, but no new lease can be granted until
+        -- the settle window has passed.
+        if oldCoordinator ~= nil and oldCoordinator ~= newCoordinator then
+            RSLOCK.queue = {}
+            RSLOCK.queued = {}
+            RSLOCK.ownerId = nil
+            RSLOCK.ownerToken = nil
+            RSLOCK.ownerExpires = 0
+            RSLOCK.requestedToken = nil
+            RSLOCK.grantedToken = nil
+        end
+
+        if oldSignature ~= "" then
+            writeLog("RS LOCK membership " .. tostring(oldSignature) ..
+                " -> " .. tostring(signature) ..
+                " coordinator=" .. tostring(newCoordinator))
+        else
+            writeLog("RS LOCK membership " .. tostring(signature) ..
+                " coordinator=" .. tostring(newCoordinator))
+        end
+    else
+        RSLOCK.peerCount = peerCount
+        RSLOCK.coordinatorId = newCoordinator
+    end
+end
+
+function RSLOCK.ready()
+    if CONFIG.playerRSLockEnabled ~= true then
+        return true, "disabled"
+    end
+    if RSLOCK.modemCount <= 0 then
+        return false, "no rednet modem open"
+    end
+
+    RSLOCK.recomputeMembership()
+
+    if CONFIG.playerRSLockRequirePeer == true and RSLOCK.peerCount < 1 then
+        return false, "waiting for peer Supply Manager"
+    end
+
+    local settle = math.max(0, RSLOCK.membershipBlockedUntil - RSLOCK.now())
+    if settle > 0 then
+        return false, "lock membership settling " ..
+            tostring(math.ceil(settle)) .. "s"
+    end
+
+    if not RSLOCK.coordinatorId then
+        return false, "no lock coordinator"
+    end
+
+    return true, "ready"
+end
+
+function RSLOCK.enqueue(ownerId, token)
+    ownerId = tonumber(ownerId)
+    token = tostring(token or "")
+    if not ownerId or token == "" then return end
+    if RSLOCK.queued[token] then return end
+    RSLOCK.queue[#RSLOCK.queue + 1] = { id = ownerId, token = token }
+    RSLOCK.queued[token] = true
+end
+
+function RSLOCK.grantNext()
+    if RSLOCK.coordinatorId ~= RSLOCK.id then return end
+    local ready = select(1, RSLOCK.ready())
+    if not ready then return end
+
+    local now = RSLOCK.now()
+    if RSLOCK.ownerId and now >= (tonumber(RSLOCK.ownerExpires) or 0) then
+        RSLOCK.ownerId = nil
+        RSLOCK.ownerToken = nil
+        RSLOCK.ownerExpires = 0
+    end
+    if RSLOCK.ownerId then return end
+
+    while #RSLOCK.queue > 0 do
+        local request = table.remove(RSLOCK.queue, 1)
+        RSLOCK.queued[request.token] = nil
+        local requesterActive = request.id == RSLOCK.id or RSLOCK.peerIsActive(request.id)
+        if requesterActive then
+            local leaseSeconds = math.max(4,
+                tonumber(CONFIG.playerRSLockLeaseSeconds) or 12)
+            RSLOCK.ownerId = request.id
+            RSLOCK.ownerToken = request.token
+            RSLOCK.ownerExpires = now + leaseSeconds
+
+            if request.id == RSLOCK.id then
+                RSLOCK.grantedToken = request.token
+            else
+                RSLOCK.send(request.id, {
+                    kind = "grant",
+                    token = request.token,
+                    owner = request.id,
+                    coordinator = RSLOCK.id,
+                    leaseSeconds = leaseSeconds,
+                })
+            end
+            return
+        end
+    end
+end
+
+function RSLOCK.handleMessage(sender, message)
+    sender = tonumber(sender)
+    if not sender or sender == RSLOCK.id or type(message) ~= "table" then return end
+
+    RSLOCK.notePeer(sender)
+    RSLOCK.recomputeMembership()
+
+    local kind = tostring(message.kind or "")
+    if kind == "hello" then
+        return
+    end
+
+    if kind == "grant" then
+        if sender == RSLOCK.coordinatorId
+            and tonumber(message.owner) == RSLOCK.id
+            and tostring(message.token or "") == tostring(RSLOCK.requestedToken or "") then
+            RSLOCK.grantedToken = tostring(message.token)
+        end
+        return
+    end
+
+    if RSLOCK.coordinatorId ~= RSLOCK.id then return end
+
+    if kind == "request" then
+        RSLOCK.enqueue(sender, message.token)
+        RSLOCK.grantNext()
+    elseif kind == "cancel" then
+        local token = tostring(message.token or "")
+        if token ~= "" then
+            RSLOCK.queued[token] = nil
+            local kept = {}
+            for _, queuedRequest in ipairs(RSLOCK.queue) do
+                if not (queuedRequest.id == sender and queuedRequest.token == token) then
+                    kept[#kept + 1] = queuedRequest
+                end
+            end
+            RSLOCK.queue = kept
+        end
+    elseif kind == "renew" then
+        if RSLOCK.ownerId == sender
+            and tostring(RSLOCK.ownerToken or "") == tostring(message.token or "") then
+            RSLOCK.ownerExpires = RSLOCK.now() + math.max(4,
+                tonumber(CONFIG.playerRSLockLeaseSeconds) or 12)
+        end
+    elseif kind == "release" then
+        if RSLOCK.ownerId == sender
+            and tostring(RSLOCK.ownerToken or "") == tostring(message.token or "") then
+            RSLOCK.ownerId = nil
+            RSLOCK.ownerToken = nil
+            RSLOCK.ownerExpires = 0
+            RSLOCK.grantNext()
+        end
+    end
+end
+
+function RSLOCK.tick()
+    if CONFIG.playerRSLockEnabled ~= true then return end
+    local now = RSLOCK.now()
+
+    if RSLOCK.modemCount <= 0 then RSLOCK.openModems() end
+
+    local helloEvery = math.max(0.5,
+        tonumber(CONFIG.playerRSLockHelloSeconds) or 1)
+    if now - (tonumber(RSLOCK.lastHello) or 0) >= helloEvery then
+        RSLOCK.broadcastHello()
+    end
+
+    RSLOCK.recomputeMembership()
+
+    if RSLOCK.haveLease and RSLOCK.activeToken then
+        local renewEvery = math.max(0.5,
+            tonumber(CONFIG.playerRSLockHeartbeatSeconds) or 1)
+        if now - (tonumber(RSLOCK.lastRenew) or 0) >= renewEvery then
+            RSLOCK.lastRenew = now
+            if RSLOCK.coordinatorId == RSLOCK.id then
+                if RSLOCK.ownerId == RSLOCK.id
+                    and tostring(RSLOCK.ownerToken or "") == tostring(RSLOCK.activeToken) then
+                    RSLOCK.ownerExpires = now + math.max(4,
+                        tonumber(CONFIG.playerRSLockLeaseSeconds) or 12)
+                end
+            elseif RSLOCK.coordinatorId then
+                RSLOCK.send(RSLOCK.coordinatorId, {
+                    kind = "renew",
+                    token = RSLOCK.activeToken,
+                })
+            end
+        end
+    end
+
+    if RSLOCK.coordinatorId == RSLOCK.id then
+        RSLOCK.grantNext()
+    end
+end
+
+function RSLOCK.init()
+    if RSLOCK.initialized then return RSLOCK.modemCount > 0 end
+    RSLOCK.initialized = true
+    local modemOK = RSLOCK.openModems()
+    RSLOCK.recomputeMembership()
+    RSLOCK.broadcastHello()
+    writeLog("RS LOCK init id=" .. tostring(RSLOCK.id) ..
+        " modems=" .. tostring(RSLOCK.modemCount) ..
+        " requirePeer=" .. tostring(CONFIG.playerRSLockRequirePeer == true))
+    return modemOK
+end
+
+function RSLOCK.acquire(reason)
+    if CONFIG.playerRSLockEnabled ~= true then return true end
+    RSLOCK.init()
+
+    if RSLOCK.haveLease and RSLOCK.activeToken then return true end
+
+    RSLOCK.requestSequence = RSLOCK.requestSequence + 1
+    local token = tostring(RSLOCK.id) .. ":" ..
+        tostring(math.floor(RSLOCK.now() * 1000)) .. ":" ..
+        tostring(RSLOCK.requestSequence)
+    RSLOCK.requestedToken = token
+    RSLOCK.grantedToken = nil
+    RSLOCK.lastRequestSend = 0
+
+    local started = RSLOCK.now()
+    local timeout = math.max(3,
+        tonumber(CONFIG.playerRSLockAcquireTimeoutSeconds) or 20)
+    local lastReason = tostring(reason or "Player RS scan")
+
+    while RSLOCK.now() - started < timeout do
+        RSLOCK.tick()
+        local ready, why = RSLOCK.ready()
+        lastReason = tostring(why or lastReason)
+
+        if ready then
+            local coordinator = RSLOCK.coordinatorId
+            local now = RSLOCK.now()
+            if now - (tonumber(RSLOCK.lastRequestSend) or 0) >= 0.75 then
+                RSLOCK.lastRequestSend = now
+                if coordinator == RSLOCK.id then
+                    RSLOCK.enqueue(RSLOCK.id, token)
+                    RSLOCK.grantNext()
+                elseif coordinator then
+                    RSLOCK.send(coordinator, {
+                        kind = "request",
+                        token = token,
+                        reason = tostring(reason or "scan"),
+                    })
+                end
+            end
+
+            if tostring(RSLOCK.grantedToken or "") == token then
+                RSLOCK.haveLease = true
+                RSLOCK.activeToken = token
+                RSLOCK.lastRenew = 0
+                RSLOCK.requestedToken = nil
+                RSLOCK.grantedToken = nil
+                RSLOCK.lastStatus = "owned"
+                return true
+            end
+        end
+
+        sleep(0.1)
+    end
+
+    local coordinator = RSLOCK.coordinatorId
+    if coordinator == RSLOCK.id then
+        RSLOCK.queued[token] = nil
+        local kept = {}
+        for _, queuedRequest in ipairs(RSLOCK.queue) do
+            if not (queuedRequest.id == RSLOCK.id and queuedRequest.token == token) then
+                kept[#kept + 1] = queuedRequest
+            end
+        end
+        RSLOCK.queue = kept
+    elseif coordinator then
+        RSLOCK.send(coordinator, { kind = "cancel", token = token })
+    end
+
+    RSLOCK.requestedToken = nil
+    RSLOCK.grantedToken = nil
+    RSLOCK.lastStatus = lastReason
+    return false, lastReason
+end
+
+function RSLOCK.release()
+    if CONFIG.playerRSLockEnabled ~= true then return true end
+    local token = RSLOCK.activeToken
+    if not token then
+        RSLOCK.haveLease = false
+        return true
+    end
+
+    local coordinator = RSLOCK.coordinatorId
+    if coordinator == RSLOCK.id then
+        if RSLOCK.ownerId == RSLOCK.id
+            and tostring(RSLOCK.ownerToken or "") == tostring(token) then
+            RSLOCK.ownerId = nil
+            RSLOCK.ownerToken = nil
+            RSLOCK.ownerExpires = 0
+            RSLOCK.grantNext()
+        end
+    elseif coordinator then
+        RSLOCK.send(coordinator, { kind = "release", token = token })
+    end
+
+    RSLOCK.haveLease = false
+    RSLOCK.activeToken = nil
+    RSLOCK.lastRenew = 0
+    RSLOCK.lastStatus = "released"
+    return true
+end
+
+function RSLOCK.loop()
+    RSLOCK.init()
+
+    while true do
+        RSLOCK.tick()
+        local timer = os.startTimer(0.25)
+        while true do
+            local event, a, b, c = os.pullEvent()
+            if event == "rednet_message" then
+                if c == RSLOCK.protocol then RSLOCK.handleMessage(a, b) end
+            elseif event == "peripheral" or event == "peripheral_detach" then
+                RSLOCK.openModems()
+            elseif event == "timer" and a == timer then
+                break
+            end
+        end
     end
 end
 
@@ -7172,8 +7659,9 @@ end
 --------------------------------------------------------------------------
 
 local function processorLoop()
-    -- Deterministic phase offset reduces the chance that two colony computers
-    -- started together will hit the shared Player RS bridge at the same instant.
+    -- The v2.57 stagger remains as a secondary startup spread, but v2.58 uses a
+    -- real distributed lease. A processor scan does not call Player RS at all
+    -- unless this computer owns the lease.
     local slots = math.max(1,
         math.floor(tonumber(CONFIG.processorStaggerSlots) or 5))
     local step = math.max(0,
@@ -7183,11 +7671,20 @@ local function processorLoop()
     if initialDelay > 0 then sleep(initialDelay) end
 
     while true do
-        local ok, err = pcall(scanAndProcess)
-        if not ok then
-            health.message = "Processor error: " .. tostring(err)
+        local lockOK, lockReason = RSLOCK.acquire("Supply processor scan")
+        if lockOK then
+            local ok, err = pcall(scanAndProcess)
+            RSLOCK.release()
+
+            if not ok then
+                health.message = "Processor error: " .. tostring(err)
+                health.transfer = false
+                writeLog("FATAL CYCLE ERROR " .. tostring(err))
+            end
+        else
             health.transfer = false
-            writeLog("FATAL CYCLE ERROR " .. tostring(err))
+            health.message = "PLAYER RS LOCK: " .. tostring(lockReason or "unavailable")
+            writeLog("RS LOCK acquire timeout: " .. tostring(lockReason or "unavailable"))
         end
 
         renderTerminal()
@@ -8499,7 +8996,11 @@ end
 
 loadState()
 writeLog("=== Colony Supply Manager starting ===")
-refreshPeripherals()
+RSLOCK.init()
+
+-- v2.58: peripheral discovery (including the shared Player RS Bridge) is done
+-- by scanAndProcess() only after the distributed Player-RS lease is acquired.
+-- This avoids even a startup health/read call racing the other Supply computer.
 
 local updateFound, updateResult = UPDATE.check()
 if updateFound then
@@ -8519,5 +9020,6 @@ parallel.waitForAny(
     processorLoop,
     monitorRefreshLoop,
     eventLoop,
+    RSLOCK.loop,
     function() UPDATE.loop(renderMonitor) end
 )
