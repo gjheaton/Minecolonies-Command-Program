@@ -324,6 +324,12 @@
 --   * suppresses routine successful-transfer messages from the terminal because
 --     transfer history/newest-transfer information is already available on the monitor.
 --
+-- v2.62 / suite 1.1.27:
+--   * Active MineColonies requests are no longer labeled SUPPLIED solely because
+--     the local sent counter reached the requested quantity. Full local delivery
+--     now remains WAITING until MineColonies acknowledges/resolves the request.
+--   * No transfer, crafting, locking, history, or queue behavior changes.
+--
 -- v2.61 / suite 1.1.26:
 --   * Terminal no longer mirrors dashboard request rows; QUEUED, SUPPLIED,
 --     TRANSFER, etc. are monitor-only.
@@ -335,8 +341,8 @@
 --   * only positively classified WARNING or ERROR conditions are shown at the bottom;
 --   * routine transfer/activity text remains monitor/history-only.
 --   No transfer, crafting, request, lock, or monitor behavior changes.
-local PROGRAM_VERSION = "2.61"
-local SUITE_VERSION = "1.1.26"
+local PROGRAM_VERSION = "2.62"
+local SUITE_VERSION = "1.1.27"
 
 local Util = require("colony.lib.util")
 local SharedUI = require("colony.lib.ui")
@@ -5791,8 +5797,12 @@ local function processSingleRequest(request)
 
     if remaining <= 0 then
         if supplied >= requested then
-            row.status = "SUPPLIED"
-            row.message = "Program has supplied request"
+            -- Local accounting proves only that Supply sent the requested amount.
+            -- MineColonies still reports this request as active, so calling it
+            -- SUPPLIED would be a false acknowledgement. Keep it WAITING until
+            -- MineColonies changes/resolves the request.
+            row.status = "WAITING"
+            row.message = "Full quantity sent; awaiting MineColonies acknowledgement"
         else
             row.status = "IN STOCK"
             row.message = "Warehouse stock covers request"
@@ -6007,8 +6017,11 @@ local function processSingleRequest(request)
                 row.message = "Sent " .. tostring(gate.moved or moved) ..
                     "; waiting for MineColonies request refresh"
             elseif row.remaining <= 0 then
-                row.status = "SUPPLIED"
-                row.message = "Imported into colony network"
+                -- The physical transfer completed, but MineColonies still lists
+                -- the request as active. Do not claim SUPPLIED until the colony
+                -- acknowledges it by changing/resolving the request.
+                row.status = "WAITING"
+                row.message = "Full quantity sent; awaiting MineColonies acknowledgement"
             else
                 row.status = "PARTIAL"
                 row.message = "Transferred " .. tostring(moved)
@@ -8782,7 +8795,7 @@ function DIAG.printOverflowDiagnostics()
                         remaining = remaining,
                         warehouseStock = wh,
                         playerStock = getRSAmount(playerRS, candidate.name),
-                        status = remaining <= 0 and (supplied >= requested and "SUPPLIED" or "IN STOCK") or "WAITING",
+                        status = remaining <= 0 and (supplied >= requested and "WAITING" or "IN STOCK") or "WAITING",
                     }
                 end
             end
