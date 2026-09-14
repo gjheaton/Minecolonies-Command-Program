@@ -3,12 +3,14 @@
 -- Requires: CC:Tweaked + Advanced Peripherals + MineColonies
 -- Display: Advanced Monitor
 -- v2.15: Shared-helper cleanup; no functional behavior changes.
+-- v2.16: Terminal layout aligned with Supply Manager; routine status/info
+--        lines removed so only warnings/errors appear below the health block.
 
 local REFRESH_SECONDS = 10
 local RAID_BLINK_SECONDS = 0.75
 local TEXT_SCALE = 0.5
-local PROGRAM_VERSION = "2.15"
-local SUITE_VERSION = "1.1.24"
+local PROGRAM_VERSION = "2.16"
+local SUITE_VERSION = "1.1.25"
 
 local Util = require("colony.lib.util")
 local SharedUI = require("colony.lib.ui")
@@ -1111,43 +1113,46 @@ local function installAvailableUpdate() return UPDATE.install() end
 local function renderTerminalStartup(updateText, statusText)
     local monitorW, monitorH = monitor.getSize()
     local errors = errorCount()
+    local overallHealthy = errors == 0
 
     SharedUI.resetTerminal(colors.white, colors.black)
 
+    -- Match the Supply Manager terminal structure/order: identity first,
+    -- overall health next, then component details, warnings/errors, update
+    -- state/source, and finally the separator. updateText/statusText are kept
+    -- in the signature for compatibility with the existing call sites, but
+    -- routine STARTING/RUNNING informational text is intentionally not shown.
     print("MineColonies Command Center v" .. PROGRAM_VERSION)
     print("Control Suite: v" .. SUITE_VERSION)
-    print("Colony:       " .. tostring(D.name or "Unknown Colony"))
-    print("Monitor:      ONLINE [" .. tostring(monitorName or "?") .. "] " ..
-        tostring(monitorW) .. "x" .. tostring(monitorH))
-    print("Integrator:   ONLINE [" .. tostring(colonyPeripheralName or "?") .. "]")
-    print("Citizens:     " .. tostring(D.population or 0) .. "/" ..
-        tostring(D.maxPopulation or 0))
-    print("Sick trigger: " .. sickTriggerHardwareText(D.sick, D.sickAlarmSuppressed))
+    print("Colony: " .. tostring(D.name or "Unknown Colony"))
 
-    if errors == 0 then
-        SharedUI.setTerminalColor(colors.lime)
-        print("Health:       OK")
-    else
-        SharedUI.setTerminalColor(colors.orange)
-        print("Health:       WARNING (" .. tostring(errors) .. " API error(s))")
-    end
-
-    local updateLine = tostring(updateText or "NOT CHECKED")
-    if updateLine:find("UPDATE AVAILABLE", 1, true) then
-        SharedUI.setTerminalColor(colors.yellow)
-    elseif updateLine:find("ERROR:", 1, true) then
-        SharedUI.setTerminalColor(colors.orange)
-    elseif updateLine:find("CURRENT", 1, true) then
-        SharedUI.setTerminalColor(colors.lime)
-    elseif updateLine:find("LOCAL NEWER", 1, true) then
-        SharedUI.setTerminalColor(colors.cyan)
-    else
-        SharedUI.setTerminalColor(colors.cyan)
-    end
-    print("Update check: " .. updateLine)
+    SharedUI.setTerminalColor(overallHealthy and colors.lime or colors.orange)
+    print("HEALTH:      " .. (overallHealthy and "ONLINE" or "DEGRADED"))
 
     SharedUI.setTerminalColor(colors.white)
-    print("Status:       " .. tostring(statusText or "RUNNING"))
+    print("Monitor:     ONLINE [" .. tostring(monitorName or "?") .. "] " ..
+        tostring(monitorW) .. "x" .. tostring(monitorH))
+    print("Integrator:  ONLINE [" .. tostring(colonyPeripheralName or "?") .. "]")
+    print("Citizens:    " .. tostring(D.population or 0) .. "/" ..
+        tostring(D.maxPopulation or 0))
+    print("Sick trigger:" .. " " .. sickTriggerHardwareText(D.sick, D.sickAlarmSuppressed))
+
+    -- As on Supply, the bottom status area is warning/error only. Do not print
+    -- routine informational lines such as RUNNING, STARTING, or refresh state.
+    if errors > 0 then
+        SharedUI.setTerminalColor(colors.red)
+        print("ERROR:       " .. tostring(errors) .. " MineColonies API error(s)")
+    elseif D.sickAlarmActive == true then
+        SharedUI.setTerminalColor(colors.orange)
+        print("WARNING:     " .. tostring(D.sick or 0) .. " sick citizen(s); alarm active")
+    end
+
+    local updateLine, updateColor = UPDATE.terminalStatus()
+    SharedUI.setTerminalColor(updateColor)
+    print("UPDATE:      " .. tostring(updateLine))
+
+    SharedUI.setTerminalColor(colors.white)
+    print("Suite source: " .. tostring(UPDATE.sourceLabel()))
     print(string.rep("-", 50))
 end
 

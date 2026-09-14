@@ -1,6 +1,6 @@
 --[[
   colony_supply.lua
-  Version 2.53
+  Version 2.60
   Minecraft 1.20.1
   CC:Tweaked + Advanced Peripherals + MineColonies + Refined Storage
 
@@ -322,11 +322,17 @@
 --   * shows the remote Supply link as UP/DOWN with the peer computer ID when known;
 --   * shows this computer's lock role as MASTER or SLAVE and identifies the master ID;
 --   * suppresses routine successful-transfer messages from the terminal because
---     transfer history/newest-transfer information is already available on the monitor;
---   * preserves abnormal health messages on the terminal as ALERT lines.
---   No transfer, crafting, request, lock, Command Center, or monitor behavior changes.
-local PROGRAM_VERSION = "2.59"
-local SUITE_VERSION = "1.1.24"
+--     transfer history/newest-transfer information is already available on the monitor.
+--
+-- v2.60 / suite 1.1.25:
+--   Terminal severity cleanup:
+--   * terminal health-message output is now fail-closed: informational messages are
+--     never printed merely because they are new/unrecognized;
+--   * only positively classified WARNING or ERROR conditions are shown at the bottom;
+--   * routine transfer/activity text remains monitor/history-only.
+--   No transfer, crafting, request, lock, or monitor behavior changes.
+local PROGRAM_VERSION = "2.60"
+local SUITE_VERSION = "1.1.25"
 
 local Util = require("colony.lib.util")
 local SharedUI = require("colony.lib.ui")
@@ -7354,23 +7360,43 @@ local function renderTerminal()
     print("Transfer:    " .. healthWord(transferPathOnline))
     print("Barrel:      " .. tostring(transferChestResolvedName or "NOT DETECTED"))
 
-    -- Routine success messages (for example "Sent 64 ...") duplicate the
-    -- monitor's transfer history/newest-transfer display. Keep only actionable
-    -- warnings/errors on the computer terminal.
+    -- Terminal message output is severity allow-listed rather than using a
+    -- blacklist of known informational messages. This prevents a new normal
+    -- status string from unexpectedly appearing at the bottom of the terminal.
+    -- Only conditions which are positively identified as WARNING or ERROR are
+    -- printed here; routine activity belongs on the monitor/history screens.
     local terminalMessage = tostring(health.message or "")
-    local routineMessage =
-        terminalMessage == ""
-        or terminalMessage == "Online"
-        or terminalMessage == "RS extraction healthy"
-        or terminalMessage == "Pending transfer destination confirmed"
-        or terminalMessage == "Request acknowledged by colony"
-        or terminalMessage:match("^Sent ") ~= nil
-        or terminalMessage:match("^Returned ") ~= nil
-        or terminalMessage:match("^OVERFLOW TRANSFER ") ~= nil
+    local terminalUpper = string.upper(terminalMessage)
+    local terminalSeverity = nil
 
-    if not routineMessage then
+    if terminalUpper:find("ERROR", 1, true)
+        or terminalUpper:find("FATAL", 1, true)
+        or terminalUpper:find("EXCEPTION", 1, true)
+        or terminalUpper:find("FAILED", 1, true) then
+        terminalSeverity = "ERROR"
+    elseif terminalUpper:find("WARNING", 1, true)
+        or terminalUpper:find("WARN", 1, true)
+        or terminalUpper:find("BLOCKED", 1, true)
+        or terminalUpper:find("STALE", 1, true)
+        or terminalUpper:find("DESYNC", 1, true)
+        or terminalUpper:find("PAUSE", 1, true)
+        or terminalUpper:find("UNCONFIRMED", 1, true)
+        or terminalUpper:find("UNKNOWN", 1, true)
+        or terminalUpper:find("STUCK", 1, true)
+        or terminalUpper:find("OFFLINE", 1, true)
+        or terminalUpper:find("UNAVAILABLE", 1, true)
+        or terminalUpper:find("MISSING", 1, true)
+        or terminalUpper:find(" WAIT", 1, true)
+        or terminalUpper:find("WAITING", 1, true) then
+        terminalSeverity = "WARNING"
+    end
+
+    if terminalSeverity == "ERROR" then
+        SharedUI.setTerminalColor(colors.red)
+        print("ERROR:       " .. terminalMessage)
+    elseif terminalSeverity == "WARNING" then
         SharedUI.setTerminalColor(colors.orange)
-        print("Alert:       " .. terminalMessage)
+        print("WARNING:     " .. terminalMessage)
     end
 
     local updateText, updateColor = UPDATE.terminalStatus()
