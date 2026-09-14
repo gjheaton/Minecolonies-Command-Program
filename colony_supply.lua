@@ -324,6 +324,10 @@
 --   * suppresses routine successful-transfer messages from the terminal because
 --     transfer history/newest-transfer information is already available on the monitor.
 --
+-- v2.61 / suite 1.1.26:
+--   * Terminal no longer mirrors dashboard request rows; QUEUED, SUPPLIED,
+--     TRANSFER, etc. are monitor-only.
+--
 -- v2.60 / suite 1.1.25:
 --   Terminal severity cleanup:
 --   * terminal health-message output is now fail-closed: informational messages are
@@ -331,8 +335,8 @@
 --   * only positively classified WARNING or ERROR conditions are shown at the bottom;
 --   * routine transfer/activity text remains monitor/history-only.
 --   No transfer, crafting, request, lock, or monitor behavior changes.
-local PROGRAM_VERSION = "2.60"
-local SUITE_VERSION = "1.1.25"
+local PROGRAM_VERSION = "2.61"
+local SUITE_VERSION = "1.1.26"
 
 local Util = require("colony.lib.util")
 local SharedUI = require("colony.lib.ui")
@@ -7407,19 +7411,9 @@ local function renderTerminal()
     print("Suite source: " .. tostring(UPDATE.sourceLabel()))
     print(string.rep("-", 50))
 
-    local maxRows = 10
-    for i = 1, math.min(#dashboardRows, maxRows) do
-        local row = dashboardRows[i]
-        SharedUI.setTerminalColor(statusColor(row.status))
-        print(string.format(
-            "%-22s %5d/%-5d %-13s",
-            truncateText(row.displayName, 22),
-            row.supplied or 0,
-            row.requested or 0,
-            NBTX.dashboardStatusText(row.status, 13, row)
-        ))
-    end
-
+    -- Request-level state belongs on the Advanced Monitor. Keeping the
+    -- terminal system-only makes it useful as a health/lock console and
+    -- prevents QUEUED/SUPPLIED/TRANSFER rows from duplicating the monitor.
     SharedUI.setTerminalColor(colors.white)
 end
 
