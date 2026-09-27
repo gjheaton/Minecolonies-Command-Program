@@ -322,43 +322,155 @@ function M.new(config, store, cluster, matcher, transfer)
         return math.max(0, math.ceil(cooldown - elapsed)), e.reason
     end
 
-    local function startCraft(candidate, count)
+    local function clearCraftJob(candidate)
+        local key = craftFailureKey(candidate)
+        if store.data.craftJobs[key] ~= nil then
+            store.data.craftJobs[key] = nil
+            store.save()
+        end
+    end
+
+    local function startCraft(candidate, count, requestId)
         local key = craftFailureKey(candidate)
         local left, reason = craftCooldownRemaining(candidate)
-        if left > 0 then return false, "craft error cooldown " .. tostring(left) .. "s: " .. tostring(reason), false end
-
-        local last = tonumber(store.data.craftJobs[key]) or 0
-        if nowSeconds() - last < (tonumber(config.craftCooldownSeconds) or 30) then
-            return true, "craft cooldown", false
+        if left > 0 then
+            return false,
+                "craft error cooldown " .. tostring(left) ..
+                    "s: " .. tostring(reason),
+                false
         end
 
-        local craftable, source = matcher.craftable(transfer.playerRS, candidate, safeCall)
+        local pending = store.data.craftJobs[key]
+        if type(pending) == "number" then
+            pending = {
+                startedAt = pending,
+                count = math.max(1, floor(count)),
+                requestId = requestId and tostring(requestId) or nil,
+                legacy = true,
+            }
+            store.data.craftJobs[key] = pending
+            store.save()
+        end
+
+        if type(pending) == "table" then
+            local startedAt = tonumber(pending.startedAt or pending.time) or 0
+            local age = math.max(0, nowSeconds() - startedAt)
+            local waitSeconds =
+                math.max(30, floor(config.craftOutputWaitSeconds or 180))
+            local queryFilter = matcher.craftFilter(candidate, nil)
+
+            local okCrafting, crafting = safeCall(
+                transfer.playerRS, "isItemCrafting", queryFilter)
+
+            if okCrafting and crafting == true then
+                return true,
+                    "craft in progress; duplicate craft suppressed",
+                    false
+            end
+
+            if age < waitSeconds then
+                return true,
+                    "waiting for crafted output; duplicate craft suppressed (" ..
+                        tostring(math.max(0, waitSeconds - age)) .. "s)",
+                    false
+            end
+
+            if pending.stalledRecorded ~= true then
+                pending.stalledRecorded = true
+                pending.stalledAt = nowSeconds()
+                store.save()
+                store.addError(
+                    "CRAFT_OUTPUT_STALLED",
+                    "Craft was accepted but exact output did not become visible in PRS",
+                    {
+                        requestId = requestId or pending.requestId,
+                        item = candidate.name,
+                        identity = candidate.identity,
+                        requestedCraft = pending.count,
+                        startedAt = startedAt,
+                        ageSeconds = age,
+                        isItemCrafting = okCrafting and crafting or "unavailable",
+                        detail = "Automatic duplicate craft suppressed",
+                    },
+                    "WARNING"
+                )
+            end
+
+            return false,
+                "craft output not visible after " .. tostring(age) ..
+                    "s; duplicate craft suppressed",
+                false
+        end
+
+        local craftable, source =
+            matcher.craftable(transfer.playerRS, candidate, safeCall)
         if not craftable then return false, source, false end
 
-        local filter = matcher.craftFilter(candidate, math.max(1, floor(count)))
-        if candidate.hasNBT and filter.nbt == nil then return false, "exact NBT cannot be represented for crafting", false end
+        local craftCount = math.max(1, floor(count))
+        local filter = matcher.craftFilter(candidate, craftCount)
+        if candidate.hasNBT and filter.nbt == nil then
+            return false,
+                "exact NBT cannot be represented for crafting",
+                false
+        end
 
-        local ok, started, err = safeCall(transfer.playerRS, "craftItem", filter)
+        local ok, started, err =
+            safeCall(transfer.playerRS, "craftItem", filter)
+
         if not ok then
             local previous = store.data.craftFailures[key]
-            local failures = type(previous) == "table" and floor(previous.failures) + 1 or 1
+            local failures =
+                type(previous) == "table"
+                    and floor(previous.failures) + 1
+                    or 1
             local base = tonumber(config.craftErrorCooldownSeconds) or 300
-            local cooldown = math.min(3600, base * (2 ^ math.max(0, failures - 1)))
+            local cooldown =
+                math.min(3600, base * (2 ^ math.max(0, failures - 1)))
+
             store.data.craftFailures[key] = {
-                time = nowSeconds(), reason = tostring(err or started), failures = failures, cooldown = cooldown,
+                time = nowSeconds(),
+                reason = tostring(err or started),
+                failures = failures,
+                cooldown = cooldown,
             }
             store.save()
-            store.addError("CRAFT_EXCEPTION", "PRS craftItem failed for " .. candidate.name,
-                { candidate = candidate, count = count, error = err or started, failures = failures }, "ERROR")
-            return false, "craftItem error: " .. tostring(err or started), true
+            store.addError(
+                "CRAFT_EXCEPTION",
+                "PRS craftItem failed for " .. candidate.name,
+                {
+                    candidate = candidate,
+                    count = craftCount,
+                    error = err or started,
+                    failures = failures,
+                },
+                "ERROR"
+            )
+            return false,
+                "craftItem error: " .. tostring(err or started),
+                true
         end
+
         if started == true then
-            store.data.craftJobs[key] = nowSeconds()
+            store.data.craftJobs[key] = {
+                startedAt = nowSeconds(),
+                count = craftCount,
+                requestId = requestId and tostring(requestId) or nil,
+                stalledRecorded = false,
+            }
             store.data.craftFailures[key] = nil
             store.save()
-            store.addHistory("CRAFT", { item=candidate.name, amount=count, detail="started via " .. tostring(source) })
+            store.addHistory(
+                "CRAFT",
+                {
+                    item = candidate.name,
+                    amount = craftCount,
+                    requestId = requestId,
+                    detail = "started via " .. tostring(source),
+                }
+            )
             return true, "craft started", true
         end
+
         return false, tostring(err or "RS refused craft"), true
     end
 
@@ -566,6 +678,7 @@ function M.new(config, store, cluster, matcher, transfer)
             transfer.playerRS, candidate, safeCall)
 
         if exactStock > 0 and #variants > 0 then
+            clearCraftJob(candidate)
             local amount = math.min(
                 remaining,
                 exactStock,
@@ -656,7 +769,7 @@ function M.new(config, store, cluster, matcher, transfer)
                 local craftAmount = math.min(
                     remaining, floor(config.maxTransferChunk or 64))
                 local okCraft, craftDetail, usedTurn =
-                    startCraft(candidate, craftAmount)
+                    startCraft(candidate, craftAmount, request.id)
                 return {
                     id=tostring(request.id),
                     name=tostring(request.name or "Request"),
@@ -886,7 +999,7 @@ function M.new(config, store, cluster, matcher, transfer)
                 end
 
                 local okCraft, craftDetail, usedTurn =
-                    startCraft(candidate, retryAmount)
+                    startCraft(candidate, retryAmount, request.id)
 
                 if usedTurn then
                     ledger.retryCraftRequestedAt = stamp
@@ -962,6 +1075,7 @@ function M.new(config, store, cluster, matcher, transfer)
         end
 
         if candidate.stock > 0 then
+            clearCraftJob(candidate)
             local amount = math.min(
                 count, candidate.stock, floor(config.maxTransferChunk or 64))
             local baselineCRS = transfer.colonyAmount(candidate)
@@ -1045,7 +1159,8 @@ function M.new(config, store, cluster, matcher, transfer)
             and store.data.settings.autoCraftEnabled == true then
             local craftAmount = math.min(
                 count, floor(config.maxTransferChunk or 64))
-            local ok, detail, usedTurn = startCraft(candidate, craftAmount)
+            local ok, detail, usedTurn =
+                startCraft(candidate, craftAmount, request.id)
             return {
                 id=tostring(request.id),
                 name=tostring(request.name or "Request"),
