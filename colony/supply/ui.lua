@@ -10,6 +10,7 @@ function M.new(config, store, cluster, transfer, engine, updater)
         view = "home",
         historyPage = 1,
         errorPage = 1,
+        checkingUpdate = false,
     }
 
     local monitorUI = SharedUI.newMonitor({
@@ -93,10 +94,64 @@ function M.new(config, store, cluster, transfer, engine, updater)
         line("PRS", Util.healthWord(h.playerRS), statusColor(h.playerRS))
         line("CRS", Util.healthWord(h.colonyRS), statusColor(h.colonyRS))
         line("Transfer Chest", Util.healthWord(h.transferChest), statusColor(h.transferChest))
-        line("Startup", h.startupReady and "PASSED" or "BLOCKED", statusColor(h.startupReady))
+
+        local movementCheck = h.startupChecks and h.startupChecks.movement or nil
+        local startupWaiting = not h.startupReady
+            and type(movementCheck) == "table"
+            and movementCheck.severity == "WAITING"
+        line(
+            "Startup",
+            h.startupReady and "PASSED" or (startupWaiting and "WAITING TURN" or "BLOCKED"),
+            h.startupReady and C.good or (startupWaiting and C.warn or C.danger)
+        )
+
         line("AutoCraft", h.autoCraftEnabled and "ON" or "OFF", h.autoCraftEnabled and C.good or C.warn)
         line("Overstock", h.overstockEnabled and "ON" or "OFF", h.overstockEnabled and C.good or C.dim)
         line("Last Scan", tostring(h.lastScanText), C.dim)
+
+        if y <= mh-2 then
+            local updateText
+            local updateColor
+            if self.checkingUpdate then
+                updateText = "CHECKING..."
+                updateColor = C.info
+            elseif updater.checkError then
+                updateText = "ERROR: " .. tostring(updater.checkError)
+                updateColor = C.danger
+            elseif updater.availableVersion then
+                updateText = "AVAILABLE v" .. tostring(updater.availableVersion)
+                updateColor = C.warn
+            elseif updater.remoteSuiteVersion then
+                updateText = "CURRENT v" .. tostring(updater.remoteSuiteVersion)
+                updateColor = C.good
+            else
+                updateText = "NOT CHECKED"
+                updateColor = C.dim
+            end
+
+            local buttonWidth = math.min(14, math.max(10, math.floor(w / 5)))
+            local bx = math.max(32, w - buttonWidth + 1)
+            monitorUI.fillRow(y, C.bg)
+            monitorUI.writeAt(2, y, Util.padRight("Update", 18), C.dim, C.bg)
+            monitorUI.writeAt(
+                21, y,
+                Util.clip(updateText, math.max(1, bx - 22)),
+                updateColor, C.bg
+            )
+            monitorUI.addButton(
+                "check_update", bx, y, w, y, "CHECK NOW",
+                C.navActive, C.navText,
+                function()
+                    if self.checkingUpdate then return end
+                    self.checkingUpdate = true
+                    self.draw()
+                    pcall(updater.check)
+                    self.checkingUpdate = false
+                    self.draw()
+                end
+            )
+            y = y + 1
+        end
 
         if y <= mh-2 then
             monitorUI.fillRow(y, C.panel)
@@ -113,6 +168,11 @@ function M.new(config, store, cluster, transfer, engine, updater)
     local function drawHealth()
         local h = engine.healthSnapshot()
         local w = drawFrame("HEALTH CHECKS", h.overall and "ONLINE" or "DEGRADED", h.overall and C.good or C.warn)
+        local movementCheck = h.startupChecks and h.startupChecks.movement or nil
+        local startupWaiting = not h.startupReady
+            and type(movementCheck) == "table"
+            and movementCheck.severity == "WAITING"
+
         local rows = {
             {"Colony integrator", h.colony, transfer.colonyName},
             {"Player RS (PRS)", h.playerRS, transfer.playerBridgeName or "?"},
@@ -120,16 +180,26 @@ function M.new(config, store, cluster, transfer, engine, updater)
             {"Warehouse external", h.warehouse, h.warehouse and "external storage online" or "not detected"},
             {"Transfer chest", h.transferChest, transfer.transferChestName or "?"},
             {"Cluster link", h.cluster.ok, h.cluster.ok and table.concat(h.cluster.activeIds,",") or h.cluster.fault},
-            {"Startup suite", h.startupReady, h.startupReady and "all required checks passed" or "blocked"},
+            {
+                "Startup suite",
+                h.startupReady,
+                h.startupReady and "all required checks passed"
+                    or (startupWaiting and tostring(movementCheck.detail or "waiting for PRS turn") or "blocked"),
+                startupWaiting and "WAIT" or nil,
+                startupWaiting and C.warn or nil,
+            },
             {"PRS desync", not (h.desync and h.desync.suspected), h.desync and h.desync.detail or "not checked"},
             {"Pending transfer", h.pending == nil, h.pending and ("PENDING " .. tostring(h.pending.direction) .. " " .. tostring(h.pending.item)) or "none"},
         }
         local y = 5
         for _, row in ipairs(rows) do
-            monitorUI.fillRow(y, (y%2==0) and C.panel or C.bg)
-            monitorUI.writeAt(2,y,Util.padRight(row[1],20),C.dim,(y%2==0) and C.panel or C.bg)
-            monitorUI.writeAt(23,y,row[2] and "OK" or "FAIL",row[2] and C.good or C.danger,(y%2==0) and C.panel or C.bg)
-            monitorUI.writeAt(30,y,Util.clip(row[3] or "",math.max(1,w-30)),C.text,(y%2==0) and C.panel or C.bg)
+            local bg = (y%2==0) and C.panel or C.bg
+            local statusWord = row[4] or (row[2] and "OK" or "FAIL")
+            local statusFg = row[5] or (row[2] and C.good or C.danger)
+            monitorUI.fillRow(y, bg)
+            monitorUI.writeAt(2,y,Util.padRight(row[1],20),C.dim,bg)
+            monitorUI.writeAt(23,y,statusWord,statusFg,bg)
+            monitorUI.writeAt(30,y,Util.clip(row[3] or "",math.max(1,w-30)),C.text,bg)
             y=y+1
         end
 
@@ -137,9 +207,14 @@ function M.new(config, store, cluster, transfer, engine, updater)
         for _, id in ipairs({"functions","pending","chest_empty","movement","desync","cluster"}) do
             local c = checks[id]
             if c and y < select(2,monitorUI.size()) then
+                local checkWord = c.ok and "OK"
+                    or (c.severity == "WAITING" and "WAIT" or "FAIL")
+                local checkColor = c.ok and C.good
+                    or ((c.severity == "WARNING" or c.severity == "WAITING")
+                        and C.warn or C.danger)
                 monitorUI.fillRow(y,C.bg)
                 monitorUI.writeAt(2,y,Util.padRight("Startup "..id,20),C.dim,C.bg)
-                monitorUI.writeAt(23,y,c.ok and "OK" or "FAIL",c.ok and C.good or (c.severity=="WARNING" and C.warn or C.danger),C.bg)
+                monitorUI.writeAt(23,y,checkWord,checkColor,C.bg)
                 monitorUI.writeAt(30,y,Util.clip(c.detail or "",math.max(1,w-30)),C.text,C.bg)
                 y=y+1
             end
