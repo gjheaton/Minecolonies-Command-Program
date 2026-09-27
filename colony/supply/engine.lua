@@ -141,65 +141,172 @@ function M.new(config, store, cluster, matcher, transfer)
     end
 
     function self.runStartupChecks()
-        if self.startupRunning then return false end
+        if self.startupRunning then return false, "already running" end
         self.startupRunning = true
+
+        local function blockedSignature()
+            local parts = {}
+            local checks = store.data.startup and store.data.startup.checks or {}
+            for id, check in pairs(checks) do
+                if type(check) == "table"
+                    and check.ok ~= true
+                    and check.severity ~= "WARNING"
+                    and check.severity ~= "WAITING" then
+                    parts[#parts + 1] =
+                        tostring(id) .. "=" .. tostring(check.detail or "")
+                end
+            end
+            table.sort(parts)
+            return table.concat(parts, " | ")
+        end
+
+        local function recordBlockedOnce()
+            local signature = blockedSignature()
+            if signature == "" then signature = "startup blocked" end
+            store.data.startup = store.data.startup or { checks = {} }
+
+            if store.data.startup.lastBlockedSignature ~= signature then
+                store.data.startup.lastBlockedSignature = signature
+                store.save()
+                store.addError(
+                    "STARTUP_BLOCKED",
+                    "Supply v3 startup health checks did not pass",
+                    { checks = store.data.startup.checks },
+                    "ERROR"
+                )
+            end
+            cluster.broadcastFault("startup checks failed: " .. signature)
+        end
+
+        -- Cluster ownership is checked before touching PRS. A healthy computer
+        -- which is simply waiting for another colony's turn is not failed and
+        -- must not run PRS reads or movement tests out of turn.
+        local clusterStatus = cluster.status()
+        setCheck(
+            "cluster",
+            clusterStatus.ok,
+            clusterStatus.ok
+                and ("cluster online; master=" .. tostring(clusterStatus.masterId) ..
+                    " active=" .. table.concat(clusterStatus.activeIds, ","))
+                or tostring(clusterStatus.fault),
+            clusterStatus.ok and "OK" or "ERROR"
+        )
+
+        if not clusterStatus.ok then
+            self.startupReady = false
+            store.markStartupComplete(false)
+            setCheck(
+                "movement",
+                false,
+                "not attempted because cluster is not healthy",
+                "WAITING"
+            )
+            recordBlockedOnce()
+            self.startupRunning = false
+            return false, tostring(clusterStatus.fault or "cluster unhealthy")
+        end
+
+        local canPRS, turnStatus = cluster.canAccessPRS()
+        if not canPRS then
+            local turnId = turnStatus and turnStatus.turnId or clusterStatus.turnId
+            setCheck(
+                "movement",
+                false,
+                "waiting for PRS turn " .. tostring(turnId or "?") ..
+                    "; this computer is " .. tostring(clusterStatus.id),
+                "WAITING"
+            )
+            self.statusMessage =
+                "Waiting for computer " .. tostring(turnId or "?") .. " PRS turn"
+            self.startupRunning = false
+            return nil, "WAITING"
+        end
+
+        -- We own the PRS turn. Revalidate the full startup suite.
         self.startupReady = false
         store.markStartupComplete(false)
 
         local okRefresh = transfer.refresh()
-        setCheck("peripherals", okRefresh,
-            okRefresh and "PRS, CRS, colony integrator, warehouse and transfer chest online"
-                or "one or more required peripherals are unavailable")
+        setCheck(
+            "peripherals",
+            okRefresh,
+            okRefresh
+                and "PRS, CRS, colony integrator, warehouse and transfer chest online"
+                or "one or more required peripherals are unavailable"
+        )
 
         local okFunctions, functionDetail = functionChecks()
         setCheck("functions", okFunctions, functionDetail)
 
-        local legacyPending = store.data.migration and store.data.migration.legacyPendingDetected
+        local legacyPending =
+            store.data.migration and store.data.migration.legacyPendingDetected
         if legacyPending then
-            setCheck("legacy_pending", false,
+            setCheck(
+                "legacy_pending",
+                false,
                 "v2 pending transaction detected in legacy state; v3 will not assume its outcome",
-                "WARNING")
+                "WARNING"
+            )
         else
-            setCheck("legacy_pending", true, "no legacy v2 pending transaction detected")
+            setCheck(
+                "legacy_pending",
+                true,
+                "no legacy v2 pending transaction detected"
+            )
         end
 
         local okPending, pendingDetail = transfer.recoverPending()
         setCheck("pending", okPending, pendingDetail)
 
         local empty, emptyDetail = transfer.chestEmpty()
-        setCheck("chest_empty", empty, empty and "transfer chest empty" or tostring(emptyDetail or "transfer chest occupied"))
+        setCheck(
+            "chest_empty",
+            empty,
+            empty
+                and "transfer chest empty"
+                or tostring(emptyDetail or "transfer chest occupied")
+        )
 
-        local clusterStatus = cluster.status()
-        setCheck("cluster", clusterStatus.ok,
-            clusterStatus.ok
-                and ("cluster online; master=" .. tostring(clusterStatus.masterId) ..
-                    " active=" .. table.concat(clusterStatus.activeIds, ","))
-                or tostring(clusterStatus.fault))
-
-        local canPRS = cluster.canAccessPRS()
-        local movementOK, movementDetail = false, "waiting for this computer's PRS turn"
-        if canPRS and okRefresh and okFunctions and okPending and empty then
+        local movementOK = false
+        local movementDetail = "movement test prerequisites did not pass"
+        if okRefresh and okFunctions and okPending and empty then
             movementOK, movementDetail = transfer.startupRoundTrip()
         end
         setCheck("movement", movementOK, movementDetail)
 
+        -- Desync probing also reads PRS and therefore only runs while we own the turn.
         local desyncOK, desyncDetail = desyncHeuristic()
-        setCheck("desync", desyncOK, desyncDetail,
-            store.data.desync and store.data.desync.suspected and "WARNING" or "OK")
+        setCheck(
+            "desync",
+            desyncOK,
+            desyncDetail,
+            store.data.desync and store.data.desync.suspected and "WARNING" or "OK"
+        )
 
-        local fatal = not (okRefresh and okFunctions and okPending and empty and clusterStatus.ok and movementOK)
+        local fatal = not (
+            okRefresh
+            and okFunctions
+            and okPending
+            and empty
+            and movementOK
+        )
+
         self.startupReady = not fatal
         store.markStartupComplete(self.startupReady)
+
         if fatal then
-            store.addError("STARTUP_BLOCKED", "Supply v3 startup health checks did not pass",
-                { checks = store.data.startup.checks }, "ERROR")
-            cluster.broadcastFault("startup checks failed")
+            recordBlockedOnce()
         else
-            store.addHistory("STARTUP", { detail = "all required startup checks passed" })
+            store.data.startup.lastBlockedSignature = nil
+            store.save()
+            store.addHistory(
+                "STARTUP",
+                { detail = "all required startup checks passed" }
+            )
         end
 
         self.startupRunning = false
-        return self.startupReady
+        return self.startupReady, movementDetail
     end
 
     local function craftFailureKey(candidate)
