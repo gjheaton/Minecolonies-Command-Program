@@ -11,6 +11,10 @@ function M.new(config, store, cluster, transfer, engine, updater)
         historyPage = 1,
         errorPage = 1,
         checkingUpdate = false,
+        overridePage = 1,
+        overrideItem = nil,
+        overrideDraft = nil,
+        overrideDraftName = nil,
     }
 
     local monitorUI = SharedUI.newMonitor({
@@ -60,7 +64,9 @@ function M.new(config, store, cluster, transfer, engine, updater)
             } or nil,
         })
         monitorUI.center(4, title, C.title, C.bg)
-        monitorUI.drawNav(self.view, tabs, nil, function(id)
+        local navView = (self.view == "overrides" or self.view == "override_edit")
+            and "settings" or self.view
+        monitorUI.drawNav(navView, tabs, nil, function(id)
             self.view = id
             self.draw()
         end)
@@ -178,6 +184,78 @@ function M.new(config, store, cluster, transfer, engine, updater)
                 " | Blocked " .. engine.stats.blocked ..
                 " | Errors " .. engine.stats.errors,
                 engine.stats.errors > 0 and C.warn or C.text, C.panel)
+            y = y + 2
+        end
+
+        local work = h.currentWork
+        if work and y <= mh - 4 then
+            local status = tostring(work.status or "UNKNOWN")
+            local upper = status:upper()
+            local statusFg = C.text
+            if upper:find("ERROR", 1, true)
+                or upper:find("BLOCKED", 1, true)
+                or upper:find("MISSING", 1, true)
+                or upper:find("STALLED", 1, true) then
+                statusFg = C.danger
+            elseif upper:find("CRAFT", 1, true) then
+                statusFg = C.warn
+            elseif upper:find("SUPPLY", 1, true) then
+                statusFg = C.good
+            elseif upper:find("WAIT", 1, true)
+                or upper:find("VERIFY", 1, true) then
+                statusFg = colors.lightBlue
+            end
+
+            monitorUI.fillRow(y, C.panel)
+            monitorUI.center(y, "CURRENT WORK", C.title, C.panel)
+            y = y + 1
+
+            monitorUI.fillRow(y, C.bg)
+            monitorUI.writeAt(2, y, "Item:", C.dim, C.bg)
+            monitorUI.writeAt(
+                8, y,
+                Util.clip(
+                    tostring(work.displayName or work.item or "-") ..
+                    "  [" .. tostring(work.item or "-") .. "]",
+                    math.max(1, w - 8)
+                ),
+                C.text, C.bg
+            )
+            y = y + 1
+
+            monitorUI.fillRow(y, C.bg)
+            local counts =
+                "Need " .. tostring(work.requested or 0) ..
+                " | Sent " .. tostring(work.sent or 0) ..
+                " | Rem " .. tostring(work.remaining or 0) ..
+                " | PRS " .. tostring(work.prsStock == nil and "?" or work.prsStock) ..
+                " | CRS " .. tostring(work.crsStock == nil and "?" or work.crsStock)
+            monitorUI.writeAt(2, y, Util.clip(counts, math.max(1, w - 2)), C.text, C.bg)
+            y = y + 1
+
+            monitorUI.fillRow(y, C.bg)
+            monitorUI.writeAt(2, y, "Status: ", C.dim, C.bg)
+            monitorUI.writeAt(
+                10, y,
+                Util.clip(
+                    status .. "  @ " .. tostring(work.capturedAt or "--:--:--"),
+                    math.max(1, w - 10)
+                ),
+                statusFg, C.bg
+            )
+            y = y + 1
+
+            if y <= mh - 1 and tostring(work.detail or "") ~= "" then
+                monitorUI.fillRow(y, C.bg)
+                monitorUI.writeAt(
+                    2, y,
+                    Util.clip(tostring(work.detail), math.max(1, w - 2)),
+                    C.dim, C.bg
+                )
+            end
+        elseif not work and y <= mh - 2 then
+            monitorUI.fillRow(y, C.panel)
+            monitorUI.center(y, "CURRENT WORK: no active request", C.dim, C.panel)
         end
     end
 
@@ -442,7 +520,7 @@ function M.new(config, store, cluster, transfer, engine, updater)
     end
 
     local function drawSettings()
-        local w = drawFrame("SETTINGS","Touch to toggle",C.dim)
+        local w = drawFrame("SETTINGS","Touch to configure",C.dim)
         local y=6
         local over = store.data.settings.overstockEnabled==true
         monitorUI.addButton("toggle_overstock",2,y,w-1,y+1,
@@ -452,6 +530,7 @@ function M.new(config, store, cluster, transfer, engine, updater)
                 store.save(); self.draw()
             end)
         y=y+3
+
         local craft = store.data.settings.autoCraftEnabled==true
         monitorUI.addButton("toggle_craft",2,y,w-1,y+1,
             "AUTOCRAFT: " .. (craft and "ON" or "OFF"),
@@ -460,11 +539,250 @@ function M.new(config, store, cluster, transfer, engine, updater)
                 store.save(); self.draw()
             end)
         y=y+3
-        monitorUI.center(y,"Default item keep: " .. tostring(config.defaultItemKeepStacks) .. " stacks",C.text,C.bg)
-        y=y+1
-        monitorUI.center(y,"Default building keep: " .. tostring(config.defaultBuildingKeepCount) .. " items",C.text,C.bg)
+
+        monitorUI.center(
+            y,
+            "Default item keep: " .. tostring(config.defaultItemKeepStacks) ..
+                " stacks  |  Building keep: " ..
+                tostring(config.defaultBuildingKeepCount),
+            C.text,C.bg
+        )
         y=y+2
-        monitorUI.center(y,"Per-item overrides: /colony/supply_v3_state.txt -> settings.overstockKeep",C.dim,C.bg)
+
+        monitorUI.addButton(
+            "open_overrides", 2, y, w-1, y+1,
+            "PER-ITEM OVERSTOCK OVERRIDES",
+            C.navActive, C.navText,
+            function()
+                self.overridePage = 1
+                self.view = "overrides"
+                self.draw()
+            end
+        )
+        y=y+3
+
+        local count=0
+        for _ in pairs(store.data.settings.overstockKeep or {}) do count=count+1 end
+        monitorUI.center(
+            y,
+            tostring(count) .. " per-item override" .. (count==1 and "" or "s") ..
+                " configured",
+            count>0 and C.warn or C.dim,C.bg
+        )
+    end
+
+    local function drawOverrides()
+        local w,h = monitorUI.size()
+        local items, listErr = engine.listOverstockItems()
+        local rowsPerPage = math.max(1, h - 9)
+        local pages = math.max(1, math.ceil(#items / rowsPerPage))
+        self.overridePage = math.max(1, math.min(self.overridePage, pages))
+
+        drawFrame(
+            "PER-ITEM OVERSTOCK  " .. tostring(self.overridePage) ..
+                "/" .. tostring(pages),
+            listErr and tostring(listErr) or "Touch an item to edit",
+            listErr and C.warn or C.dim
+        )
+
+        local y=5
+        monitorUI.fillRow(y,C.panel)
+        monitorUI.writeAt(2,y,"ITEM",C.dim,C.panel)
+        monitorUI.writeAt(math.max(2,w-27),y,"CRS",C.dim,C.panel)
+        monitorUI.writeAt(math.max(2,w-16),y,"KEEP",C.dim,C.panel)
+        monitorUI.writeAt(math.max(2,w-5),y,"OVR",C.dim,C.panel)
+        y=y+1
+
+        local first=(self.overridePage-1)*rowsPerPage+1
+        local last=math.min(#items,first+rowsPerPage-1)
+
+        for i=first,last do
+            local item=items[i]
+            local override=item.overrideKeep~=nil
+            local keep=override and item.overrideKeep or item.defaultKeep
+            local right =
+                "CRS " .. tostring(item.amount or 0) ..
+                "  KEEP " .. tostring(keep or 0) ..
+                (override and "  *" or "")
+            local name=tostring(item.displayName or item.name)
+            local maxName=math.max(8,w-#right-6)
+            local label=Util.clip(name,maxName) .. "  " .. right
+            local bg=(y%2==0) and C.panel or C.bg
+            monitorUI.addButton(
+                "override_item_"..tostring(i),2,y,w-1,y,
+                label,bg,override and C.warn or C.text,
+                function()
+                    self.overrideItem=item.name
+                    self.overrideDraftName=nil
+                    self.overrideDraft=nil
+                    self.view="override_edit"
+                    self.draw()
+                end
+            )
+            y=y+1
+        end
+
+        if #items==0 then
+            monitorUI.center(
+                y+1,
+                listErr and tostring(listErr) or "No CRS items or saved overrides found.",
+                listErr and C.warn or C.dim,C.bg
+            )
+        end
+
+        local third=math.floor(w/3)
+        monitorUI.addButton(
+            "override_prev",1,h-1,third,h-1,"PREV",
+            C.nav,C.navText,function()
+                self.overridePage=math.max(1,self.overridePage-1)
+                self.draw()
+            end
+        )
+        monitorUI.addButton(
+            "override_back",third+1,h-1,math.floor(2*w/3),h-1,"BACK",
+            C.navActive,C.navText,function()
+                self.view="settings"
+                self.draw()
+            end
+        )
+        monitorUI.addButton(
+            "override_next",math.floor(2*w/3)+1,h-1,w,h-1,"NEXT",
+            C.nav,C.navText,function()
+                self.overridePage=math.min(pages,self.overridePage+1)
+                self.draw()
+            end
+        )
+    end
+
+    local function drawOverrideEdit()
+        local w,h = monitorUI.size()
+        local items = engine.listOverstockItems()
+        local selected
+
+        for _,item in ipairs(items or {}) do
+            if item.name==self.overrideItem then
+                selected=item
+                break
+            end
+        end
+
+        if not selected then
+            selected={
+                name=tostring(self.overrideItem or ""),
+                displayName=tostring(self.overrideItem or "Unknown item"),
+                amount=0,
+                defaultKeep=config.defaultStackSize *
+                    (config.defaultItemKeepStacks or 2),
+                overrideKeep=(store.data.settings.overstockKeep or {})[
+                    tostring(self.overrideItem or "")
+                ],
+            }
+            selected.keep=selected.overrideKeep or selected.defaultKeep
+        end
+
+        if self.overrideDraftName~=selected.name then
+            self.overrideDraftName=selected.name
+            self.overrideDraft=tonumber(selected.overrideKeep)
+                or tonumber(selected.defaultKeep)
+                or 0
+        end
+
+        self.overrideDraft=math.max(0,math.floor(tonumber(self.overrideDraft) or 0))
+
+        drawFrame("EDIT OVERSTOCK OVERRIDE","Changes apply when SAVE is touched",C.dim)
+
+        local y=6
+        monitorUI.center(
+            y,
+            Util.clip(tostring(selected.displayName or selected.name),math.max(1,w-4)),
+            C.title,C.bg
+        )
+        y=y+1
+        monitorUI.center(
+            y,
+            Util.clip(tostring(selected.name),math.max(1,w-4)),
+            C.dim,C.bg
+        )
+        y=y+2
+
+        monitorUI.center(
+            y,
+            "CRS stock: "..tostring(selected.amount or 0)..
+            "  |  Default keep: "..tostring(selected.defaultKeep or 0),
+            C.text,C.bg
+        )
+        y=y+1
+        monitorUI.center(
+            y,
+            "Saved override: "..
+                tostring(selected.overrideKeep==nil and "DEFAULT" or selected.overrideKeep)..
+            "  |  New keep: "..tostring(self.overrideDraft),
+            C.warn,C.bg
+        )
+        y=y+3
+
+        local labels={
+            {"-1024",-1024},{"-64",-64},{"-1",-1},
+            {"+1",1},{"+64",64},{"+1024",1024},
+        }
+        local base=math.floor(w/#labels)
+        local x=1
+        for i,entry in ipairs(labels) do
+            local x2=(i==#labels) and w or (x+base-1)
+            local delta=entry[2]
+            monitorUI.addButton(
+                "override_delta_"..tostring(i),x,y,x2,y,
+                entry[1],C.nav,C.navText,function()
+                    self.overrideDraft=math.max(
+                        0,
+                        math.floor((tonumber(self.overrideDraft) or 0)+delta)
+                    )
+                    self.draw()
+                end
+            )
+            x=x2+1
+        end
+        y=y+2
+
+        if y<=h-3 then
+            monitorUI.addButton(
+                "override_zero",2,y,math.floor(w/3),y+1,
+                "KEEP 0",C.warn,C.navText,function()
+                    self.overrideDraft=0
+                    self.draw()
+                end
+            )
+            monitorUI.addButton(
+                "override_default",math.floor(w/3)+1,y,
+                math.floor(2*w/3),y+1,
+                "USE DEFAULT",C.nav,C.navText,function()
+                    engine.clearOverstockOverride(selected.name)
+                    self.overrideDraft=selected.defaultKeep
+                    self.overrideDraftName=selected.name
+                    self.view="overrides"
+                    self.draw()
+                end
+            )
+            monitorUI.addButton(
+                "override_save",math.floor(2*w/3)+1,y,w-1,y+1,
+                "SAVE OVERRIDE",C.good,C.navText,function()
+                    engine.setOverstockOverride(
+                        selected.name,
+                        math.floor(tonumber(self.overrideDraft) or 0)
+                    )
+                    self.view="overrides"
+                    self.draw()
+                end
+            )
+        end
+
+        monitorUI.addButton(
+            "override_edit_back",1,h-1,w,h-1,"BACK TO ITEM LIST",
+            C.navActive,C.navText,function()
+                self.view="overrides"
+                self.draw()
+            end
+        )
     end
 
     function self.draw()
@@ -475,6 +793,8 @@ function M.new(config, store, cluster, transfer, engine, updater)
         elseif self.view=="history" then drawHistory()
         elseif self.view=="errors" then drawErrors()
         elseif self.view=="settings" then drawSettings()
+        elseif self.view=="overrides" then drawOverrides()
+        elseif self.view=="override_edit" then drawOverrideEdit()
         end
         return true
     end
