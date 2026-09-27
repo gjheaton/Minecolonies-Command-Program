@@ -62,13 +62,14 @@ C.requestAckMaxRetries = 1
 C.requestAckPostRetrySeconds = 60
 C.requestAckRetryCraftWaitSeconds = 180
 
--- Craft submission safety. Once a craft is accepted, do not submit the same
--- exact item again merely because it has not appeared in PRS yet.
--- Keep the shared PRS turn while a craft is actively running, then require
--- the output to remain visible across multiple scans plus a quiet window
--- before Supply tries to move it.
+-- Craft submission safety. Once craftItem() is accepted, that request enters
+-- a quiet period with no isItemCrafting() calls and no output polling. Other
+-- requests continue normally. After the blackout, only one sparse output check
+-- is made at this cadence, and the output must be observed twice before
+-- transfer begins.
+C.craftInitialBlackoutSeconds = 30
+C.craftOutputPollSeconds = 15
 C.craftStableReadsRequired = 2
-C.craftPostCompleteQuietSeconds = 10
 
 -- Craft submission safety. Once a craft is accepted, do not submit the same
 -- exact item again merely because it has not appeared in PRS yet. After this
