@@ -1,5 +1,5 @@
 -- MineColonies Control Suite Installer
--- Suite package version 1.1.28
+-- Suite package version 3.0.0
 --
 -- Modular GitHub installer.
 -- The repository layout mirrors the CC:Tweaked filesystem.
