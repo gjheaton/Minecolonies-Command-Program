@@ -679,11 +679,16 @@ function M.new(config, store, matcher)
         local playerBefore = self.playerAmount(candidate)
         if playerBefore == nil then return false, "cannot read PRS before rollback" end
 
-        local filter = { name = candidate.name, count = math.min(chestBefore, floor(expected) > 0 and floor(expected) or chestBefore) }
-        if candidate.hasNBT then
-            local encoded = matcher.craftFilter(candidate, filter.count)
-            if encoded.nbt then filter.nbt = encoded.nbt end
-        end
+        -- The transfer chest is the isolation boundary. The exact variant was
+        -- already selected before it entered the chest, so do not pass AP's
+        -- listItems NBT/hash value back as an import filter.
+        local filter = {
+            name = candidate.name,
+            count = math.min(
+                chestBefore,
+                floor(expected) > 0 and floor(expected) or chestBefore
+            )
+        }
 
         local moved = 0
         for _ = 1, math.max(1, floor(config.transferImportRetries or 3)) do
@@ -741,11 +746,14 @@ function M.new(config, store, matcher)
         }
         setPending(pending)
 
-        local importFilter = { name = candidate.name, count = quantity }
-        if candidate.hasNBT and candidate.genericClassAcceptance ~= true then
-            local encoded = matcher.craftFilter(candidate, quantity)
-            if encoded.nbt then importFilter.nbt = encoded.nbt end
-        end
+        -- The physical item in the transfer chest has already been inspected
+        -- and accepted against the active request. Import by registry name;
+        -- AP may expose an NBT hash that is valid for identity comparison but
+        -- not valid as importItemFromPeripheral()'s nbt filter.
+        local importFilter = {
+            name = candidate.name,
+            count = quantity,
+        }
 
         for _ = 1, math.max(1, floor(config.transferImportRetries or 3)) do
             destinationImport(
@@ -869,11 +877,14 @@ function M.new(config, store, matcher)
         pending.amount = physicallyExported
         setPending(pending)
 
-        local importFilter = { name = candidate.name, count = physicallyExported }
-        if candidate.hasNBT then
-            local encoded = matcher.craftFilter(candidate, physicallyExported)
-            if encoded.nbt then importFilter.nbt = encoded.nbt end
-        end
+        -- Exactness was enforced on PRS->chest (fingerprint for equipment/NBT).
+        -- The chest started empty, so the staged item is already isolated.
+        -- Import by name only; destination verification below still confirms
+        -- that the exact candidate appeared in CRS.
+        local importFilter = {
+            name = candidate.name,
+            count = physicallyExported,
+        }
 
         for _ = 1, math.max(1, floor(config.transferImportRetries or 3)) do
             destinationImport(self.colonyRS, importFilter, config.chestToColonyDirection)
@@ -977,11 +988,13 @@ function M.new(config, store, matcher)
         pending.amount = staged
         setPending(pending)
 
-        local importFilter = { name = candidate.name, count = staged }
-        if candidate.hasNBT then
-            local encoded = matcher.craftFilter(candidate, staged)
-            if encoded.nbt then importFilter.nbt = encoded.nbt end
-        end
+        -- Exactness was enforced on CRS->chest before staging. The chest
+        -- started empty, so import the isolated staged item by registry name
+        -- and verify the exact candidate in PRS afterward.
+        local importFilter = {
+            name = candidate.name,
+            count = staged,
+        }
 
         local importMoved = 0
         local lastImportErr
