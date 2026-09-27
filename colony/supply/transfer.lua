@@ -383,7 +383,16 @@ function M.new(config, store, matcher)
 
         if exported <= 0 or physicallyExported <= 0 then
             clearPending()
-            return false, "PRS export failed: bridge=" .. tostring(exported) .. " chestDelta=" .. tostring(physicallyExported) .. " " .. tostring(exportErr or "")
+            return false,
+                "PRS export failed: item=" .. tostring(candidate.name) ..
+                " mode=" .. tostring(filterMode) ..
+                " direction=" .. tostring(config.playerToChestDirection) ..
+                " requested=" .. tostring(quantity) ..
+                " bridge=" .. tostring(exported) ..
+                " chestBefore=" .. tostring(chestBefore) ..
+                " chestAfter=" .. tostring(chestAfterExport) ..
+                " chestDelta=" .. tostring(physicallyExported) ..
+                (exportErr and (" error=" .. tostring(exportErr)) or "")
         end
 
         pending.stage = "staged"
@@ -470,7 +479,15 @@ function M.new(config, store, matcher)
         local staged = afterChest and math.max(0, afterChest - beforeChest) or 0
         if floor(exported) <= 0 or staged <= 0 then
             clearPending()
-            return false, "CRS export failed: bridge=" .. tostring(exported) .. " chestDelta=" .. tostring(staged)
+            return false,
+                "CRS export failed: item=" .. tostring(candidate.name) ..
+                " mode=" .. tostring(mode) ..
+                " direction=" .. tostring(config.colonyToChestDirection) ..
+                " requested=" .. tostring(quantity) ..
+                " bridge=" .. tostring(exported) ..
+                " chestBefore=" .. tostring(beforeChest) ..
+                " chestAfter=" .. tostring(afterChest) ..
+                " chestDelta=" .. tostring(staged)
         end
 
         pending.stage = "staged"
