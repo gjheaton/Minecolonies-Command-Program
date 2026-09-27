@@ -213,6 +213,49 @@ function M.new(config, store, matcher)
         return next(list) == nil
     end
 
+    function self.chestSnapshot()
+        local list, err = self.chestContents()
+        if not list then return nil, err end
+
+        local chest = self.getChest()
+        local entries = {}
+        local signatureParts = {}
+
+        for slot, item in pairs(list) do
+            if type(item) == "table" and item.name then
+                local detail = item
+                if chest and type(chest.getItemDetail) == "function" then
+                    local okDetail, full = pcall(chest.getItemDetail, slot)
+                    if okDetail and type(full) == "table" then detail = full end
+                end
+
+                local count = floor(item.count or detail.count)
+                local nbtCanonical = matcher.canonicalNBT(detail.nbt)
+                entries[#entries + 1] = {
+                    slot = slot,
+                    name = tostring(item.name),
+                    count = count,
+                    detail = detail,
+                    identity = tostring(item.name) .. "|NBT|" .. tostring(nbtCanonical),
+                }
+                signatureParts[#signatureParts + 1] =
+                    tostring(item.name) .. "|" .. tostring(nbtCanonical) ..
+                    "|" .. tostring(count)
+            end
+        end
+
+        table.sort(signatureParts)
+        table.sort(entries, function(a, b)
+            if a.name ~= b.name then return a.name < b.name end
+            return tostring(a.identity) < tostring(b.identity)
+        end)
+
+        return {
+            entries = entries,
+            signature = table.concat(signatureParts, ";"),
+        }
+    end
+
     function self.chestCount(candidate)
         local list, err = self.chestContents()
         if not list then return nil, err end
@@ -312,6 +355,111 @@ function M.new(config, store, matcher)
 
     local function clearPending()
         store.setPending(nil)
+    end
+
+    local function rsNameAmount(bridge, name)
+        local ok, items = self.safeCall(bridge, "listItems")
+        if not ok or type(items) ~= "table" then return nil end
+        local total = 0
+        for _, item in pairs(items) do
+            if type(item) == "table" and item.name == name then
+                total = total + floor(item.amount)
+            end
+        end
+        return total
+    end
+
+    function self.returnEntireChestToPlayer()
+        if type(store.data.pending) == "table" then
+            return false, "pending transaction exists; orphan cleanup refused"
+        end
+
+        local snapshot, err = self.chestSnapshot()
+        if not snapshot then
+            return false, "cannot inspect transfer chest: " .. tostring(err)
+        end
+        if #snapshot.entries == 0 then
+            return true, {
+                moved = 0,
+                items = {},
+                detail = "transfer chest already empty",
+            }
+        end
+
+        local byName = {}
+        for _, entry in ipairs(snapshot.entries) do
+            byName[entry.name] = (byName[entry.name] or 0) + floor(entry.count)
+        end
+
+        local before = {}
+        for name in pairs(byName) do
+            before[name] = rsNameAmount(self.playerRS, name)
+        end
+
+        local movedTotal = 0
+        local movedByName = {}
+        for name, expected in pairs(byName) do
+            local remaining = expected
+            local moved = 0
+
+            for _ = 1, math.max(1, floor(config.transferImportRetries or 3)) do
+                if remaining <= 0 then break end
+                local n = destinationImport(
+                    self.playerRS,
+                    { name = name, count = remaining },
+                    config.chestToPlayerDirection
+                )
+                moved = moved + floor(n)
+                sleep(tonumber(config.transferRetryDelay) or 0.25)
+
+                local nowList = self.chestContents()
+                if type(nowList) ~= "table" then break end
+                remaining = 0
+                for _, item in pairs(nowList) do
+                    if type(item) == "table" and item.name == name then
+                        remaining = remaining + floor(item.count)
+                    end
+                end
+            end
+
+            movedByName[name] = moved
+            movedTotal = movedTotal + moved
+        end
+
+        local afterSnapshot, afterErr = self.chestSnapshot()
+        if not afterSnapshot then
+            return false, "cannot verify transfer chest after cleanup: " ..
+                tostring(afterErr)
+        end
+
+        if #afterSnapshot.entries > 0 then
+            local leftovers = {}
+            for _, entry in ipairs(afterSnapshot.entries) do
+                leftovers[#leftovers + 1] =
+                    tostring(entry.count) .. "x " .. tostring(entry.name)
+            end
+            return false,
+                "orphan cleanup incomplete; chest still contains " ..
+                    table.concat(leftovers, ", ")
+        end
+
+        local verification = {}
+        for name, expected in pairs(byName) do
+            local after = rsNameAmount(self.playerRS, name)
+            local gained = (after ~= nil and before[name] ~= nil)
+                and math.max(0, after - before[name]) or nil
+            verification[#verification + 1] =
+                tostring(expected) .. "x " .. tostring(name) ..
+                (gained ~= nil and (" (PRS +" .. tostring(gained) .. ")") or "")
+        end
+        table.sort(verification)
+
+        return true, {
+            moved = movedTotal,
+            items = byName,
+            detail = "returned orphan chest contents to PRS: " ..
+                table.concat(verification, ", "),
+        }
     end
 
     function self.rollbackChestToPlayer(candidate, expected)
