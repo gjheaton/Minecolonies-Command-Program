@@ -41,6 +41,12 @@ C.transferRetryDelay = 0.25
 C.transferStageConfirmReads = 20
 C.transferStageConfirmDelay = 0.25
 
+-- If a source bridge reports that it exported an item but CC never sees the
+-- item in the transfer chest, the destination import has not happened yet.
+-- Keep the transaction fail-closed briefly, then retire that stale pre-
+-- destination marker so startup cannot be blocked forever.
+C.exportWaitRecoverySeconds = 30
+
 -- If the transfer chest contains no item matching an active MineColonies
 -- request and there is no pending transaction, quarantine the unchanged chest
 -- contents for this long before returning them to PRS automatically.
