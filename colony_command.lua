@@ -11,8 +11,8 @@
 local REFRESH_SECONDS = 10
 local RAID_BLINK_SECONDS = 0.75
 local TEXT_SCALE = 0.5
-local PROGRAM_VERSION = "3.0.0"
-local SUITE_VERSION = "3.0.8"
+local PROGRAM_VERSION = "3.0.1"
+local SUITE_VERSION = "3.0.9"
 
 local Util = require("colony.lib.util")
 local SharedUI = require("colony.lib.ui")
@@ -246,6 +246,30 @@ local function citizenJob(citizen)
     end
 
     return cleanJobName(raw)
+end
+
+local function updateCitizenJobFits(citizens)
+    for _, citizen in ipairs(citizens or {}) do
+        if type(citizen) == "table" then
+            citizen._jobFit =
+                VisitorJobs.jobFitForCitizen(citizen, citizenJob(citizen))
+        end
+    end
+end
+
+local function citizenBestFit(citizen)
+    local fit = type(citizen) == "table" and citizen._jobFit or nil
+    if type(fit) ~= "table" or fit.applicable ~= true
+        or type(fit.best) ~= "table" then
+        return "N/A", C.dim
+    end
+
+    if fit.training == true then
+        return tostring(fit.best.label or "Unknown"), C.text
+    end
+
+    return tostring(fit.best.label or "Unknown"),
+        fit.matches == true and C.good or C.warn
 end
 
 -- Military citizens are kept in a separate section at the bottom of the
@@ -1003,6 +1027,7 @@ local function refreshData()
     -- The Buildings screen hides Post Boxes, then orders the remaining
     -- buildings from least complete to fully complete.
     sortByName(D.citizens, "name")
+    updateCitizenJobFits(D.citizens)
     D.citizenDisplayRows = buildCitizenDisplayRows(D.citizens)
     D.displayBuildings = visibleBuildings(D.buildings)
     sortBuildingsByCompletion(D.displayBuildings)
@@ -1487,21 +1512,25 @@ local function drawListPage(page)
 
     local columns = nil
     if citizenTable then
-        -- Fixed four-column citizen layout tuned for the 5x3 monitor.
+        -- Five-column citizen layout tuned for the 5x3 monitor.
+        -- NAME | JOB | BEST FIT | STATE | STATUS
         local usable = w - 2
-        local separatorCount = 3
-        local content = math.max(20, usable - separatorCount)
+        local separatorCount = 4
+        local content = math.max(28, usable - separatorCount)
 
-        local nameW = math.max(12, math.floor(content * 0.31))
-        local jobW = math.max(10, math.floor(content * 0.25))
-        local stateW = math.max(10, math.floor(content * 0.25))
-        local statusW = content - nameW - jobW - stateW
+        local nameW = math.max(10, math.floor(content * 0.23))
+        local jobW = math.max(9, math.floor(content * 0.18))
+        local bestW = math.max(11, math.floor(content * 0.22))
+        local stateW = math.max(9, math.floor(content * 0.19))
+        local statusW = content - nameW - jobW - bestW - stateW
 
-        while statusW < 7 and (nameW > 12 or jobW > 10 or stateW > 10) do
-            if nameW > 12 then nameW = nameW - 1
-            elseif stateW > 10 then stateW = stateW - 1
-            elseif jobW > 10 then jobW = jobW - 1 end
-            statusW = content - nameW - jobW - stateW
+        while statusW < 6
+            and (nameW > 10 or jobW > 9 or bestW > 11 or stateW > 9) do
+            if nameW > 10 then nameW = nameW - 1
+            elseif bestW > 11 then bestW = bestW - 1
+            elseif stateW > 9 then stateW = stateW - 1
+            elseif jobW > 9 then jobW = jobW - 1 end
+            statusW = content - nameW - jobW - bestW - stateW
         end
         statusW = math.max(1, statusW)
 
@@ -1509,14 +1538,17 @@ local function drawListPage(page)
         local sep1X = nameX + nameW
         local jobX = sep1X + 1
         local sep2X = jobX + jobW
-        local stateX = sep2X + 1
-        local sep3X = stateX + stateW
-        local statusX = sep3X + 1
+        local bestX = sep2X + 1
+        local sep3X = bestX + bestW
+        local stateX = sep3X + 1
+        local sep4X = stateX + stateW
+        local statusX = sep4X + 1
 
         columns = {
             nameX = nameX, nameW = nameW, sep1X = sep1X,
             jobX = jobX, jobW = jobW, sep2X = sep2X,
-            stateX = stateX, stateW = stateW, sep3X = sep3X,
+            bestX = bestX, bestW = bestW, sep3X = sep3X,
+            stateX = stateX, stateW = stateW, sep4X = sep4X,
             statusX = statusX, statusW = math.max(1, w - statusX + 1),
         }
 
@@ -1525,8 +1557,10 @@ local function drawListPage(page)
         writeAt(columns.sep1X, 5, "|", colors.gray, C.panel2)
         writeAt(columns.jobX, 5, pad("JOB", columns.jobW), colors.black, C.panel2)
         writeAt(columns.sep2X, 5, "|", colors.gray, C.panel2)
-        writeAt(columns.stateX, 5, pad("STATE", columns.stateW), colors.black, C.panel2)
+        writeAt(columns.bestX, 5, pad("BEST FIT", columns.bestW), colors.black, C.panel2)
         writeAt(columns.sep3X, 5, "|", colors.gray, C.panel2)
+        writeAt(columns.stateX, 5, pad("STATE", columns.stateW), colors.black, C.panel2)
+        writeAt(columns.sep4X, 5, "|", colors.gray, C.panel2)
         writeAt(columns.statusX, 5, pad("STATUS", columns.statusW), colors.black, C.panel2)
 
     elseif buildingTable then
@@ -1758,12 +1792,15 @@ local function drawListPage(page)
                     center(y, header, C.title, C.panel2)
                 else
                     local statusText, statusColor = citizenStatus(item)
+                    local bestFitText, bestFitColor = citizenBestFit(item)
                     writeAt(columns.nameX, y, pad(item.name or "Unknown", columns.nameW), C.text, bg)
                     writeAt(columns.sep1X, y, "|", C.dim, bg)
                     writeAt(columns.jobX, y, pad(citizenJob(item), columns.jobW), C.accent, bg)
                     writeAt(columns.sep2X, y, "|", C.dim, bg)
-                    writeAt(columns.stateX, y, pad(item.state or "", columns.stateW), C.dim, bg)
+                    writeAt(columns.bestX, y, pad(bestFitText, columns.bestW), bestFitColor, bg)
                     writeAt(columns.sep3X, y, "|", C.dim, bg)
+                    writeAt(columns.stateX, y, pad(item.state or "", columns.stateW), C.dim, bg)
+                    writeAt(columns.sep4X, y, "|", C.dim, bg)
                     writeAt(columns.statusX, y, pad(statusText, columns.statusW), statusColor, bg)
                 end
 
@@ -1936,6 +1973,27 @@ local function detailLines(page, item)
         end
         addDetailLine(lines, "Happiness", item.happiness)
         addDetailLine(lines, "Saturation", item.saturation)
+        local fit = item._jobFit
+        if type(fit) == "table" and fit.applicable == true
+            and type(fit.best) == "table" then
+            local fitColor = fit.training == true
+                and C.text
+                or (fit.matches == true and C.good or C.warn)
+            addDetailLine(
+                lines,
+                "Best job fit",
+                tostring(fit.best.label or "Unknown") ..
+                    " (" .. string.format("%.1f", tonumber(fit.best.score) or 0) .. ")",
+                fitColor
+            )
+            addDetailLine(
+                lines,
+                "Current fit",
+                fit.training == true and "TRAINING"
+                    or (fit.matches == true and "MATCH" or "MISMATCH"),
+                fitColor
+            )
+        end
         addDetailLine(lines, "Idle", yesno(item.isIdle), item.isIdle and C.warn or C.good)
         addDetailLine(lines, "In bed", yesno(item.isAsleep), item.isAsleep and C.info or C.text)
         addDetailLine(lines, "Needs better food", yesno(item.betterFood), item.betterFood and C.danger or C.good)
