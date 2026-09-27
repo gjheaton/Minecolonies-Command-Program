@@ -57,8 +57,29 @@ function M.new(config, store)
         lastMembershipSignature = "",
         blockedUntil = 0,
         currentTurnStarted = 0,
+        observedTurnId = nil,
+        turnEligibleAt = 0,
         lastFault = nil,
     }
+
+    local function setTurn(id)
+        id = tonumber(id)
+        if self.observedTurnId ~= id then
+            self.observedTurnId = id
+            local delay = math.max(
+                0,
+                tonumber(config.clusterTurnHandoffDelaySeconds) or 5
+            )
+            self.turnEligibleAt = now() + delay
+            if id then
+                store.log(
+                    "CLUSTER turn=" .. tostring(id) ..
+                    " handoff settle=" .. tostring(delay) .. "s"
+                )
+            end
+        end
+        self.turnId = id
+    end
 
     local function rememberKnown(id)
         id = tonumber(id)
@@ -226,9 +247,9 @@ function M.new(config, store)
         local ids = copySortedIds(self.active)
         if #ids == 0 then return end
         if not self.turnId or not contains(ids, self.turnId) then
-            self.turnId = ids[1]
+            setTurn(ids[1])
         else
-            self.turnId = nextId(ids, self.turnId)
+            setTurn(nextId(ids, self.turnId))
         end
         self.currentTurnStarted = now()
         store.data.cluster.lastMasterId = self.masterId
@@ -259,7 +280,7 @@ function M.new(config, store)
         if kind == "hello" then
             if self.id == self.masterId then
                 if not self.turnId then
-                    self.turnId = copySortedIds(self.active)[1]
+                    setTurn(copySortedIds(self.active)[1])
                     self.currentTurnStarted = now()
                 end
                 broadcast({
@@ -274,7 +295,7 @@ function M.new(config, store)
             end
         elseif kind == "state" then
             if sender == self.masterId and tonumber(msg.masterId) == self.masterId then
-                self.turnId = tonumber(msg.turnId)
+                setTurn(msg.turnId)
                 self.generation = math.max(self.generation, tonumber(msg.generation) or self.generation)
                 mergeNames(msg.memberNames)
                 self.lastMasterSeen = now()
@@ -302,7 +323,7 @@ function M.new(config, store)
     function self.tick()
         if config.clusterEnabled ~= true then
             self.masterId = self.id
-            self.turnId = self.id
+            setTurn(self.id)
             return
         end
         if self.modemCount <= 0 then self.openModems() end
@@ -327,7 +348,7 @@ function M.new(config, store)
                 store.log("CLUSTER BLOCKED: " .. fault)
             end
             if self.id == self.masterId then
-                self.turnId = nil
+                setTurn(nil)
                 broadcast({
                     kind = "state",
                     version = 3,
@@ -343,7 +364,7 @@ function M.new(config, store)
 
         if self.id == self.masterId then
             if not self.turnId or not self.active[self.turnId] then
-                self.turnId = copySortedIds(self.active)[1]
+                setTurn(copySortedIds(self.active)[1])
                 self.currentTurnStarted = t
             end
 
@@ -397,13 +418,22 @@ function M.new(config, store)
             members = members,
             activeCount = #activeIds,
             expectedCount = #expectedIds,
+            turnSettleRemaining =
+                (self.turnId == self.id)
+                and math.max(0, self.turnEligibleAt - now())
+                or 0,
         }
     end
 
     function self.canAccessPRS()
-        if config.clusterEnabled ~= true then return true end
+        if config.clusterEnabled ~= true then return true, self.status() end
         local s = self.status()
-        return s.ok and s.turnId == self.id, s
+        local settled =
+            (tonumber(s.turnSettleRemaining) or 0) <= 0
+        return s.ok
+            and s.turnId == self.id
+            and settled,
+            s
     end
 
     function self.releaseTurn(reason)
