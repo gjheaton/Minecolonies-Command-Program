@@ -36,6 +36,7 @@ local cluster = Cluster.new(CONFIG, store)
 local matcher = Matcher.new(CONFIG, store)
 local transfer = Transfer.new(CONFIG, store, matcher)
 transfer.refresh()
+cluster.setLocalName(transfer.colonyName)
 
 local updater
 local ui
