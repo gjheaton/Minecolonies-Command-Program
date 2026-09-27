@@ -62,6 +62,8 @@ end
 function M.new(config, store, cluster, matcher, transfer)
     local self = {
         rows = {},
+        requestRows = {},
+        missingRequests = {},
         currentWork = nil,
         health = {},
         lastScan = nil,
@@ -71,6 +73,8 @@ function M.new(config, store, cluster, matcher, transfer)
         stats = { active=0, ready=0, crafting=0, waiting=0, blocked=0, errors=0 },
         statusMessage = "Starting",
     }
+
+    local recoverRequestedChestToCRS
 
     local function safeCall(obj, method, ...)
         return transfer.safeCall(obj, method, ...)
@@ -131,23 +135,39 @@ function M.new(config, store, cluster, matcher, transfer)
 
     local function chestContainsActiveRequest(snapshot, requests)
         local active = activeRequestArray(requests)
+
         for _, request in ipairs(active) do
-            local candidates = matcher.requestCandidates(request)
-            for _, candidate in ipairs(candidates or {}) do
+            local count = requestCount(request)
+            local signature = requestSignature(
+                request, count, matcher.canonicalNBT)
+            local ledger = store.data.requestLedger[tostring(request.id)] or {}
+            local locallySent = ledger.signature == signature
+                and floor(ledger.sentTotal or ledger.lastSent)
+                or 0
+
+            -- If this request has already been fully delivered according to the
+            -- verified local ledger, do not treat extra chest contents as part
+            -- of that same request.
+            if locallySent < count then
                 for _, entry in ipairs(snapshot.entries or {}) do
-                    if type(entry.detail) == "table"
-                        and matcher.exactlyMatches(
-                            candidate.raw, entry.detail) then
-                        return true,
-                            tostring(entry.count) .. "x " ..
-                                tostring(entry.name) ..
-                                " matches active request " ..
-                                tostring(request.id)
+                    if type(entry.detail) == "table" then
+                        local accepted, candidate, reason =
+                            matcher.requestAcceptsItem(
+                                request, entry.detail)
+                        if accepted and candidate then
+                            return request, candidate, entry,
+                                tostring(entry.count) .. "x " ..
+                                    tostring(entry.name) ..
+                                    " matches active request " ..
+                                    tostring(request.id) ..
+                                    " (" .. tostring(reason or "accepted") .. ")"
+                        end
                     end
                 end
             end
         end
-        return false, nil
+
+        return nil, nil, nil, nil
     end
 
     local function clearOrphanChestState()
@@ -178,15 +198,38 @@ function M.new(config, store, cluster, matcher, transfer)
             return true, "transfer chest empty", "EMPTY"
         end
 
-        local requested, requestedDetail =
+        local requestedRequest, requestedCandidate,
+            requestedEntry, requestedDetail =
             chestContainsActiveRequest(snapshot, requests)
-        if requested then
+
+        if requestedRequest and requestedCandidate and requestedEntry then
             clearOrphanChestState()
-            return false,
-                "transfer chest contains an item matching an active request; " ..
-                "automatic PRS return suppressed: " ..
-                tostring(requestedDetail),
-                "ACTIVE_REQUEST"
+
+            if type(recoverRequestedChestToCRS) ~= "function" then
+                return false,
+                    "requested transfer-chest item detected but recovery " ..
+                    "handler is unavailable: " .. tostring(requestedDetail),
+                    "ERROR"
+            end
+
+            local okRecover, recoverDetail =
+                recoverRequestedChestToCRS(
+                    requestedRequest,
+                    requestedCandidate,
+                    requestedEntry
+                )
+
+            if not okRecover then
+                return false,
+                    "requested transfer-chest recovery failed: " ..
+                    tostring(recoverDetail),
+                    "ERROR"
+            end
+
+            -- A chest can contain more than one stack/type. Re-evaluate after
+            -- each verified requested-item recovery so requested contents flow
+            -- to CRS while unrelated leftovers enter the normal quarantine.
+            return handleOrphanChest(requests)
         end
 
         store.data.recovery = store.data.recovery or {}
@@ -853,6 +896,75 @@ function M.new(config, store, cluster, matcher, transfer)
         ledger.stalledAt = nil
         ledger.stallDetail = nil
         store.save()
+    end
+
+    recoverRequestedChestToCRS = function(request, candidate, entry)
+        local count = requestCount(request)
+        local signature = requestSignature(
+            request, count, matcher.canonicalNBT)
+        local ledger = ledgerFor(request.id)
+
+        if ledger.signature and ledger.signature ~= signature then
+            resetLedger(ledger)
+        end
+
+        local alreadySent = ledger.signature == signature
+            and floor(ledger.sentTotal or ledger.lastSent)
+            or 0
+        local remaining = math.max(0, count - alreadySent)
+        if remaining <= 0 then
+            return false, "request already fully delivered locally"
+        end
+
+        local amount = math.min(
+            remaining,
+            floor(entry and entry.count),
+            floor(config.maxTransferChunk or 64)
+        )
+        if amount <= 0 then
+            return false, "requested chest item has no transferable quantity"
+        end
+
+        local ok, result = transfer.adoptChestToColony(
+            candidate,
+            amount,
+            {
+                requestId = request.id,
+                detail = "active MineColonies request recovered from " ..
+                    "transfer chest",
+            }
+        )
+        if not ok then return false, result end
+
+        result = type(result) == "table" and result or {}
+        local moved = floor(result.moved)
+        if moved <= 0 then
+            return false, "requested chest recovery reported zero moved"
+        end
+
+        noteVerifiedSend(
+            ledger,
+            signature,
+            candidate,
+            moved,
+            floor(result.baselineCRS),
+            false
+        )
+
+        if floor(ledger.sentTotal) >= count then
+            ledger.ackStartedAt = nowSeconds()
+            ledger.phase = "WAITING_ACK"
+        else
+            ledger.phase = "DELIVERING"
+        end
+        store.save()
+
+        return true,
+            tostring(
+                result.detail
+                or ("recovered " .. tostring(moved) .. "x " ..
+                    tostring(candidate.name) .. " into CRS")
+            )
     end
 
     local function continueOutstandingDelivery(request, signature, ledger)
