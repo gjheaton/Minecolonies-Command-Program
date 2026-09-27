@@ -777,6 +777,12 @@ function M.new(config, store, cluster, matcher, transfer)
         end
 
         if started == true then
+            -- Keep display diagnostics on their cached snapshot immediately
+            -- after craft submission. Functional processing of unrelated
+            -- requests continues, but we avoid an extra diagnostic listItems()
+            -- burst during the new craft's quiet period.
+            requestStatusLastBuild = nowSeconds()
+
             store.data.craftJobs[key] = {
                 startedAt = nowSeconds(),
                 count = craftCount,
@@ -907,60 +913,6 @@ function M.new(config, store, cluster, matcher, transfer)
         end
 
         return nil
-    end
-
-    local function localCraftLeaseJob()
-        local keys = {}
-        for key, job in pairs(store.data.craftJobs or {}) do
-            if type(job) == "table"
-                and job.leaseState ~= "stalled"
-                and type(job.candidate) == "table"
-                and type(job.candidate.name) == "string"
-                and job.candidate.name ~= "" then
-                keys[#keys + 1] = tostring(key)
-            end
-        end
-        table.sort(keys)
-
-        for _, key in ipairs(keys) do
-            local job = store.data.craftJobs[key]
-            local candidate = job.candidate
-            candidate.raw = type(candidate.raw) == "table"
-                and candidate.raw
-                or { name = candidate.name, nbt = candidate.nbt }
-            candidate.identity = candidate.identity or tostring(key)
-            candidate.nbtCanonical = candidate.nbtCanonical
-                or matcher.canonicalNBT(candidate.nbt)
-            return key, job, candidate
-        end
-
-        return nil, nil, nil
-    end
-
-    local function activeLeaseCraftJob(activeRequests)
-        local activeIds = {}
-        for _, request in ipairs(activeRequests or {}) do
-            activeIds[tostring(request.id)] = true
-        end
-
-        local keys = {}
-        for key, job in pairs(store.data.craftJobs or {}) do
-            if type(job) == "table"
-                and job.leaseState ~= "stalled"
-                and job.requestId ~= nil
-                and activeIds[tostring(job.requestId)] then
-                keys[#keys + 1] = tostring(key)
-            end
-        end
-        table.sort(keys)
-
-        for _, key in ipairs(keys) do
-            local job = store.data.craftJobs[key]
-            local candidate =
-                candidateForCraftJob(key, job, activeRequests)
-            if candidate then return key, job, candidate end
-        end
-        return nil, nil, nil
     end
 
     local function craftJobForRequest(request)
@@ -2441,16 +2393,10 @@ function M.new(config, store, cluster, matcher, transfer)
             self.statusMessage = "TRANSFER CHEST: " .. tostring(chestDetail)
             self.stats.blocked = self.stats.blocked + 1
 
-            -- If this chest state belongs to an AutoCraft request, keep the
-            -- shared PRS lease while the pending movement becomes visible or
-            -- resumes. Do not hand PRS to another colony mid-craft/transfer.
-            local _, leaseJob =
-                activeLeaseCraftJob(activeRequests)
-            if leaseJob then
-                cluster.holdTurn("AutoCraft pending transfer")
-            else
-                cluster.releaseTurn("transfer chest blocked")
-            end
+            -- The shared transfer chest itself is a serialization point.
+            -- Release the PRS turn while it is blocked so the peer colony is
+            -- not unnecessarily frozen.
+            cluster.releaseTurn("transfer chest blocked")
             return false
         end
 
