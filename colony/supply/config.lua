@@ -27,8 +27,22 @@ C.transferImportRetries = 3
 C.transferRetryDelay = 0.25
 C.destinationConfirmReads = 3
 C.destinationConfirmDelay = 0.15
--- MineColonies acknowledgement reconciliation.\n-- A verified transfer first waits normally, then enters a non-blocking\n-- verification window. At the retry deadline, one bounded retry is allowed\n-- only when the originally delivered stock is no longer visible above the\n-- pre-transfer CRS baseline. After that retry, an unchanged request becomes\n-- ACK STALLED and is recorded in the Errors tab; no unlimited resend loop.\nC.requestAckWaitSeconds = 60\nC.requestAckRetrySeconds = 180\nC.requestAckMaxRetries = 1\nC.requestAckPostRetrySeconds = 60\nC.requestAckRetryCraftWaitSeconds = 180
-C.craftCooldownSeconds = 30
+-- MineColonies acknowledgement reconciliation.
+-- A verified transfer first waits normally, then enters a non-blocking
+-- verification window. At the retry deadline, one bounded retry is allowed
+-- only when the originally delivered stock is no longer visible above the
+-- pre-transfer CRS baseline. After that retry, an unchanged request becomes
+-- ACK STALLED and is recorded in the Errors tab; no unlimited resend loop.
+C.requestAckWaitSeconds = 60
+C.requestAckRetrySeconds = 180
+C.requestAckMaxRetries = 1
+C.requestAckPostRetrySeconds = 60
+C.requestAckRetryCraftWaitSeconds = 180
+
+-- Craft submission safety. Once a craft is accepted, do not submit the same
+-- exact item again merely because it has not appeared in PRS yet. After this
+-- window the request is blocked and logged rather than duplicate-crafted.
+C.craftOutputWaitSeconds = 180
 C.craftErrorCooldownSeconds = 300
 C.updateCheckSeconds = 1800
 
