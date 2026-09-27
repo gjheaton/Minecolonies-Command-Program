@@ -785,7 +785,13 @@ function M.new(config, store, cluster, matcher, transfer)
                 count = craftCount,
                 requestId = requestId and tostring(requestId) or nil,
                 stalledRecorded = false,
-                leaseState = "crafting",
+                leaseState = "blackout",
+                nextPollAt =
+                    nowSeconds() +
+                    math.max(
+                        5,
+                        floor(config.craftInitialBlackoutSeconds or 30)
+                    ),
                 candidate = {
                     name = candidate.name,
                     displayName = candidate.displayName,
@@ -906,6 +912,34 @@ function M.new(config, store, cluster, matcher, transfer)
         return nil
     end
 
+    local function localCraftLeaseJob()
+        local keys = {}
+        for key, job in pairs(store.data.craftJobs or {}) do
+            if type(job) == "table"
+                and job.leaseState ~= "stalled"
+                and type(job.candidate) == "table"
+                and type(job.candidate.name) == "string"
+                and job.candidate.name ~= "" then
+                keys[#keys + 1] = tostring(key)
+            end
+        end
+        table.sort(keys)
+
+        for _, key in ipairs(keys) do
+            local job = store.data.craftJobs[key]
+            local candidate = job.candidate
+            candidate.raw = type(candidate.raw) == "table"
+                and candidate.raw
+                or { name = candidate.name, nbt = candidate.nbt }
+            candidate.identity = candidate.identity or tostring(key)
+            candidate.nbtCanonical = candidate.nbtCanonical
+                or matcher.canonicalNBT(candidate.nbt)
+            return key, job, candidate
+        end
+
+        return nil, nil, nil
+    end
+
     local function activeLeaseCraftJob(activeRequests)
         local activeIds = {}
         for _, request in ipairs(activeRequests or {}) do
@@ -939,39 +973,105 @@ function M.new(config, store, cluster, matcher, transfer)
             return false, false, nil
         end
 
-        cluster.holdTurn(
-            "AutoCraft " .. tostring(candidate.name))
-
-        local queryFilter = matcher.craftFilter(candidate, nil)
-        local okCrafting, crafting =
-            safeCall(
-                transfer.playerRS,
-                "isItemCrafting",
-                queryFilter
-            )
-
-        if not okCrafting then
-            job.leaseState = "status_unknown"
-            store.save()
-            return true, false,
-                "AutoCraft status unavailable for " ..
-                tostring(candidate.name) ..
-                "; PRS turn retained"
+        if job.readyForTransfer == true
+            or tostring(job.leaseState or "") == "ready" then
+            return false, true,
+                "Crafted output ready for transfer: " ..
+                tostring(candidate.name)
         end
 
-        if crafting == true then
-            if job.outputSeenAt ~= nil
-                or floor(job.stableReads) > 0
-                or job.leaseState ~= "crafting" then
-                job.outputSeenAt = nil
-                job.stableReads = 0
-                job.readyForTransfer = nil
-                job.leaseState = "crafting"
-                store.save()
+        -- Runtime fallback. Normal craft lifecycle polling is performed before
+        -- transfer.refresh(), so reaching here means we must remain fail-closed
+        -- without adding another PRS query.
+        cluster.holdTurn(
+            "AutoCraft waiting " .. tostring(candidate.name))
+        return true, false,
+            "AutoCraft waiting without PRS polling: " ..
+            tostring(candidate.name)
+    end
+
+    local function manageCraftBlackout()
+        local key, job, candidate = localCraftLeaseJob()
+        if not job or not candidate then
+            return false, false, nil
+        end
+
+        if job.readyForTransfer == true
+            or tostring(job.leaseState or "") == "ready" then
+            return false, true,
+                "Crafted output ready for transfer: " ..
+                tostring(candidate.name)
+        end
+
+        local now = nowSeconds()
+        local startedAt =
+            tonumber(job.startedAt or job.time) or now
+        local age = math.max(0, now - startedAt)
+        local blackout =
+            math.max(
+                5,
+                floor(config.craftInitialBlackoutSeconds or 30)
+            )
+        local pollSeconds =
+            math.max(
+                5,
+                floor(config.craftOutputPollSeconds or 15)
+            )
+        local waitSeconds =
+            math.max(
+                blackout,
+                floor(config.craftOutputWaitSeconds or 180)
+            )
+
+        cluster.holdTurn(
+            "AutoCraft PRS blackout " .. tostring(candidate.name))
+
+        if age >= waitSeconds then
+            job.leaseState = "stalled"
+            if job.stalledRecorded ~= true then
+                job.stalledRecorded = true
+                job.stalledAt = now
+                store.addError(
+                    "CRAFT_OUTPUT_STALLED",
+                    "Craft output was not observed before AutoCraft timeout",
+                    {
+                        requestId = job.requestId,
+                        item = candidate.name,
+                        identity = candidate.identity,
+                        ageSeconds = age,
+                        detail =
+                            "No duplicate craft submitted; PRS polling remained throttled",
+                    },
+                    "WARNING"
+                )
             end
+            store.save()
+            return false, false,
+                "AutoCraft output timed out for " ..
+                tostring(candidate.name)
+        end
+
+        local nextPollAt =
+            tonumber(job.nextPollAt)
+            or (startedAt + blackout)
+
+        if now < nextPollAt then
+            job.leaseState = "blackout"
+            job.nextPollAt = nextPollAt
+            store.save()
             return true, false,
-                "AutoCraft running: " .. tostring(candidate.name) ..
-                "; PRS exclusively held"
+                "AutoCraft PRS blackout: " ..
+                tostring(candidate.name) .. " " ..
+                tostring(math.max(0, math.ceil(nextPollAt - now))) ..
+                "s"
+        end
+
+        -- One deliberately sparse PRS read. Do not call isItemCrafting().
+        if not transfer.playerRS then
+            -- This can occur only after a program restart. Allow normal
+            -- peripheral resolution once rather than polling a nil bridge.
+            return false, false,
+                "AutoCraft bridge needs re-resolution"
         end
 
         local _, stock =
@@ -981,55 +1081,16 @@ function M.new(config, store, cluster, matcher, transfer)
                 safeCall
             )
 
-        local now = nowSeconds()
-        local age =
-            math.max(
-                0,
-                now -
-                (tonumber(job.startedAt or job.time) or now)
-            )
+        job.nextPollAt = now + pollSeconds
 
         if stock <= 0 then
-            local waitSeconds =
-                math.max(
-                    30,
-                    floor(config.craftOutputWaitSeconds or 180)
-                )
-
-            if age < waitSeconds then
-                job.leaseState = "awaiting_output"
-                job.outputSeenAt = nil
-                job.stableReads = 0
-                store.save()
-                return true, false,
-                    "AutoCraft finished but output not visible yet: " ..
-                    tostring(candidate.name)
-            end
-
-            job.leaseState = "stalled"
-            if job.stalledRecorded ~= true then
-                job.stalledRecorded = true
-                job.stalledAt = now
-                store.save()
-                store.addError(
-                    "CRAFT_OUTPUT_STALLED",
-                    "Craft finished but output never stabilized in PRS",
-                    {
-                        requestId = job.requestId,
-                        item = candidate.name,
-                        identity = candidate.identity,
-                        ageSeconds = age,
-                        detail =
-                            "Shared PRS lease released; duplicate craft remains suppressed",
-                    },
-                    "WARNING"
-                )
-            else
-                store.save()
-            end
-
-            return false, false,
-                "AutoCraft output stalled for " ..
+            job.leaseState = "awaiting_output"
+            job.outputSeenAt = nil
+            job.stableReads = 0
+            store.save()
+            return true, false,
+                "AutoCraft output not visible; next PRS check in " ..
+                tostring(pollSeconds) .. "s: " ..
                 tostring(candidate.name)
         end
 
@@ -1041,38 +1102,24 @@ function M.new(config, store, cluster, matcher, transfer)
         end
         job.leaseState = "stabilizing"
 
-        local quiet =
-            math.max(
-                0,
-                floor(config.craftPostCompleteQuietSeconds or 10)
-            )
         local stableRequired =
             math.max(
                 1,
                 floor(config.craftStableReadsRequired or 2)
             )
-        local quietAge =
-            math.max(
-                0,
-                now - (tonumber(job.outputSeenAt) or now)
-            )
 
-        if quietAge < quiet
-            or floor(job.stableReads) < stableRequired then
+        if floor(job.stableReads) < stableRequired then
             store.save()
             return true, false,
-                "Crafted output stabilizing: " ..
-                tostring(candidate.name) .. " " ..
-                tostring(quietAge) .. "/" .. tostring(quiet) ..
-                "s reads=" .. tostring(floor(job.stableReads)) ..
-                "/" .. tostring(stableRequired)
+                "Crafted output seen; confirming on next low-rate PRS check: " ..
+                tostring(candidate.name)
         end
 
         job.readyForTransfer = true
         job.leaseState = "ready"
         store.save()
         return false, true,
-            "Crafted output stabilized: " ..
+            "Crafted output stable and ready: " ..
             tostring(candidate.name)
     end
 
@@ -1168,7 +1215,8 @@ function M.new(config, store, cluster, matcher, transfer)
         return nil
     end
 
-    local function captureWorkSnapshot(request, row)
+    local function captureWorkSnapshot(
+        request, row, skipStorageReads)
         local requested = requestCount(request)
         local ledger = store.data.requestLedger[tostring(request.id)] or {}
         local signature = requestSignature(
@@ -1185,11 +1233,16 @@ function M.new(config, store, cluster, matcher, transfer)
 
         if candidate then
             displayName = tostring(candidate.displayName or candidate.name)
-            local _, exactStock = matcher.findStoredVariants(
-                transfer.playerRS, candidate, safeCall)
-            prsStock = floor(exactStock)
-            local colonyAmount = transfer.colonyAmount(candidate)
-            if colonyAmount ~= nil then crsStock = floor(colonyAmount) end
+            if not skipStorageReads then
+                local _, exactStock = matcher.findStoredVariants(
+                    transfer.playerRS, candidate, safeCall)
+                prsStock = floor(exactStock)
+                local colonyAmount =
+                    transfer.colonyAmount(candidate)
+                if colonyAmount ~= nil then
+                    crsStock = floor(colonyAmount)
+                end
+            end
         end
 
         return {
@@ -2268,9 +2321,42 @@ function M.new(config, store, cluster, matcher, transfer)
 
     function self.scan()
         self.rows = {}
-        self.stats = { active=0, ready=0, crafting=0, waiting=0, blocked=0, errors=0 }
+        self.stats = {
+            active=0, ready=0, crafting=0,
+            waiting=0, blocked=0, errors=0
+        }
         self.lastScan = nowSeconds()
         self.lastScanText = Util.timeString()
+
+        -- AutoCraft is intentionally hands-off with PRS after craftItem().
+        -- This check runs before transfer.refresh() so even health/API reads
+        -- cannot hammer the RS network during the blackout window.
+        local localCraftKey, localCraftJob =
+            localCraftLeaseJob()
+        if localCraftJob then
+            local clusterOK, clusterStatus =
+                cluster.canAccessPRS()
+            if not clusterStatus.ok then
+                self.statusMessage =
+                    "CLUSTER ERROR: " ..
+                    tostring(clusterStatus.fault)
+                return false
+            end
+            if not clusterOK then
+                self.statusMessage =
+                    "Waiting for computer " ..
+                    tostring(clusterStatus.turnId) .. " turn"
+                return true
+            end
+
+            local craftBlocked, _, craftDetail =
+                manageCraftBlackout()
+            if craftBlocked then
+                self.statusMessage = tostring(craftDetail)
+                self.stats.crafting = 1
+                return true
+            end
+        end
 
         if not transfer.refresh() then
             self.statusMessage = "Required peripheral offline"
@@ -2405,8 +2491,15 @@ function M.new(config, store, cluster, matcher, transfer)
         end
 
         if currentWorkRequest and currentWorkRow then
+            local skipStorageReads =
+                currentWorkRow.status == "CRAFTING"
+                or currentWorkRow.status == "CRAFTING RETRY"
+                or currentWorkRow.status == "RETRY_CRAFTING"
             self.currentWork = captureWorkSnapshot(
-                currentWorkRequest, currentWorkRow)
+                currentWorkRequest,
+                currentWorkRow,
+                skipStorageReads
+            )
         elseif #activeRequests == 0 then
             self.currentWork = nil
         end
