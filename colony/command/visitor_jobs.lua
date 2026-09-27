@@ -274,6 +274,18 @@ function M.currentJobMatches(currentJob, recommendation)
     return current == norm(recommendation.label)
 end
 
+local TRAINING_JOBS = {
+    pupil = true,
+    student = true,
+    archertraining = true,
+    archerintraining = true,
+    archertrainee = true,
+    combattraining = true,
+    knighttraining = true,
+    knightintraining = true,
+    knighttrainee = true,
+}
+
 function M.jobFitForCitizen(citizen, currentJob)
     if type(citizen) ~= "table" then
         return { applicable=false, reason="invalid citizen" }
@@ -281,22 +293,37 @@ function M.jobFitForCitizen(citizen, currentJob)
 
     local age = norm(citizen.age)
     local job = norm(currentJob)
-    if age == "child"
-        or job == "child"
-        or job == "pupil"
-        or job == "student" then
+    local best = M.bestJob(citizen)
+
+    -- Training assignments are temporary developmental positions. Still show
+    -- the citizen's productive best-fit job, but do not call the training
+    -- assignment right or wrong.
+    if TRAINING_JOBS[job] then
+        return {
+            applicable = best ~= nil,
+            reason = "training",
+            training = true,
+            best = best,
+            matches = nil,
+        }
+    end
+
+    -- Children with no specific training assignment do not yet have a useful
+    -- job-fit comparison.
+    if age == "child" or job == "child" then
         return {
             applicable = false,
-            reason = "training/child",
+            reason = "child",
+            training = false,
             best = nil,
             matches = nil,
         }
     end
 
-    local best = M.bestJob(citizen)
     return {
         applicable = best ~= nil,
         best = best,
+        training = false,
         matches = best and M.currentJobMatches(currentJob, best) or false,
     }
 end
