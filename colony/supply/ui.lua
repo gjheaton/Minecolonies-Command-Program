@@ -236,14 +236,51 @@ function M.new(config, store, cluster, transfer, engine, updater)
         local rows,pages,page = pagedRows(store.data.history or {},self.historyPage,math.max(1,h-7))
         self.historyPage=page
         drawFrame("TRANSFER / EVENT HISTORY  " .. page .. "/" .. pages,"Newest first",C.dim)
+        local function historyColor(e)
+            local kind = tostring(e.kind or ""):upper()
+            local direction = tostring(e.direction or ""):upper()
+            local detail = tostring(e.detail or ""):upper()
+
+            -- Priority matters: an error should remain red even when it also
+            -- references a transfer direction or a craft operation.
+            if kind:find("ERROR", 1, true)
+                or kind:find("FAIL", 1, true)
+                or detail:find("ERROR", 1, true)
+                or detail:find("FAILED", 1, true) then
+                return colors.red
+            end
+
+            if kind == "STARTUP"
+                or kind == "RECOVERY"
+                or kind == "HEALTH" then
+                return colors.white
+            end
+
+            if kind == "CRAFT"
+                or kind:find("CRAFT", 1, true) then
+                return colors.yellow
+            end
+
+            if direction == "PRS>CRS" then
+                return colors.lime
+            end
+
+            if direction == "CRS>PRS" then
+                return colors.lightBlue
+            end
+
+            return colors.white
+        end
+
         local y=5
         for _,e in ipairs(rows) do
             local text = tostring(e.time or "--:--:--") .. " " ..
                 tostring(e.kind or "") .. " " .. tostring(e.direction or "") .. " " ..
                 tostring(e.item or "") .. (e.amount and (" x"..tostring(e.amount)) or "") ..
                 (e.detail and (" - "..tostring(e.detail)) or "")
-            monitorUI.fillRow(y,(y%2==0) and C.panel or C.bg)
-            monitorUI.writeAt(2,y,Util.clip(text,w-2),C.text,(y%2==0) and C.panel or C.bg)
+            local bg = (y%2==0) and C.panel or C.bg
+            monitorUI.fillRow(y,bg)
+            monitorUI.writeAt(2,y,Util.clip(text,w-2),historyColor(e),bg)
             y=y+1
         end
         if h>=2 then
