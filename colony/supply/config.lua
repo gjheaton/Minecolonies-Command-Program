@@ -16,7 +16,10 @@ C.playerToChestDirection = "west"
 C.chestToColonyDirection = "east"
 C.colonyToChestDirection = "east"
 C.chestToPlayerDirection = "west"
-C.usePeripheralTransfer = false
+-- Target the exact transfer-chest peripheral by name. This avoids directional
+-- ambiguity and guarantees that the inventory Supply verifies is the same
+-- inventory the RS Bridge imports from / exports to.
+C.usePeripheralTransfer = true
 
 -- Runtime cadence.
 C.scanIntervalSeconds = 5
@@ -37,8 +40,10 @@ C.transferRetryDelay = 0.25
 -- contents for this long before returning them to PRS automatically.
 C.orphanChestRecoverySeconds = 180
 
-C.destinationConfirmReads = 3
-C.destinationConfirmDelay = 0.15
+-- Destination visibility can lag slightly behind a successful RS bridge move.
+-- These checks run only after a real transfer, not every scan.
+C.destinationConfirmReads = 5
+C.destinationConfirmDelay = 0.25
 -- MineColonies acknowledgement reconciliation.
 -- A verified transfer first waits normally, then enters a non-blocking
 -- verification window. At the retry deadline, one bounded retry is allowed
