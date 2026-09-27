@@ -1020,14 +1020,109 @@ function M.new(config, store, cluster, matcher, transfer)
         return false
     end
 
+    local function defaultKeepLevel(item)
+        item = type(item) == "table" and item or {}
+        if isBuildingItem(item.name) then
+            return floor(config.defaultBuildingKeepCount or 1024)
+        end
+        local stackSize = floor(
+            item.maxCount
+            or item.maxStackSize
+            or store.data.settings.stackSizes[item.name]
+            or config.defaultStackSize
+            or 64
+        )
+        if stackSize <= 0 then stackSize = floor(config.defaultStackSize or 64) end
+        return stackSize * floor(config.defaultItemKeepStacks or 2)
+    end
+
     local function keepLevel(item)
         local overrides = store.data.settings.overstockKeep or {}
         local explicit = tonumber(overrides[item.name])
         if explicit ~= nil then return math.max(0, floor(explicit)) end
-        if isBuildingItem(item.name) then return floor(config.defaultBuildingKeepCount or 1024) end
-        local stackSize = floor(item.maxCount or item.maxStackSize or store.data.settings.stackSizes[item.name] or config.defaultStackSize or 64)
-        if stackSize <= 0 then stackSize = floor(config.defaultStackSize or 64) end
-        return stackSize * floor(config.defaultItemKeepStacks or 2)
+        return defaultKeepLevel(item)
+    end
+
+    function self.defaultOverstockKeep(item)
+        return defaultKeepLevel(item)
+    end
+
+    function self.overstockKeep(item)
+        return keepLevel(item)
+    end
+
+    function self.listOverstockItems()
+        local byName = {}
+        local ok, items = safeCall(transfer.colonyRS, "listItems")
+        if ok and type(items) == "table" then
+            for _, item in pairs(items) do
+                if type(item) == "table"
+                    and type(item.name) == "string"
+                    and item.name ~= "" then
+                    local entry = byName[item.name]
+                    if not entry then
+                        entry = {
+                            name = item.name,
+                            displayName = item.displayName or item.name,
+                            amount = 0,
+                            maxCount = item.maxCount or item.maxStackSize,
+                        }
+                        byName[item.name] = entry
+                    end
+                    entry.amount = entry.amount + floor(item.amount)
+                    if not entry.maxCount then
+                        entry.maxCount = item.maxCount or item.maxStackSize
+                    end
+                end
+            end
+        end
+
+        for name in pairs(store.data.settings.overstockKeep or {}) do
+            if not byName[name] then
+                byName[name] = {
+                    name = name,
+                    displayName = name,
+                    amount = 0,
+                }
+            end
+        end
+
+        local out = {}
+        for _, item in pairs(byName) do
+            item.defaultKeep = defaultKeepLevel(item)
+            item.overrideKeep = tonumber(
+                (store.data.settings.overstockKeep or {})[item.name]
+            )
+            item.keep = keepLevel(item)
+            out[#out + 1] = item
+        end
+
+        table.sort(out, function(a, b)
+            local ad = tostring(a.displayName or a.name):lower()
+            local bd = tostring(b.displayName or b.name):lower()
+            if ad == bd then return tostring(a.name) < tostring(b.name) end
+            return ad < bd
+        end)
+
+        return out, ok and nil or "CRS item list unavailable"
+    end
+
+    function self.setOverstockOverride(name, count)
+        name = tostring(name or "")
+        if name == "" then return false end
+        store.data.settings.overstockKeep = store.data.settings.overstockKeep or {}
+        store.data.settings.overstockKeep[name] = math.max(0, floor(count))
+        store.save()
+        return true
+    end
+
+    function self.clearOverstockOverride(name)
+        name = tostring(name or "")
+        if name == "" then return false end
+        store.data.settings.overstockKeep = store.data.settings.overstockKeep or {}
+        store.data.settings.overstockKeep[name] = nil
+        store.save()
+        return true
     end
 
     local function processOneOverstock()
