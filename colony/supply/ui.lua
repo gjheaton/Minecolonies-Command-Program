@@ -553,6 +553,45 @@ function M.new(config, store, cluster, transfer, engine, updater)
         return table.concat(parts, " | ")
     end
 
+    local function orphanRecoveryDisplay(e)
+        if type(e) ~= "table"
+            or tostring(e.code or "") ~= "ORPHAN_CHEST_QUARANTINE" then
+            return nil
+        end
+
+        local recovery = type(store.data.recovery) == "table"
+            and store.data.recovery.orphanChest or nil
+        if type(recovery) ~= "table" then return nil end
+
+        local summary = tostring(
+            recovery.summary
+            or (type(e.context) == "table" and e.context.detail)
+            or "Unknown item"
+        )
+
+        local started = tonumber(recovery.firstSeen) or tonumber(e.epoch) or 0
+        local waitSeconds =
+            math.max(30, math.floor(tonumber(config.orphanChestRecoverySeconds) or 180))
+        local elapsed = math.max(0, os.epoch("utc") / 1000 - started)
+        local remaining = math.max(0, math.ceil(waitSeconds - elapsed))
+
+        local timeText
+        if remaining > 0 then
+            local minutes = math.floor(remaining / 60)
+            local seconds = remaining % 60
+            if minutes > 0 then
+                timeText = tostring(minutes) .. "m " ..
+                    string.format("%02d", seconds) .. "s remaining"
+            else
+                timeText = tostring(seconds) .. "s remaining"
+            end
+        else
+            timeText = "0s remaining - return pending"
+        end
+
+        return summary .. "  -  " .. timeText
+    end
+
     local function drawErrors()
         local w,h = monitorUI.size()
         local errors = store.data.errors or {}
@@ -598,6 +637,11 @@ function M.new(config, store, cluster, transfer, engine, updater)
                     monitorUI.writeAt(3, y, Util.clip(line, width), color or C.text, C.bg)
                     y = y + 1
                 end
+            end
+
+            local orphanDisplay = orphanRecoveryDisplay(e)
+            if orphanDisplay then
+                drawWrapped("Item:", orphanDisplay, C.warn)
             end
 
             drawWrapped("Message:", e.message, C.text)
@@ -995,7 +1039,9 @@ function M.new(config, store, cluster, transfer, engine, updater)
                 resolveMonitor()
                 self.draw()
             elseif ev=="timer" and a==refreshTimer then
-                if self.view=="home" or self.view=="health" then
+                if self.view=="home"
+                    or self.view=="health"
+                    or self.view=="errors" then
                     pcall(self.draw)
                 end
                 refreshTimer=os.startTimer(1)
