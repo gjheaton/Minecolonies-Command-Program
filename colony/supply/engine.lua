@@ -108,8 +108,29 @@ function M.new(config, store, cluster, matcher, transfer)
                 if not requireMethod(obj, method) then missing[#missing + 1] = label .. "." .. method end
             end
         end
-        need(transfer.playerRS, "PRS", {"listItems","exportItem","importItem","craftItem"})
-        need(transfer.colonyRS, "CRS", {"listItems","exportItem","importItem"})
+        need(
+            transfer.playerRS,
+            "PRS",
+            {"listItems","exportItem","importItem","craftItem"}
+        )
+        need(
+            transfer.colonyRS,
+            "CRS",
+            {"listItems","exportItem","importItem"}
+        )
+
+        if config.usePeripheralTransfer then
+            need(
+                transfer.playerRS,
+                "PRS",
+                {"exportItemToPeripheral","importItemFromPeripheral"}
+            )
+            need(
+                transfer.colonyRS,
+                "CRS",
+                {"exportItemToPeripheral","importItemFromPeripheral"}
+            )
+        end
         need(transfer.colony, "COLONY", {"getRequests","getColonyName"})
         local chest = transfer.getChest()
         need(chest, "CHEST", {"list","getItemDetail"})
