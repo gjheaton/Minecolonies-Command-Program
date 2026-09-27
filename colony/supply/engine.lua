@@ -214,8 +214,20 @@ function M.new(config, store, cluster, matcher, transfer)
     local function handleOrphanChest(requests)
         if type(store.data.pending) == "table" then
             clearOrphanChestState()
+
+            -- A persisted/runtime pending transaction owns the transfer chest.
+            -- Try to resume it in its original direction instead of treating
+            -- the staged item as an orphan or waiting for a reboot.
+            local okPending, pendingDetail =
+                transfer.recoverPending()
+
+            if okPending then
+                return handleOrphanChest(requests)
+            end
+
             return false,
-                "transfer chest recovery deferred: pending transaction exists",
+                "pending transfer recovery: " ..
+                    tostring(pendingDetail),
                 "PENDING"
         end
 
@@ -2323,7 +2335,17 @@ function M.new(config, store, cluster, matcher, transfer)
             refreshMissingRequests()
             self.statusMessage = "TRANSFER CHEST: " .. tostring(chestDetail)
             self.stats.blocked = self.stats.blocked + 1
-            cluster.releaseTurn("transfer chest quarantine")
+
+            -- If this chest state belongs to an AutoCraft request, keep the
+            -- shared PRS lease while the pending movement becomes visible or
+            -- resumes. Do not hand PRS to another colony mid-craft/transfer.
+            local _, leaseJob =
+                activeLeaseCraftJob(activeRequests)
+            if leaseJob then
+                cluster.holdTurn("AutoCraft pending transfer")
+            else
+                cluster.releaseTurn("transfer chest blocked")
+            end
             return false
         end
 
