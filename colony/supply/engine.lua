@@ -1498,6 +1498,202 @@ function M.new(config, store, cluster, matcher, transfer)
         }
     end
 
+    local function displayRequestStatus(status)
+        status = tostring(status or "WAITING"):upper()
+        if status == "SUPPLYING"
+            or status == "CRAFTING"
+            or status == "CRAFTING RETRY"
+            or status == "DELIVERING"
+            or status == "RETRY_CRAFTING"
+            or status == "RETRY_WAIT" then
+            return "IN PROGRESS"
+        end
+        if status == "VERIFYING DELIVERY" or status == "VERIFYING" then
+            return "WAITING"
+        end
+        return status
+    end
+
+    local function buildRequestStatusRows(activeRequests)
+        local rows = {}
+        local okItems, inventory = safeCall(transfer.playerRS, "listItems")
+        if not okItems or type(inventory) ~= "table" then
+            inventory = {}
+        end
+
+        local craftableNames = {}
+        local okCraftList, craftList =
+            safeCall(transfer.playerRS, "listCraftableItems")
+        if okCraftList and type(craftList) == "table" then
+            for _, item in pairs(craftList) do
+                if type(item) == "table" and item.name then
+                    craftableNames[tostring(item.name)] = true
+                end
+            end
+        end
+
+        local craftCache = {}
+        local function craftLookup(candidate)
+            local key = tostring(candidate.identity or candidate.name)
+            local cached = craftCache[key]
+            if cached then
+                return cached.ok, cached.source
+            end
+
+            if not candidate.hasNBT
+                and craftableNames[tostring(candidate.name)] then
+                craftCache[key] = {
+                    ok = true,
+                    source = "listCraftableItems",
+                }
+                return true, "listCraftableItems"
+            end
+
+            local ok, source =
+                matcher.craftable(transfer.playerRS, candidate, safeCall)
+            craftCache[key] = { ok = ok == true, source = source }
+            return ok == true, source
+        end
+
+        local pending = store.data.pending
+
+        for _, request in ipairs(activeRequests or {}) do
+            local count = requestCount(request)
+            local signature = requestSignature(
+                request, count, matcher.canonicalNBT)
+            local ledger = store.data.requestLedger[tostring(request.id)] or {}
+            local sent = ledger.signature == signature
+                and floor(ledger.sentTotal or ledger.lastSent)
+                or 0
+            local remaining = math.max(0, count - sent)
+
+            local candidate, class, chooseErr =
+                matcher.chooseFromSnapshot(
+                    request,
+                    inventory,
+                    craftLookup,
+                    math.max(1, remaining)
+                )
+
+            local row = {
+                id = tostring(request.id),
+                name = tostring(request.name or "Request"),
+                requested = count,
+                sent = sent,
+                remaining = remaining,
+                item = candidate and tostring(candidate.name) or "-",
+                displayName = candidate and tostring(
+                    candidate.displayName or candidate.name)
+                    or tostring(request.name or "Request"),
+                prsStock = candidate and floor(candidate.stock) or 0,
+                craftable = candidate and candidate.craftable == true or false,
+                status = "WAITING",
+                detail = "",
+                class = class,
+            }
+
+            if not okItems then
+                row.status = "ERROR"
+                row.detail = "PRS inventory list unavailable"
+            elseif not candidate then
+                row.status = "MISSING"
+                row.detail = tostring(
+                    chooseErr
+                    or ("no acceptable " .. tostring(class or "item") ..
+                        " candidate"))
+            elseif type(pending) == "table"
+                and tostring(pending.requestId or "") == tostring(request.id) then
+                row.status = "IN PROGRESS"
+                row.detail = "transfer chest stage " ..
+                    tostring(pending.stage or "unknown")
+            elseif ledger.signature == signature and sent > 0 then
+                local phase = tostring(ledger.phase or "DELIVERING")
+                row.status = displayRequestStatus(phase)
+                if row.status == "DELIVERING" then
+                    row.status = "IN PROGRESS"
+                end
+                row.detail = tostring(
+                    ledger.stallDetail
+                    or ("verified sent " .. tostring(sent) ..
+                        "/" .. tostring(count) ..
+                        "; phase=" .. tostring(phase)))
+            else
+                local craftKey = candidate.identity or candidate.name
+                local craftJob = store.data.craftJobs[craftKey]
+                if type(craftJob) == "table" or type(craftJob) == "number" then
+                    row.status = "IN PROGRESS"
+                    row.detail = "craft job active; waiting for exact PRS output"
+                elseif floor(candidate.stock) > 0 then
+                    row.status = "WAITING"
+                    row.detail = "exact PRS stock available (" ..
+                        tostring(floor(candidate.stock)) .. ")"
+                elseif candidate.craftable == true then
+                    row.status = "WAITING"
+                    row.detail = store.data.settings.autoCraftEnabled == true
+                        and "exact item craftable; waiting for processing turn"
+                        or "exact item craftable; AutoCraft is disabled"
+                else
+                    row.status = "MISSING"
+                    row.detail = "no exact PRS inventory and no exact craft path"
+                end
+            end
+
+            rows[#rows + 1] = row
+        end
+
+        return rows
+    end
+
+    local function updateRequestRowFromProcess(row)
+        if type(row) ~= "table" or row.id == nil then return end
+        local id = tostring(row.id)
+
+        for _, requestRow in ipairs(self.requestRows or {}) do
+            if tostring(requestRow.id) == id then
+                local status = displayRequestStatus(row.status)
+
+                -- A read-only status scan may already have proven this request
+                -- genuinely missing. Do not replace that with a generic
+                -- BLOCKED label from a later action path.
+                if status == "BLOCKED"
+                    and requestRow.status == "MISSING" then
+                    status = "MISSING"
+                end
+
+                requestRow.status = status
+                requestRow.item = tostring(row.item or requestRow.item or "-")
+                requestRow.displayName =
+                    tostring(row.item or requestRow.displayName or requestRow.name)
+                requestRow.detail = tostring(row.detail or requestRow.detail or "")
+
+                local signature = requestSignature(
+                    { id=requestRow.id, name=requestRow.name },
+                    requestRow.requested,
+                    matcher.canonicalNBT
+                )
+                -- Sent/remaining are refreshed from the authoritative ledger
+                -- below without relying on the simplified signature above.
+                local ledger = store.data.requestLedger[id] or {}
+                local sent = floor(ledger.sentTotal or ledger.lastSent)
+                requestRow.sent = math.max(requestRow.sent or 0, sent)
+                requestRow.remaining = math.max(
+                    0,
+                    floor(requestRow.requested) - floor(requestRow.sent)
+                )
+                return
+            end
+        end
+    end
+
+    local function refreshMissingRequests()
+        self.missingRequests = {}
+        for _, row in ipairs(self.requestRows or {}) do
+            if tostring(row.status or "") == "MISSING" then
+                self.missingRequests[#self.missingRequests + 1] = row
+            end
+        end
+    end
+
     local function isBuildingItem(name)
         local p = registryPath(name)
         for _, pattern in ipairs(config.buildingItemPatterns or {}) do
