@@ -246,6 +246,7 @@ function M.new(config, store)
             end
 
             physicalCandidate.toolTier = toolTier(physicalCandidate)
+            physicalCandidate.genericClassAcceptance = true
             return true, physicalCandidate,
                 "accepted " .. tostring(TOOL_WORDS[class] or class) ..
                 " equipment alternative"
@@ -424,17 +425,20 @@ function M.new(config, store)
             candidate.stock = total
 
             if total > 0 then
-                -- For status-only inspection, stock already proves the request
-                -- is fillable. Avoid extra RS crafting API calls until stock is
-                -- actually absent.
+                -- Stock already proves the request is fillable. Avoid any
+                -- crafting API call for status-only inspection.
                 candidate.craftable = false
+                candidate.craftabilityKnown = true
                 candidate.craftSource = "exact stock available"
             elseif type(craftableLookup) == "function" then
-                local ok, source = craftableLookup(candidate)
+                local ok, source, known = craftableLookup(candidate)
                 candidate.craftable = ok == true
+                candidate.craftabilityKnown =
+                    known == true or ok == true or ok == false
                 candidate.craftSource = source
             else
                 candidate.craftable = false
+                candidate.craftabilityKnown = false
                 candidate.craftSource = "craftability not checked"
             end
         end
@@ -453,6 +457,9 @@ function M.new(config, store)
             if aAny ~= bAny then return aAny end
 
             if a.craftable ~= b.craftable then return a.craftable end
+            if a.craftabilityKnown ~= b.craftabilityKnown then
+                return a.craftabilityKnown == false
+            end
             if a.stock ~= b.stock then return a.stock > b.stock end
             return a.identity < b.identity
         end)
