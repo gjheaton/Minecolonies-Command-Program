@@ -605,7 +605,31 @@ function M.new(config, store, matcher)
         local list, err = self.chestContents()
         if not list then return false, "cannot inspect pending transfer chest: " .. tostring(err) end
         if next(list) == nil then
-            return false, "pending transaction exists but transfer chest is empty; manual diagnosis required"
+            -- If the persisted transaction never advanced beyond the exporting
+            -- stage, no item was ever positively observed in the transfer chest.
+            -- This is exactly the state left by a bridge export that returned 0.
+            -- Clear that pre-staged marker automatically instead of permanently
+            -- blocking startup. Later stages remain fail-closed because an empty
+            -- chest there can mean the destination consumed the item.
+            if tostring(p.stage or "") == "exporting" then
+                local detail =
+                    "cleared pre-staged pending " .. tostring(p.direction or "?") ..
+                    " " .. tostring(p.item or "?") ..
+                    "; transfer chest is empty and no staged item was confirmed"
+                clearPending()
+                store.addHistory("RECOVERY", {
+                    direction = tostring(p.direction or "?"),
+                    item = tostring(p.item or "?"),
+                    amount = floor(p.amount),
+                    requestId = p.requestId,
+                    detail = detail,
+                })
+                return true, detail
+            end
+
+            return false,
+                "pending transaction stage=" .. tostring(p.stage or "?") ..
+                " exists but transfer chest is empty; outcome is ambiguous and manual diagnosis is required"
         end
 
         local one
