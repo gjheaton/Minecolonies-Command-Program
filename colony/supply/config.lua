@@ -47,6 +47,11 @@ C.transferStageConfirmDelay = 0.25
 -- destination marker so startup cannot be blocked forever.
 C.exportWaitRecoverySeconds = 30
 
+-- If an item physically leaves the isolated transfer chest after a destination
+-- import but RS list visibility never confirms the increase, keep the pending
+-- confirming state briefly, then retire it as a completed physical transfer.
+C.confirmingEmptyRecoverySeconds = 30
+
 -- If the transfer chest contains no item matching an active MineColonies
 -- request and there is no pending transaction, quarantine the unchanged chest
 -- contents for this long before returning them to PRS automatically.
