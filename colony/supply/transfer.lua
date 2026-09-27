@@ -1,0 +1,632 @@
+-- MineColonies Control Suite v3 - verified transactional PRS/CRS transfer layer
+local M = {}
+
+local function floor(n)
+    return math.max(0, math.floor(tonumber(n) or 0))
+end
+
+local function nowSeconds()
+    if os.epoch then
+        local ok, value = pcall(os.epoch, "utc")
+        if ok and value then return math.floor(value / 1000) end
+    end
+    return math.floor(os.clock())
+end
+
+local function hasType(name, wanted)
+    if not name or not peripheral.isPresent(name) then return false end
+    local ok, result = pcall(peripheral.hasType, name, wanted)
+    if ok then return result == true end
+    for _, t in ipairs({peripheral.getType(name)}) do
+        if t == wanted then return true end
+    end
+    return false
+end
+
+function M.new(config, store, matcher)
+    local self = {
+        playerRS = nil,
+        colonyRS = nil,
+        colony = nil,
+        monitor = nil,
+        transferChestName = nil,
+        playerBridgeName = nil,
+        colonyBridgeName = nil,
+        colonyName = "Unknown Colony",
+        health = {
+            colony = false,
+            playerRS = false,
+            colonyRS = false,
+            warehouse = false,
+            transferChest = false,
+        },
+    }
+
+    function self.safeCall(obj, method, ...)
+        if not obj then return false, nil, "peripheral unavailable" end
+        local fn = obj[method]
+        if type(fn) ~= "function" then return false, nil, "missing method " .. tostring(method) end
+        local ok, a, b, c, d = pcall(fn, ...)
+        if not ok then return false, nil, tostring(a) end
+        return true, a, b, c, d
+    end
+
+    local function bridgeInfo(bridge)
+        local disk, external = 0, 0
+        local okDisk, vDisk = self.safeCall(bridge, "getMaxItemDiskStorage")
+        if okDisk then disk = tonumber(vDisk) or 0 end
+        local okExt, vExt = self.safeCall(bridge, "getMaxItemExternalStorage")
+        if okExt then external = tonumber(vExt) or 0 end
+        return disk, external
+    end
+
+    local function resolveBridgeByName(name)
+        if not name or not peripheral.isPresent(name) or not hasType(name, "rsBridge") then return nil, nil end
+        return peripheral.wrap(name), name
+    end
+
+    local function allBridges()
+        local list = { peripheral.find("rsBridge") }
+        local out = {}
+        for _, bridge in ipairs(list) do
+            local okName, name = pcall(peripheral.getName, bridge)
+            local disk, external = bridgeInfo(bridge)
+            out[#out + 1] = { bridge = bridge, name = okName and name or nil, disk = disk, external = external }
+        end
+        return out
+    end
+
+    local function resolveBridges()
+        local p, pn = resolveBridgeByName(config.playerBridgeName)
+        local c, cn = resolveBridgeByName(config.colonyBridgeName)
+        local all = allBridges()
+
+        if not p then
+            for _, b in ipairs(all) do
+                if b.disk > 0 and (not p or b.disk > (p.disk or -1)) then
+                    p, pn = b.bridge, b.name
+                end
+            end
+        end
+        if not c then
+            for _, b in ipairs(all) do
+                if b.disk == 0 and b.external > 0 and b.name ~= pn then
+                    c, cn = b.bridge, b.name
+                    break
+                end
+            end
+        end
+        if p and not c then
+            local other
+            for _, b in ipairs(all) do
+                if b.name ~= pn then
+                    if other then other = nil break else other = b end
+                end
+            end
+            if other then c, cn = other.bridge, other.name end
+        end
+        if c and not p then
+            local other
+            for _, b in ipairs(all) do
+                if b.name ~= cn then
+                    if other then other = nil break else other = b end
+                end
+            end
+            if other then p, pn = other.bridge, other.name end
+        end
+
+        self.playerRS, self.playerBridgeName = p, pn
+        self.colonyRS, self.colonyBridgeName = c, cn
+        return p ~= nil and c ~= nil and pn ~= cn
+    end
+
+    local function resolveColony()
+        local c
+        if config.colonyIntegratorName and peripheral.isPresent(config.colonyIntegratorName)
+            and hasType(config.colonyIntegratorName, "colonyIntegrator") then
+            c = peripheral.wrap(config.colonyIntegratorName)
+        else
+            c = peripheral.find("colonyIntegrator")
+        end
+        if not c then self.colony = nil return false end
+        local okInside, inside = self.safeCall(c, "isInColony")
+        if not okInside or inside ~= true then self.colony = nil return false end
+        self.colony = c
+        local okName, name = self.safeCall(c, "getColonyName")
+        if okName and name then self.colonyName = tostring(name) end
+        return true
+    end
+
+    local function looksLikeBarrel(name)
+        if not name then return false end
+        local text = tostring(name):lower()
+        local types = table.concat({peripheral.getType(name)}, ","):lower()
+        return text:find("barrel",1,true) ~= nil
+            or text:find("sophisticated",1,true) ~= nil
+            or types:find("barrel",1,true) ~= nil
+            or types:find("sophisticated",1,true) ~= nil
+    end
+
+    local function resolveChest()
+        local candidates = {}
+        local saved = store.data.settings and store.data.settings.transferChestName or nil
+        local preferred = config.transferChestName or saved
+        if preferred and peripheral.isPresent(preferred) and hasType(preferred, "inventory") then
+            self.transferChestName = preferred
+            return true
+        end
+        for _, name in ipairs(peripheral.getNames()) do
+            if hasType(name, "inventory") and looksLikeBarrel(name) then
+                candidates[#candidates + 1] = name
+            end
+        end
+        if #candidates == 1 then
+            self.transferChestName = candidates[1]
+            store.data.settings.transferChestName = candidates[1]
+            store.save()
+            return true
+        end
+        self.transferChestName = nil
+        return false
+    end
+
+    function self.getChest()
+        if not self.transferChestName or not peripheral.isPresent(self.transferChestName) then resolveChest() end
+        if not self.transferChestName then return nil end
+        return peripheral.wrap(self.transferChestName)
+    end
+
+    function self.refresh()
+        local colonyOK = resolveColony()
+        local bridgesOK = resolveBridges()
+        local chestOK = resolveChest()
+        self.health.colony = colonyOK
+        self.health.playerRS = false
+        self.health.colonyRS = false
+        self.health.warehouse = false
+        self.health.transferChest = chestOK
+
+        if bridgesOK and self.playerRS then
+            self.health.playerRS = select(1, self.safeCall(self.playerRS, "getEnergyStorage"))
+        end
+        if bridgesOK and self.colonyRS then
+            self.health.colonyRS = select(1, self.safeCall(self.colonyRS, "getEnergyStorage"))
+            if self.health.colonyRS then
+                local _, ext = bridgeInfo(self.colonyRS)
+                self.health.warehouse = ext > 0
+            end
+        end
+        return colonyOK and bridgesOK and self.health.playerRS and self.health.colonyRS and chestOK
+    end
+
+    function self.chestContents()
+        local chest = self.getChest()
+        if not chest then return nil, "transfer chest unavailable" end
+        local ok, list = pcall(chest.list)
+        if not ok or type(list) ~= "table" then return nil, tostring(list) end
+        return list
+    end
+
+    function self.chestEmpty()
+        local list, err = self.chestContents()
+        if not list then return false, err end
+        return next(list) == nil
+    end
+
+    function self.chestCount(candidate)
+        local list, err = self.chestContents()
+        if not list then return nil, err end
+        local total = 0
+        for slot, item in pairs(list) do
+            if type(item) == "table" and item.name == candidate.name then
+                local exact = not candidate.hasNBT
+                if candidate.hasNBT then
+                    local chest = self.getChest()
+                    local okDetail, detail = pcall(chest.getItemDetail, slot)
+                    if okDetail and type(detail) == "table" then
+                        exact = matcher.exactlyMatches(candidate.raw, detail)
+                    end
+                end
+                if exact then total = total + floor(item.count) end
+            end
+        end
+        return total
+    end
+
+    local function rsAmount(bridge, candidate)
+        local ok, items = self.safeCall(bridge, "listItems")
+        if not ok or type(items) ~= "table" then return nil, "listItems failed" end
+        local total = 0
+        for _, item in pairs(items) do
+            if type(item) == "table" and item.name == candidate.name then
+                if matcher.exactlyMatches(candidate.raw, item) then
+                    total = total + floor(item.amount)
+                end
+            end
+        end
+        return total
+    end
+
+    function self.playerAmount(candidate)
+        return rsAmount(self.playerRS, candidate)
+    end
+
+    function self.colonyAmount(candidate)
+        return rsAmount(self.colonyRS, candidate)
+    end
+
+    local function exportDirectional(bridge, filter, direction)
+        local ok, moved, err = self.safeCall(bridge, "exportItem", filter, direction)
+        if not ok then return 0, err or moved end
+        return floor(moved), nil
+    end
+
+    local function importDirectional(bridge, filter, direction)
+        local ok, moved, err = self.safeCall(bridge, "importItem", filter, direction)
+        if not ok then return 0, err or moved end
+        return floor(moved), nil
+    end
+
+    local function exportPeripheral(bridge, filter, chestName)
+        local ok, moved, err = self.safeCall(bridge, "exportItemToPeripheral", filter, chestName)
+        if not ok then return 0, err or moved end
+        return floor(moved), nil
+    end
+
+    local function importPeripheral(bridge, filter, chestName)
+        local ok, moved, err = self.safeCall(bridge, "importItemFromPeripheral", filter, chestName)
+        if not ok then return 0, err or moved end
+        return floor(moved), nil
+    end
+
+    local function sourceExport(bridge, filter, direction)
+        if config.usePeripheralTransfer and self.transferChestName then
+            return exportPeripheral(bridge, filter, self.transferChestName)
+        end
+        return exportDirectional(bridge, filter, direction)
+    end
+
+    local function destinationImport(bridge, filter, direction)
+        if config.usePeripheralTransfer and self.transferChestName then
+            return importPeripheral(bridge, filter, self.transferChestName)
+        end
+        return importDirectional(bridge, filter, direction)
+    end
+
+    local function verifyDestination(bridge, candidate, baseline, expected)
+        local maxSeen = floor(baseline)
+        local reads = math.max(1, math.min(5, floor(config.destinationConfirmReads or 3)))
+        for i = 1, reads do
+            local amount = rsAmount(bridge, candidate)
+            if amount ~= nil and amount > maxSeen then maxSeen = amount end
+            if math.max(0, maxSeen - baseline) >= expected then break end
+            if i < reads then sleep(tonumber(config.destinationConfirmDelay) or 0.15) end
+        end
+        return math.min(expected, math.max(0, maxSeen - baseline)), maxSeen
+    end
+
+    local function setPending(p)
+        p.updated = nowSeconds()
+        store.setPending(p)
+    end
+
+    local function clearPending()
+        store.setPending(nil)
+    end
+
+    function self.rollbackChestToPlayer(candidate, expected)
+        local chestBefore = self.chestCount(candidate)
+        if chestBefore == nil then return false, "cannot read transfer chest" end
+        if chestBefore <= 0 then return true, "nothing to rollback" end
+        local playerBefore = self.playerAmount(candidate)
+        if playerBefore == nil then return false, "cannot read PRS before rollback" end
+
+        local filter = { name = candidate.name, count = math.min(chestBefore, floor(expected) > 0 and floor(expected) or chestBefore) }
+        if candidate.hasNBT then
+            local encoded = matcher.craftFilter(candidate, filter.count)
+            if encoded.nbt then filter.nbt = encoded.nbt end
+        end
+
+        local moved = 0
+        for _ = 1, math.max(1, floor(config.transferImportRetries or 3)) do
+            local n = destinationImport(self.playerRS, filter, config.chestToPlayerDirection)
+            moved = moved + floor(n)
+            local left = self.chestCount(candidate) or chestBefore
+            if left <= 0 then break end
+            sleep(tonumber(config.transferRetryDelay) or 0.25)
+        end
+
+        local playerAfter = self.playerAmount(candidate)
+        local chestAfter = self.chestCount(candidate)
+        local gained = playerAfter and math.max(0, playerAfter - playerBefore) or 0
+        if chestAfter == 0 and gained >= math.min(chestBefore, floor(expected) > 0 and floor(expected) or chestBefore) then
+            return true, "rollback verified"
+        end
+        return false, "rollback incomplete: chest=" .. tostring(chestAfter) .. " PRS gain=" .. tostring(gained) .. " bridge=" .. tostring(moved)
+    end
+
+    function self.playerToColony(candidate, count, meta)
+        count = math.min(math.max(1, floor(count)), floor(config.maxTransferChunk or 64))
+        meta = meta or {}
+
+        local empty, emptyErr = self.chestEmpty()
+        if not empty then return false, "transfer chest not empty: " .. tostring(emptyErr or "occupied") end
+
+        local variants, stock = matcher.findStoredVariants(self.playerRS, candidate, function(...) return self.safeCall(...) end)
+        if stock <= 0 or #variants == 0 then return false, "exact PRS variant not stored" end
+
+        local quantity = math.min(count, stock)
+        local filter, filterMode = matcher.exportFilterForVariant(candidate, variants[1], quantity)
+        if not filter then return false, filterMode end
+
+        local colonyBefore = self.colonyAmount(candidate)
+        if colonyBefore == nil then return false, "cannot read CRS baseline" end
+
+        local pending = {
+            schema = 3,
+            direction = "PRS>CRS",
+            stage = "exporting",
+            item = candidate.name,
+            identity = candidate.identity,
+            amount = quantity,
+            requestId = meta.requestId,
+            started = nowSeconds(),
+            filterMode = filterMode,
+        }
+        setPending(pending)
+
+        local chestBefore = self.chestCount(candidate) or 0
+        local exported, exportErr = sourceExport(self.playerRS, filter, config.playerToChestDirection)
+        sleep(tonumber(config.transferSettleDelay) or 0.25)
+        local chestAfterExport = self.chestCount(candidate)
+        local physicallyExported = chestAfterExport and math.max(0, chestAfterExport - chestBefore) or 0
+
+        if exported <= 0 or physicallyExported <= 0 then
+            clearPending()
+            return false, "PRS export failed: bridge=" .. tostring(exported) .. " chestDelta=" .. tostring(physicallyExported) .. " " .. tostring(exportErr or "")
+        end
+
+        pending.stage = "staged"
+        pending.amount = physicallyExported
+        setPending(pending)
+
+        local importFilter = { name = candidate.name, count = physicallyExported }
+        if candidate.hasNBT then
+            local encoded = matcher.craftFilter(candidate, physicallyExported)
+            if encoded.nbt then importFilter.nbt = encoded.nbt end
+        end
+
+        for _ = 1, math.max(1, floor(config.transferImportRetries or 3)) do
+            destinationImport(self.colonyRS, importFilter, config.chestToColonyDirection)
+            sleep(tonumber(config.transferRetryDelay) or 0.25)
+            local left = self.chestCount(candidate)
+            if left ~= nil and left <= 0 then break end
+        end
+
+        local chestAfterImport = self.chestCount(candidate)
+        local physicalAccepted = math.max(0, physicallyExported - floor(chestAfterImport))
+        if physicalAccepted <= 0 then
+            local okRollback, detail = self.rollbackChestToPlayer(candidate, physicallyExported)
+            if okRollback then clearPending() end
+            return false, "CRS import failed; " .. tostring(detail)
+        end
+
+        pending.stage = "confirming"
+        pending.physicalAccepted = physicalAccepted
+        setPending(pending)
+
+        local confirmed = verifyDestination(self.colonyRS, candidate, colonyBefore, physicalAccepted)
+        if confirmed < physicalAccepted then
+            local left = self.chestCount(candidate) or 0
+            if left > 0 then
+                self.rollbackChestToPlayer(candidate, left)
+            end
+            return false, "CRS destination unconfirmed: physical=" .. tostring(physicalAccepted) .. " confirmed=" .. tostring(confirmed)
+        end
+
+        clearPending()
+        store.addHistory("TRANSFER", {
+            direction = "PRS>CRS",
+            item = candidate.name,
+            amount = confirmed,
+            requestId = meta.requestId,
+            detail = tostring(meta.detail or "verified exact transfer"),
+        })
+        return true, confirmed
+    end
+
+    function self.colonyToPlayer(candidate, count, meta)
+        count = math.min(math.max(1, floor(count)), floor(config.maxOverstockChunk or 64))
+        meta = meta or {}
+        local empty, err = self.chestEmpty()
+        if not empty then return false, "transfer chest not empty: " .. tostring(err or "occupied") end
+
+        local variants, stock = matcher.findStoredVariants(self.colonyRS, candidate, function(...) return self.safeCall(...) end)
+        if stock <= 0 or #variants == 0 then return false, "exact CRS variant not stored" end
+
+        local quantity = math.min(count, stock)
+        local filter, mode = matcher.exportFilterForVariant(candidate, variants[1], quantity)
+        if not filter then return false, mode end
+        local playerBefore = self.playerAmount(candidate)
+        if playerBefore == nil then return false, "cannot read PRS baseline" end
+
+        local pending = {
+            schema = 3,
+            direction = "CRS>PRS",
+            stage = "exporting",
+            item = candidate.name,
+            identity = candidate.identity,
+            amount = quantity,
+            requestId = meta.requestId,
+            started = nowSeconds(),
+            filterMode = mode,
+        }
+        setPending(pending)
+
+        local beforeChest = self.chestCount(candidate) or 0
+        local exported = sourceExport(self.colonyRS, filter, config.colonyToChestDirection)
+        sleep(tonumber(config.transferSettleDelay) or 0.25)
+        local afterChest = self.chestCount(candidate)
+        local staged = afterChest and math.max(0, afterChest - beforeChest) or 0
+        if floor(exported) <= 0 or staged <= 0 then
+            clearPending()
+            return false, "CRS export failed: bridge=" .. tostring(exported) .. " chestDelta=" .. tostring(staged)
+        end
+
+        pending.stage = "staged"
+        pending.amount = staged
+        setPending(pending)
+
+        local importFilter = { name = candidate.name, count = staged }
+        if candidate.hasNBT then
+            local encoded = matcher.craftFilter(candidate, staged)
+            if encoded.nbt then importFilter.nbt = encoded.nbt end
+        end
+
+        for _ = 1, math.max(1, floor(config.transferImportRetries or 3)) do
+            destinationImport(self.playerRS, importFilter, config.chestToPlayerDirection)
+            sleep(tonumber(config.transferRetryDelay) or 0.25)
+            local left = self.chestCount(candidate)
+            if left ~= nil and left <= 0 then break end
+        end
+
+        local chestAfter = self.chestCount(candidate)
+        local physicalAccepted = math.max(0, staged - floor(chestAfter))
+        local playerAfter = self.playerAmount(candidate)
+        local gained = playerAfter and math.max(0, playerAfter - playerBefore) or 0
+
+        if chestAfter == 0 and gained >= physicalAccepted and physicalAccepted > 0 then
+            clearPending()
+            store.addHistory("TRANSFER", {
+                direction = "CRS>PRS",
+                item = candidate.name,
+                amount = physicalAccepted,
+                requestId = meta.requestId,
+                detail = tostring(meta.detail or "verified overstock return"),
+            })
+            return true, physicalAccepted
+        end
+
+        return false, "PRS destination unconfirmed: staged=" .. tostring(staged) ..
+            " physical=" .. tostring(physicalAccepted) .. " PRSgain=" .. tostring(gained) ..
+            " chest=" .. tostring(chestAfter)
+    end
+
+    function self.findSafeProbeCandidate()
+        local ok, items = self.safeCall(self.playerRS, "listItems")
+        if not ok or type(items) ~= "table" then return nil, "PRS listItems unavailable" end
+
+        local preferred = tostring(config.startupProbePreferredItem or "")
+        local function usable(item)
+            if type(item) ~= "table" or floor(item.amount) < 1 then return false end
+            local ns = tostring(item.name or ""):match("^([^:]+):")
+            if not ns or config.startupProbeNamespaces[ns] ~= true then return false end
+            local nbt = item.nbt
+            local noNBT = nbt == nil or nbt == "" or nbt == "{}" or (type(nbt) == "table" and next(nbt) == nil)
+            return noNBT
+        end
+
+        local selected
+        for _, item in pairs(items) do
+            if usable(item) and item.name == preferred then selected = item break end
+        end
+        if not selected then
+            for _, item in pairs(items) do
+                if usable(item) then selected = item break end
+            end
+        end
+        if not selected then return nil, "no plain PRS item available for startup probe" end
+
+        return {
+            name = selected.name,
+            displayName = selected.displayName or selected.name,
+            nbt = nil,
+            nbtCanonical = "",
+            hasNBT = false,
+            identity = tostring(selected.name) .. "|NBT|",
+            namespace = tostring(selected.name):match("^([^:]+):") or "",
+            raw = { name = selected.name, nbt = nil },
+        }
+    end
+
+    function self.startupRoundTrip()
+        local candidate, err = self.findSafeProbeCandidate()
+        if not candidate then return false, err end
+        local beforePRS = self.playerAmount(candidate)
+        local beforeCRS = self.colonyAmount(candidate)
+        if beforePRS == nil or beforeCRS == nil then return false, "cannot read startup probe baselines" end
+
+        local okForward, movedForward = self.playerToColony(candidate, floor(config.startupProbeCount or 1), {
+            detail = "startup forward validation",
+        })
+        if not okForward then return false, "PRS->CRS startup probe failed: " .. tostring(movedForward) end
+
+        local okBack, movedBack = self.colonyToPlayer(candidate, floor(movedForward), {
+            detail = "startup reverse validation",
+        })
+        if not okBack then
+            return false, "CRS->PRS startup probe failed after forward success: " .. tostring(movedBack)
+        end
+
+        local afterPRS = self.playerAmount(candidate)
+        local afterCRS = self.colonyAmount(candidate)
+        if afterPRS ~= beforePRS or afterCRS ~= beforeCRS then
+            return false, "startup round trip did not restore baseline: PRS " ..
+                tostring(beforePRS) .. "->" .. tostring(afterPRS) .. ", CRS " ..
+                tostring(beforeCRS) .. "->" .. tostring(afterCRS)
+        end
+        return true, "round trip verified with " .. candidate.name
+    end
+
+    function self.recoverPending()
+        local p = store.data.pending
+        if type(p) ~= "table" then return true, "nothing pending" end
+
+        -- v3 only auto-recovers a staged PRS->CRS transaction by returning the
+        -- visible barrel contents to PRS. It never guesses that an empty barrel
+        -- means the colony accepted a prior shipment.
+        local list, err = self.chestContents()
+        if not list then return false, "cannot inspect pending transfer chest: " .. tostring(err) end
+        if next(list) == nil then
+            return false, "pending transaction exists but transfer chest is empty; manual diagnosis required"
+        end
+
+        local one
+        for _, item in pairs(list) do
+            if type(item) == "table" then
+                if one and one.name ~= item.name then
+                    return false, "pending recovery found mixed transfer chest contents"
+                end
+                one = item
+            end
+        end
+        if not one then return false, "pending recovery could not identify barrel item" end
+
+        local candidate = {
+            name = one.name,
+            displayName = one.name,
+            nbt = nil,
+            nbtCanonical = "",
+            hasNBT = false,
+            identity = tostring(one.name) .. "|NBT|",
+            namespace = tostring(one.name):match("^([^:]+):") or "",
+            raw = { name = one.name, nbt = nil },
+        }
+        local ok, detail = self.rollbackChestToPlayer(candidate, floor(one.count))
+        if ok then
+            clearPending()
+            store.addHistory("RECOVERY", {
+                direction = "CHEST>PRS",
+                item = one.name,
+                amount = floor(one.count),
+                detail = "recovered persisted pending transfer",
+            })
+            return true, detail
+        end
+        return false, detail
+    end
+
+    return self
+end
+
+return M
