@@ -9,12 +9,13 @@
 --         recommendations based on MineColonies primary/secondary skills.
 -- v3.0.1: Citizens page BEST FIT column with current-job fit coloring.
 -- v3.0.2: Supply-style CHECK NOW / UPDATE button on the Home screen.
+-- v3.0.3: Citizen BEST FIT scores and wider STATE / compact STATUS columns.
 
 local REFRESH_SECONDS = 10
 local RAID_BLINK_SECONDS = 0.75
 local TEXT_SCALE = 0.5
-local PROGRAM_VERSION = "3.0.2"
-local SUITE_VERSION = "3.0.10"
+local PROGRAM_VERSION = "3.0.3"
+local SUITE_VERSION = "3.0.11"
 
 local Util = require("colony.lib.util")
 local SharedUI = require("colony.lib.ui")
@@ -259,19 +260,31 @@ local function updateCitizenJobFits(citizens)
     end
 end
 
-local function citizenBestFit(citizen)
+local function citizenBestFit(citizen, width)
     local fit = type(citizen) == "table" and citizen._jobFit or nil
     if type(fit) ~= "table" or fit.applicable ~= true
         or type(fit.best) ~= "table" then
         return "N/A", C.dim
     end
 
-    if fit.training == true then
-        return tostring(fit.best.label or "Unknown"), C.text
+    local label = tostring(fit.best.label or "Unknown")
+    local score = string.format("%.1f", tonumber(fit.best.score) or 0)
+    local text
+
+    if width and tonumber(width) and tonumber(width) > 0 then
+        width = math.floor(tonumber(width))
+        local labelWidth = math.max(1, width - #score - 1)
+        text = clip(label, labelWidth) .. " " .. score
+        text = clip(text, width)
+    else
+        text = label .. " " .. score
     end
 
-    return tostring(fit.best.label or "Unknown"),
-        fit.matches == true and C.good or C.warn
+    if fit.training == true then
+        return text, C.text
+    end
+
+    return text, fit.matches == true and C.good or C.warn
 end
 
 -- Military citizens are kept in a separate section at the bottom of the
@@ -1582,21 +1595,24 @@ local function drawListPage(page)
         local separatorCount = 4
         local content = math.max(28, usable - separatorCount)
 
-        local nameW = math.max(10, math.floor(content * 0.23))
-        local jobW = math.max(9, math.floor(content * 0.18))
-        local bestW = math.max(11, math.floor(content * 0.22))
-        local stateW = math.max(9, math.floor(content * 0.19))
-        local statusW = content - nameW - jobW - bestW - stateW
+        -- STATUS is deliberately compact. Seven characters fits every
+        -- citizen status currently emitted here, including INJURED and IN BED.
+        -- The remaining width is biased toward STATE so MineColonies AI state
+        -- text is easier to read, while BEST FIT keeps enough room for a score.
+        local statusW = 7
+        local nameW = math.max(10, math.floor(content * 0.21))
+        local jobW = math.max(9, math.floor(content * 0.16))
+        local bestW = math.max(13, math.floor(content * 0.23))
+        local stateW = content - nameW - jobW - bestW - statusW
 
-        while statusW < 6
-            and (nameW > 10 or jobW > 9 or bestW > 11 or stateW > 9) do
+        while stateW < 12
+            and (nameW > 10 or jobW > 9 or bestW > 13) do
             if nameW > 10 then nameW = nameW - 1
-            elseif bestW > 11 then bestW = bestW - 1
-            elseif stateW > 9 then stateW = stateW - 1
-            elseif jobW > 9 then jobW = jobW - 1 end
-            statusW = content - nameW - jobW - bestW - stateW
+            elseif jobW > 9 then jobW = jobW - 1
+            elseif bestW > 13 then bestW = bestW - 1 end
+            stateW = content - nameW - jobW - bestW - statusW
         end
-        statusW = math.max(1, statusW)
+        stateW = math.max(1, stateW)
 
         local nameX = 2
         local sep1X = nameX + nameW
@@ -1856,16 +1872,29 @@ local function drawListPage(page)
                     center(y, header, C.title, C.panel2)
                 else
                     local statusText, statusColor = citizenStatus(item)
-                    local bestFitText, bestFitColor = citizenBestFit(item)
+                    local bestFitText, bestFitColor =
+                        citizenBestFit(item, columns.bestW)
                     writeAt(columns.nameX, y, pad(item.name or "Unknown", columns.nameW), C.text, bg)
                     writeAt(columns.sep1X, y, "|", C.dim, bg)
                     writeAt(columns.jobX, y, pad(citizenJob(item), columns.jobW), C.accent, bg)
                     writeAt(columns.sep2X, y, "|", C.dim, bg)
-                    writeAt(columns.bestX, y, pad(bestFitText, columns.bestW), bestFitColor, bg)
+                    writeAt(
+                        columns.bestX, y,
+                        pad(clip(bestFitText, columns.bestW), columns.bestW),
+                        bestFitColor, bg
+                    )
                     writeAt(columns.sep3X, y, "|", C.dim, bg)
-                    writeAt(columns.stateX, y, pad(item.state or "", columns.stateW), C.dim, bg)
+                    writeAt(
+                        columns.stateX, y,
+                        pad(clip(item.state or "", columns.stateW), columns.stateW),
+                        C.dim, bg
+                    )
                     writeAt(columns.sep4X, y, "|", C.dim, bg)
-                    writeAt(columns.statusX, y, pad(statusText, columns.statusW), statusColor, bg)
+                    writeAt(
+                        columns.statusX, y,
+                        pad(clip(statusText, columns.statusW), columns.statusW),
+                        statusColor, bg
+                    )
                 end
 
             elseif buildingTable then
