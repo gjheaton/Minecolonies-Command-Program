@@ -2069,11 +2069,12 @@ local function detailLines(page, item)
             addDetailLine(lines, "Skills", "Not reported by integrator", C.dim)
         else
             for i, skill in ipairs(skills) do
-                addDetailLine(lines,
-                    i == 1 and "Skills" or "",
-                    prettySkillName(skill.name) .. " " ..
-                        tostring(skill.level or 0),
-                    i <= 3 and C.info or C.text)
+                addDetailLine(
+                    lines,
+                    prettySkillName(skill.name),
+                    tostring(skill.level or 0),
+                    i <= 3 and C.info or C.text
+                )
             end
         end
 
