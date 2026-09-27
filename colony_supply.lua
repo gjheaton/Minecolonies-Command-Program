@@ -35,9 +35,10 @@ store.load()
 local cluster = Cluster.new(CONFIG, store)
 local matcher = Matcher.new(CONFIG, store)
 local transfer = Transfer.new(CONFIG, store, matcher)
-transfer.refresh()
-cluster.setLocalName(transfer.colonyName)
 
+-- Do not touch either RS Bridge before cluster ownership is established.
+-- Engine.scan()/runStartupChecks() resolve peripherals only after the token's
+-- handoff quiet window has completed.
 local updater
 local ui
 local engine
