@@ -220,6 +220,14 @@ function M.new(config, store)
         -- registry name was not present in the request's serialized alternative
         -- list. Use the same class + namespace rules as normal Supply matching.
         if class and not hasSpecificNBT then
+            -- A generic MineColonies equipment request is still a plain-item
+            -- request. Do not silently substitute an enchanted/damaged NBT
+            -- variant merely because it belongs to the same equipment class.
+            if hasMeaningfulNBT(physicalItem) then
+                return false, nil,
+                    "generic equipment request does not accept NBT variant"
+            end
+
             local ns = namespace(physicalItem.name)
             local physicalCandidate = {
                 name = physicalItem.name,
