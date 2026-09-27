@@ -961,13 +961,25 @@ function M.new(config, store, matcher)
         pending.physicalAccepted = physicalAccepted
         setPending(pending)
 
-        local confirmed = verifyDestination(self.colonyRS, candidate, colonyBefore, physicalAccepted)
+        local confirmed =
+            verifyDestination(
+                self.colonyRS,
+                candidate,
+                colonyBefore,
+                physicalAccepted
+            )
         if confirmed < physicalAccepted then
-            local left = self.chestCount(candidate) or 0
-            if left > 0 then
-                self.rollbackChestToPlayer(candidate, left)
-            end
-            return false, "CRS destination unconfirmed: physical=" .. tostring(physicalAccepted) .. " confirmed=" .. tostring(confirmed)
+            -- Fail closed in the original direction. Never bounce remaining
+            -- staged request items back into PRS merely because destination
+            -- visibility is delayed; that recreates the request/craft loop.
+            pending.stage = "confirming"
+            pending.physicalAccepted = physicalAccepted
+            pending.lastError =
+                "CRS destination confirmation incomplete: physical=" ..
+                tostring(physicalAccepted) ..
+                " confirmed=" .. tostring(confirmed)
+            setPending(pending)
+            return false, pending.lastError
         end
 
         clearPending()
