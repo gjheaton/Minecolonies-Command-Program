@@ -20,6 +20,12 @@ C.usePeripheralTransfer = false
 
 -- Runtime cadence.
 C.scanIntervalSeconds = 5
+
+-- Requests-page diagnostics are intentionally slower than the transfer engine
+-- to avoid stressing Advanced Peripherals / Refined Storage.
+C.requestStatusRefreshSeconds = 30
+C.requestCraftableRefreshSeconds = 120
+
 C.turnIdleDelaySeconds = 0.25
 C.maxTransferChunk = 64
 C.transferSettleDelay = 0.25
