@@ -1275,14 +1275,18 @@ function M.new(config, store, cluster, matcher, transfer)
 
         self.stats.active = #activeRequests
 
-        local currentWork
+        local currentWorkRequest
+        local currentWorkRow
         for _, request in ipairs(activeRequests) do
             local row = processRequest(request)
             self.rows[#self.rows + 1] = row
 
-            local work = captureWorkSnapshot(request, row)
-            if not currentWork or row.usedPRSTurn == true then
-                currentWork = work
+            -- Choose which request to display now, but defer the PRS/CRS stock
+            -- snapshot until processing is finished. This keeps the Home
+            -- dashboard to one extra exact-stock read per owned colony turn.
+            if not currentWorkRow or row.usedPRSTurn == true then
+                currentWorkRequest = request
+                currentWorkRow = row
             end
 
             if row.status == "WAITING ACK"
@@ -1308,8 +1312,9 @@ function M.new(config, store, cluster, matcher, transfer)
             if row.usedPRSTurn == true then break end
         end
 
-        if currentWork then
-            self.currentWork = currentWork
+        if currentWorkRequest and currentWorkRow then
+            self.currentWork = captureWorkSnapshot(
+                currentWorkRequest, currentWorkRow)
         elseif #activeRequests == 0 then
             self.currentWork = nil
         end
