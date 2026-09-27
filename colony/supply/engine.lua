@@ -162,18 +162,20 @@ function M.new(config, store, cluster, matcher, transfer)
         if type(store.data.pending) == "table" then
             clearOrphanChestState()
             return false,
-                "transfer chest recovery deferred: pending transaction exists"
+                "transfer chest recovery deferred: pending transaction exists",
+                "PENDING"
         end
 
         local snapshot, snapshotErr = transfer.chestSnapshot()
         if not snapshot then
             return false,
-                "cannot inspect transfer chest: " .. tostring(snapshotErr)
+                "cannot inspect transfer chest: " .. tostring(snapshotErr),
+                "ERROR"
         end
 
         if #(snapshot.entries or {}) == 0 then
             clearOrphanChestState()
-            return true, "transfer chest empty"
+            return true, "transfer chest empty", "EMPTY"
         end
 
         local requested, requestedDetail =
@@ -183,7 +185,8 @@ function M.new(config, store, cluster, matcher, transfer)
             return false,
                 "transfer chest contains an item matching an active request; " ..
                 "automatic PRS return suppressed: " ..
-                tostring(requestedDetail)
+                tostring(requestedDetail),
+                "ACTIVE_REQUEST"
         end
 
         store.data.recovery = store.data.recovery or {}
@@ -228,7 +231,8 @@ function M.new(config, store, cluster, matcher, transfer)
             return false,
                 "unrequested transfer chest contents quarantined " ..
                 tostring(elapsed) .. "/" .. tostring(waitSeconds) ..
-                "s: " .. tostring(summary)
+                "s: " .. tostring(summary),
+                "QUARANTINE"
         end
 
         local okReturn, result = transfer.returnEntireChestToPlayer()
@@ -237,7 +241,8 @@ function M.new(config, store, cluster, matcher, transfer)
             quarantine.lastError = tostring(result)
             store.save()
             return false,
-                "orphan chest auto-return failed: " .. tostring(result)
+                "orphan chest auto-return failed: " .. tostring(result),
+                "ERROR"
         end
 
         clearOrphanChestState()
@@ -254,7 +259,8 @@ function M.new(config, store, cluster, matcher, transfer)
             }
         )
         return true,
-            tostring(result.detail or "orphan chest returned to PRS")
+            tostring(result.detail or "orphan chest returned to PRS"),
+            "RECOVERED"
     end
 
     local function desyncHeuristic()
@@ -414,6 +420,8 @@ function M.new(config, store, cluster, matcher, transfer)
         setCheck("pending", okPending, pendingDetail)
 
         local empty, emptyDetail = transfer.chestEmpty()
+        local chestState = empty and "EMPTY" or "OCCUPIED"
+
         if okPending and not empty then
             -- Before deciding an occupied chest is permanently blocking
             -- startup, compare its exact contents with the colony's current
@@ -422,12 +430,14 @@ function M.new(config, store, cluster, matcher, transfer)
             local okRequests, startupRequests =
                 safeCall(transfer.colony, "getRequests")
             if okRequests and type(startupRequests) == "table" then
-                local recovered, recoveryDetail =
+                local recovered, recoveryDetail, recoveryState =
                     handleOrphanChest(startupRequests)
                 empty = recovered == true
                 emptyDetail = recoveryDetail
+                chestState = recoveryState or "OCCUPIED"
             else
                 empty = false
+                chestState = "ERROR"
                 emptyDetail =
                     "transfer chest occupied; active requests could not be " ..
                     "verified, so automatic cleanup is suppressed"
@@ -441,8 +451,24 @@ function M.new(config, store, cluster, matcher, transfer)
             empty,
             empty
                 and tostring(emptyDetail or "transfer chest empty")
-                or tostring(emptyDetail or "transfer chest occupied")
+                or tostring(emptyDetail or "transfer chest occupied"),
+            chestState == "QUARANTINE" and "WAITING"
+                or (empty and "OK" or "ERROR")
         )
+
+        if chestState == "QUARANTINE" then
+            setCheck(
+                "movement",
+                false,
+                "waiting for orphan transfer chest quarantine to expire",
+                "WAITING"
+            )
+            self.startupReady = false
+            store.markStartupComplete(false)
+            self.statusMessage = tostring(emptyDetail)
+            self.startupRunning = false
+            return nil, "WAITING"
+        end
 
         local movementOK = false
         local movementDetail = "movement test prerequisites did not pass"
