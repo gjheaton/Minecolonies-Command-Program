@@ -728,6 +728,20 @@ function M.new(config, store, cluster, matcher, transfer)
                 false
         end
 
+        -- Serialize AutoCraft submissions. Existing-stock requests remain
+        -- fully active, but do not start a second RS craft while another
+        -- request's craft is still waiting/stabilizing/awaiting delivery.
+        for otherKey, otherJob in pairs(store.data.craftJobs or {}) do
+            if tostring(otherKey) ~= tostring(key)
+                and type(otherJob) == "table"
+                and tostring(otherJob.leaseState or "") ~= "stalled" then
+                return false,
+                    "another AutoCraft job is active; waiting to submit " ..
+                    tostring(candidate.name),
+                    false
+            end
+        end
+
         local craftable, source =
             matcher.craftable(transfer.playerRS, candidate, safeCall)
         if not craftable then return false, source, false end
