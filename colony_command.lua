@@ -8,12 +8,13 @@
 -- v3.0.0: Visitor job suitability analysis with overall/open-position
 --         recommendations based on MineColonies primary/secondary skills.
 -- v3.0.1: Citizens page BEST FIT column with current-job fit coloring.
+-- v3.0.2: Supply-style CHECK NOW / UPDATE button on the Home screen.
 
 local REFRESH_SECONDS = 10
 local RAID_BLINK_SECONDS = 0.75
 local TEXT_SCALE = 0.5
-local PROGRAM_VERSION = "3.0.1"
-local SUITE_VERSION = "3.0.9"
+local PROGRAM_VERSION = "3.0.2"
+local SUITE_VERSION = "3.0.10"
 
 local Util = require("colony.lib.util")
 local SharedUI = require("colony.lib.ui")
@@ -1216,6 +1217,7 @@ local listPage = {
 local detailScroll = 1
 local raidBlink = false
 local lastRefreshLabel = "just now"
+local checkingUpdate = false
 
 local function pageTitle()
     for _, p in ipairs(pages) do
@@ -1381,13 +1383,74 @@ local function drawHome()
     end
 
     fill(1, h - 1, w, h - 1, C.panel)
-    local refreshStart = math.max(1, w - 10)
-    writeAt(2, h - 1, "Auto-refresh: " .. REFRESH_SECONDS .. "s", C.dim, C.panel)
-    addButton("refresh", refreshStart, h - 1, w, h - 1, "REFRESH", C.navActive, C.navText, function()
-        refreshData()
-        updateSickTrigger()
-        lastRefreshLabel = "just now"
-    end)
+
+    local refreshWidth = 10
+    local refreshStart = math.max(1, w - refreshWidth + 1)
+
+    local updateLabel
+    local updateBg
+    if checkingUpdate then
+        updateLabel = "CHECKING..."
+        updateBg = C.nav
+    elseif UPDATE.availableVersion then
+        updateLabel = UPDATE.buttonLabel()
+            or ("UPDATE v" .. tostring(UPDATE.availableVersion))
+        updateBg = C.warn
+    else
+        updateLabel = "CHECK NOW"
+        updateBg = C.navActive
+    end
+
+    local updateWidth = math.min(
+        math.max(12, #tostring(updateLabel) + 2),
+        math.max(12, math.floor(w / 4))
+    )
+    local updateEnd = math.max(12, refreshStart - 2)
+    local updateStart = math.max(22, updateEnd - updateWidth + 1)
+
+    writeAt(
+        2, h - 1,
+        "Auto-refresh: " .. REFRESH_SECONDS .. "s",
+        C.dim, C.panel
+    )
+
+    addButton(
+        "home_update",
+        updateStart, h - 1, updateEnd, h - 1,
+        updateLabel,
+        updateBg, C.navText,
+        function()
+            if checkingUpdate then return end
+
+            if UPDATE.availableVersion then
+                installAvailableUpdate()
+                return
+            end
+
+            checkingUpdate = true
+            -- Show immediate feedback while the HTTP metadata request runs.
+            fill(updateStart, h - 1, updateEnd, h - 1, C.nav)
+            center(
+                h - 1, "CHECKING...", C.navText, C.nav,
+                updateStart, updateEnd
+            )
+
+            pcall(checkForUpdate)
+            checkingUpdate = false
+        end
+    )
+
+    addButton(
+        "refresh",
+        refreshStart, h - 1, w, h - 1,
+        "REFRESH",
+        C.navActive, C.navText,
+        function()
+            refreshData()
+            updateSickTrigger()
+            lastRefreshLabel = "just now"
+        end
+    )
 end
 
 -- =========================
