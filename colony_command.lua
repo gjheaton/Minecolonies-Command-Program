@@ -5,16 +5,19 @@
 -- v2.15: Shared-helper cleanup; no functional behavior changes.
 -- v2.16: Terminal layout aligned with Supply Manager; routine status/info
 --        lines removed so only warnings/errors appear below the health block.
+-- v3.0.0: Visitor job suitability analysis with overall/open-position
+--         recommendations based on MineColonies primary/secondary skills.
 
 local REFRESH_SECONDS = 10
 local RAID_BLINK_SECONDS = 0.75
 local TEXT_SCALE = 0.5
-local PROGRAM_VERSION = "2.16"
-local SUITE_VERSION = "1.1.28"
+local PROGRAM_VERSION = "3.0.0"
+local SUITE_VERSION = "3.0.7"
 
 local Util = require("colony.lib.util")
 local SharedUI = require("colony.lib.ui")
 local SuiteUpdater = require("colony.lib.updater")
+local VisitorJobs = require("colony.command.visitor_jobs")
 
 -- Suite update settings.
 local UPDATE_CHECK_SECONDS = 1800  -- Recheck suite package every 30 minutes
@@ -472,7 +475,7 @@ local hitButton = monitorUI.hitButton
 
 local D = {
     citizens = {}, buildings = {}, requests = {}, workOrders = {}, visitors = {},
-    helpWanted = {}, helpWantedOpenings = 0
+    visitorAnalysis = {}, helpWanted = {}, helpWantedOpenings = 0
 }
 
 local function buildingWorkers(building)
@@ -541,6 +544,7 @@ local SINGLE_WORKER_BUILDINGS = {
     blacksmith = true,
     builder = true, builderhut = true,
     chickenherder = true, chickenfarmer = true,
+    cowherder = true, cowboy = true,
     composter = true,
     concretemixer = true,
     cook = true, restaurant = true, kitchen = true, cookery = true,
@@ -562,6 +566,7 @@ local SINGLE_WORKER_BUILDINGS = {
     plantation = true,
     rabbitherder = true,
     sawmill = true,
+    sifter = true,
     school = true, -- teacher slot only; pupil seats are not Help Wanted jobs
     shepherd = true,
     smeltery = true,
@@ -678,6 +683,7 @@ local function buildHelpWantedList()
                 if openings > 0 then
                     rows[#rows + 1] = {
                         building = building,
+                        buildingKey = staffingBuildingKey(building),
                         capacity = capacity,
                         filled = filled,
                         openings = openings,
@@ -1003,6 +1009,7 @@ local function refreshData()
     D.helpWanted, D.helpWantedOpenings = buildHelpWantedList()
     sortByName(D.requests, "name")
     sortByName(D.visitors, "name")
+    D.visitorAnalysis = VisitorJobs.evaluateAll(D.visitors, D.helpWanted)
 
     D.idle = 0
     D.needFood = 0
