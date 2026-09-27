@@ -325,11 +325,28 @@ function M.new(config, store)
     function self.exportFilterForVariant(candidate, variant, count)
         count = math.max(1, math.floor(tonumber(count) or 1))
 
-        -- Ordinary non-NBT items use the proven AP/RS registry-name path.
-        -- Do NOT prefer a fingerprint simply because listItems() exposes one:
-        -- AP 0.7.x can return 0 for fingerprint exports which export normally
-        -- by registry name. Exact NBT variants remain fingerprint-only so RS
-        -- cannot substitute another same-name stack.
+        -- Equipment must be exported by the exact stored variant, even when
+        -- MineColonies made a generic/non-NBT class request. A name-only export
+        -- such as minecraft:iron_hoe can otherwise let RS substitute an
+        -- enchanted/damaged hoe with the same registry name.
+        if candidate.toolClass then
+            if variant
+                and type(variant.fingerprint) == "string"
+                and variant.fingerprint ~= "" then
+                return {
+                    fingerprint = variant.fingerprint,
+                    count = count,
+                }, "equipment-fingerprint"
+            end
+
+            return nil,
+                "selected equipment variant has no fingerprint; " ..
+                "refusing unsafe name-only export"
+        end
+
+        -- Ordinary non-NBT items keep the proven AP/RS registry-name path.
+        -- Exact NBT variants remain fingerprint-only so RS cannot substitute
+        -- another same-name stack.
         if not candidate.hasNBT then
             return { name = candidate.name, count = count }, "name"
         end
@@ -337,7 +354,10 @@ function M.new(config, store)
         if variant
             and type(variant.fingerprint) == "string"
             and variant.fingerprint ~= "" then
-            return { fingerprint = variant.fingerprint, count = count }, "fingerprint"
+            return {
+                fingerprint = variant.fingerprint,
+                count = count,
+            }, "fingerprint"
         end
 
         return nil, "exact NBT variant has no export fingerprint"
