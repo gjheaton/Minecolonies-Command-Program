@@ -283,6 +283,13 @@ function M.new(config, store)
             if self.id == self.masterId and sender == self.turnId then
                 masterAdvance("release from " .. tostring(sender))
             end
+        elseif kind == "hold_turn" then
+            -- The current turn owner may hold the shared PRS lease while an
+            -- asynchronous RS craft is running/settling. Refreshing the lease
+            -- prevents the master timeout from handing PRS to another colony.
+            if self.id == self.masterId and sender == self.turnId then
+                self.currentTurnStarted = now()
+            end
         elseif kind == "fault" then
             self.lastFault = {
                 id = sender,
@@ -411,6 +418,24 @@ function M.new(config, store)
                 version = 3,
                 id = self.id,
                 reason = tostring(reason or "release"),
+            })
+        end
+        return true
+    end
+
+    function self.holdTurn(reason)
+        if config.clusterEnabled ~= true then return true end
+        local s = self.status()
+        if not s.ok or s.turnId ~= self.id then return false end
+
+        if self.id == self.masterId then
+            self.currentTurnStarted = now()
+        else
+            send(self.masterId, {
+                kind = "hold_turn",
+                version = 3,
+                id = self.id,
+                reason = tostring(reason or "PRS busy"),
             })
         end
         return true
