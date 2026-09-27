@@ -9,15 +9,15 @@
 local mode, arg2, arg3 = ...
 
 local SUITE_INFO = {
-    suiteVersion = "1.1.28",
-    installerVersion = "1.1.28",
+    suiteVersion = "3.0.0",
+    installerVersion = "3.0.0",
     apps = {
         command = { version = "2.16", program = "/colony_command.lua", displayName = "MineColonies Command Center" },
-        supply = { version = "2.63", program = "/colony_supply.lua", displayName = "MineColonies Supply Manager" },
+        supply = { version = "3.0.0", program = "/colony_supply.lua", displayName = "MineColonies Supply Manager" },
     },
     components = {
         startup = "1.0.0", util = "1.1.0", ui = "1.1.0",
-        version = "1.0.0", updater = "1.1.1", installer = "1.1.28",
+        version = "1.0.0", updater = "1.1.1", installer = "3.0.0",
     },
 }
 
@@ -50,6 +50,13 @@ local PACKAGE_FILES = {
     { path = "/colony/lib/updater.lua", app = "common",  remote = "colony/lib/updater.lua" },
     { path = "/colony_command.lua",     app = "command", remote = "colony_command.lua" },
     { path = "/colony_supply.lua",      app = "supply",  remote = "colony_supply.lua" },
+    { path = "/colony/supply/config.lua",   app = "supply", remote = "colony/supply/config.lua" },
+    { path = "/colony/supply/state.lua",    app = "supply", remote = "colony/supply/state.lua" },
+    { path = "/colony/supply/cluster.lua",  app = "supply", remote = "colony/supply/cluster.lua" },
+    { path = "/colony/supply/matcher.lua",  app = "supply", remote = "colony/supply/matcher.lua" },
+    { path = "/colony/supply/transfer.lua", app = "supply", remote = "colony/supply/transfer.lua" },
+    { path = "/colony/supply/engine.lua",   app = "supply", remote = "colony/supply/engine.lua" },
+    { path = "/colony/supply/ui.lua",       app = "supply", remote = "colony/supply/ui.lua" },
 }
 
 local function setColor(c)
