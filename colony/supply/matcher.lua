@@ -173,6 +173,83 @@ function M.new(config, store)
         return canonical(requestItem.nbt) == canonical(storedItem.nbt)
     end
 
+    function self.requestAcceptsItem(request, physicalItem)
+        if type(request) ~= "table" or type(physicalItem) ~= "table"
+            or type(physicalItem.name) ~= "string"
+            or physicalItem.name == "" then
+            return false, nil, "invalid request or physical item"
+        end
+
+        local candidates, class = self.requestCandidates(request)
+
+        -- First prefer the strict exact alternative identity used everywhere
+        -- else in Supply.
+        for _, candidate in ipairs(candidates or {}) do
+            if self.exactlyMatches(candidate.raw, physicalItem) then
+                local accepted = {
+                    name = physicalItem.name,
+                    displayName = physicalItem.displayName
+                        or candidate.displayName
+                        or physicalItem.name,
+                    nbt = physicalItem.nbt,
+                    nbtCanonical = canonical(physicalItem.nbt),
+                    hasNBT = hasMeaningfulNBT(physicalItem),
+                    identity = identityFrom(physicalItem),
+                    namespace = namespace(physicalItem.name),
+                    toolClass = class,
+                    toolTier = toolTier({
+                        name = physicalItem.name,
+                        displayName = physicalItem.displayName,
+                    }),
+                    exactClass = true,
+                    raw = {
+                        name = physicalItem.name,
+                        nbt = physicalItem.nbt,
+                    },
+                }
+                return true, accepted, "exact request alternative"
+            end
+        end
+
+        -- Equipment requests are class requests in MineColonies. The physical
+        -- item may be a valid vanilla/MineColonies tool even when that exact
+        -- registry name was not present in the request's serialized alternative
+        -- list. Use the same class + namespace rules as normal Supply matching.
+        if class then
+            local ns = namespace(physicalItem.name)
+            local physicalCandidate = {
+                name = physicalItem.name,
+                displayName = physicalItem.displayName or physicalItem.name,
+                nbt = physicalItem.nbt,
+                nbtCanonical = canonical(physicalItem.nbt),
+                hasNBT = hasMeaningfulNBT(physicalItem),
+                identity = identityFrom(physicalItem),
+                namespace = ns,
+                toolClass = class,
+                toolTier = 0,
+                exactClass = true,
+                raw = {
+                    name = physicalItem.name,
+                    nbt = physicalItem.nbt,
+                },
+            }
+
+            if config.equipmentAllowedNamespaces[ns] ~= true then
+                return false, nil, "equipment namespace not allowed"
+            end
+            if not candidateMatchesClass(physicalCandidate, class) then
+                return false, nil, "physical item is not requested equipment class"
+            end
+
+            physicalCandidate.toolTier = toolTier(physicalCandidate)
+            return true, physicalCandidate,
+                "accepted " .. tostring(TOOL_WORDS[class] or class) ..
+                " equipment alternative"
+        end
+
+        return false, nil, "physical item does not match request"
+    end
+
     function self.requestCandidates(request)
         local out = {}
         local seen = {}
