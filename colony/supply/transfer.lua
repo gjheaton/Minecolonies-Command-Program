@@ -739,10 +739,13 @@ function M.new(config, store, matcher)
             stage = "staged",
             item = candidate.name,
             identity = candidate.identity,
+            nbt = candidate.nbt,
+            hasNBT = candidate.hasNBT == true,
             amount = quantity,
             requestId = meta.requestId,
             started = nowSeconds(),
             recovery = true,
+            destinationBaseline = floor(colonyBefore),
         }
         setPending(pending)
 
@@ -869,10 +872,13 @@ function M.new(config, store, matcher)
             stage = "exporting",
             item = candidate.name,
             identity = candidate.identity,
+            nbt = candidate.nbt,
+            hasNBT = candidate.hasNBT == true,
             amount = quantity,
             requestId = meta.requestId,
             started = nowSeconds(),
             filterMode = filterMode,
+            destinationBaseline = floor(colonyBefore),
         }
         setPending(pending)
 
@@ -1014,10 +1020,13 @@ function M.new(config, store, matcher)
             stage = "exporting",
             item = candidate.name,
             identity = candidate.identity,
+            nbt = candidate.nbt,
+            hasNBT = candidate.hasNBT == true,
             amount = quantity,
             requestId = meta.requestId,
             started = nowSeconds(),
             filterMode = mode,
+            destinationBaseline = floor(playerBefore),
         }
         setPending(pending)
 
@@ -1264,6 +1273,99 @@ function M.new(config, store, matcher)
             -- Keep a short fail-closed grace period for delayed inventory
             -- visibility, then retire the stale transaction instead of
             -- blocking startup forever.
+            if tostring(p.stage or "") == "confirming"
+                and floor(p.physicalAccepted) > 0 then
+
+                local direction = tostring(p.direction or "")
+                local destination
+                local destinationLabel
+
+                if direction == "PRS>CRS"
+                    or direction == "CHEST>CRS" then
+                    destination = self.colonyRS
+                    destinationLabel = "CRS"
+                elseif direction == "CRS>PRS"
+                    or direction == "CHEST>PRS" then
+                    destination = self.playerRS
+                    destinationLabel = "PRS"
+                end
+
+                local physicalAccepted = floor(p.physicalAccepted)
+                local baseline = tonumber(p.destinationBaseline)
+
+                if destination and baseline ~= nil then
+                    local candidate = {
+                        name = tostring(p.item or ""),
+                        nbt = p.nbt,
+                        hasNBT = p.hasNBT == true,
+                        identity = p.identity,
+                        raw = {
+                            name = tostring(p.item or ""),
+                            nbt = p.nbt,
+                        },
+                    }
+                    local current = rsAmount(destination, candidate)
+                    if current ~= nil
+                        and current >= floor(baseline) + physicalAccepted then
+                        local detail =
+                            "verified empty-chest confirming recovery to " ..
+                            destinationLabel .. ": " ..
+                            tostring(physicalAccepted) .. "x " ..
+                            tostring(p.item or "?")
+                        clearPending()
+                        store.addHistory("RECOVERY", {
+                            direction = direction,
+                            item = tostring(p.item or "?"),
+                            amount = physicalAccepted,
+                            requestId = p.requestId,
+                            detail = detail,
+                        })
+                        return true, detail
+                    end
+                end
+
+                local age = math.max(
+                    0,
+                    nowSeconds() - (tonumber(p.started) or nowSeconds())
+                )
+                local timeout = math.max(
+                    5,
+                    floor(config.confirmingEmptyRecoverySeconds or 30)
+                )
+
+                if age < timeout then
+                    return false,
+                        "pending " .. direction ..
+                        " stage=confirming; transfer chest is empty and " ..
+                        destinationLabel ..
+                        " confirmation is still pending; waiting " ..
+                        tostring(math.ceil(timeout - age)) .. "s fail-closed"
+                end
+
+                -- physicalAccepted is derived from the staged item leaving the
+                -- isolated transfer chest immediately after a destination
+                -- import call. At this point the physical transfer completed;
+                -- only RS list visibility failed to confirm it in time.
+                local detail =
+                    "retired stale confirming transaction after physical " ..
+                    "destination acceptance: " ..
+                    tostring(physicalAccepted) .. "x " ..
+                    tostring(p.item or "?") .. " to " ..
+                    tostring(destinationLabel or "destination") ..
+                    "; RS inventory confirmation remained unavailable"
+
+                clearPending()
+                store.addHistory("RECOVERY", {
+                    direction = direction,
+                    item = tostring(p.item or "?"),
+                    amount = physicalAccepted,
+                    requestId = p.requestId,
+                    detail = detail,
+                })
+                store.log("WARNING " .. detail)
+                return true, detail
+            end
+
             if tostring(p.stage or "") == "export_wait" then
                 local age = math.max(
                     0,
@@ -1400,6 +1502,11 @@ function M.new(config, store, matcher)
                 "cannot read " .. destinationLabel ..
                 " baseline while resuming pending transfer"
         end
+
+        p.destinationBaseline = floor(baseline)
+        p.nbt = candidate.nbt
+        p.hasNBT = candidate.hasNBT == true
+        setPending(p)
 
         local quantity = math.min(
             total,
