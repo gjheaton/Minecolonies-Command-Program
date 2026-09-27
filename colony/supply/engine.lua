@@ -34,17 +34,23 @@ local function requestActive(request)
     return requestCount(request) > 0
 end
 
-local function requestSignature(request, count)
-    local parts = { tostring(request.id or "?"), tostring(count or 0), tostring(request.name or "") }
+local function requestSignature(request, count, canonicalNBT)
+    local parts = {
+        tostring(request.id or "?"),
+        tostring(count or 0),
+        tostring(request.name or ""),
+    }
     if type(request.items) == "table" then
         local names = {}
         for _, item in pairs(request.items) do
             if type(item) == "table" and item.name then
-                names[#names + 1] = tostring(item.name) .. "|" .. tostring(item.nbt or "")
+                local nbt = type(canonicalNBT) == "function"
+                    and canonicalNBT(item.nbt) or tostring(item.nbt or "")
+                names[#names + 1] = tostring(item.name) .. "|" .. tostring(nbt)
             end
         end
         table.sort(names)
-        for _, v in ipairs(names) do parts[#parts + 1] = v end
+        for _, value in ipairs(names) do parts[#parts + 1] = value end
     end
     return table.concat(parts, "#")
 end
@@ -599,7 +605,7 @@ function M.new(config, store, cluster, matcher, transfer)
 
     local function processRequest(request)
         local count = requestCount(request)
-        local signature = requestSignature(request, count)
+        local signature = requestSignature(request, count, matcher.canonicalNBT)
         local ledger = ledgerFor(request.id)
 
         if ledger.signature and ledger.signature ~= signature then
@@ -831,8 +837,9 @@ function M.new(config, store, cluster, matcher, transfer)
             return tostring(a.id or "") < tostring(b.id or "")
         end)
 
+        self.stats.active = #activeRequests
+
         for _, request in ipairs(activeRequests) do
-            self.stats.active = self.stats.active + 1
             local row = processRequest(request)
             self.rows[#self.rows + 1] = row
 
