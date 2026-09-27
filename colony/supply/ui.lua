@@ -569,7 +569,19 @@ function M.new(config, store, cluster, transfer, engine, updater)
             or "Unknown item"
         )
 
-        local started = tonumber(recovery.firstSeen) or tonumber(e.epoch) or 0
+        local started = tonumber(recovery.firstSeen) or 0
+        local errorEpoch = tonumber(e.epoch) or 0
+        local errorSummary = type(e.context) == "table"
+            and tostring(e.context.detail or "") or ""
+
+        -- Only animate the error record which created the currently-active
+        -- quarantine. Historical orphan errors stay historical.
+        if started <= 0
+            or math.abs(errorEpoch - started) > 2
+            or (errorSummary ~= "" and errorSummary ~= summary) then
+            return nil
+        end
+
         local waitSeconds =
             math.max(30, math.floor(tonumber(config.orphanChestRecoverySeconds) or 180))
         local elapsed = math.max(0, os.epoch("utc") / 1000 - started)
