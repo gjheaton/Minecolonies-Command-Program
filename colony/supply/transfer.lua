@@ -896,9 +896,16 @@ function M.new(config, store, matcher)
         local chestAfterImport = self.chestCount(candidate)
         local physicalAccepted = math.max(0, physicallyExported - floor(chestAfterImport))
         if physicalAccepted <= 0 then
-            local okRollback, detail = self.rollbackChestToPlayer(candidate, physicallyExported)
-            if okRollback then clearPending() end
-            return false, "CRS import failed; " .. tostring(detail)
+            -- Fail closed. The exact requested item is safely staged in the
+            -- transfer chest, so do not bounce it back to PRS and trigger a
+            -- duplicate request/craft cycle during an RS/AP fault.
+            pending.stage = "staged"
+            pending.amount = physicallyExported
+            pending.lastError =
+                "CRS import moved 0; staged item retained for diagnosis/recovery"
+            setPending(pending)
+            return false,
+                "CRS import moved 0; requested item retained in transfer chest"
         end
 
         pending.stage = "confirming"
