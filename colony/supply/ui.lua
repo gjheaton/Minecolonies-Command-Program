@@ -9,6 +9,7 @@ function M.new(config, store, cluster, transfer, engine, updater)
     local self = {
         view = "home",
         historyPage = 1,
+        requestPage = 1,
         errorPage = 1,
         checkingUpdate = false,
         overridePage = 1,
@@ -25,6 +26,7 @@ function M.new(config, store, cluster, transfer, engine, updater)
     local tabs = {
         {id="home", label="HOME"},
         {id="health", label="HEALTH"},
+        {id="requests", label="REQUESTS"},
         {id="history", label="HISTORY"},
         {id="errors", label="ERRORS"},
         {id="settings", label="SETTINGS"},
@@ -48,6 +50,24 @@ function M.new(config, store, cluster, transfer, engine, updater)
 
     local function statusColor(ok)
         return ok and C.good or C.danger
+    end
+
+    local function requestStatusColor(status)
+        status = tostring(status or ""):upper()
+        if status == "MISSING"
+            or status == "ERROR"
+            or status == "BLOCKED"
+            or status == "ACK STALLED" then
+            return C.danger
+        end
+        if status == "IN PROGRESS" then
+            return C.good
+        end
+        if status:find("WAIT", 1, true)
+            or status:find("VERIFY", 1, true) then
+            return colors.lightBlue
+        end
+        return C.text
     end
 
     local function drawFrame(title, status, statusFg)
@@ -293,6 +313,55 @@ function M.new(config, store, cluster, transfer, engine, updater)
             y = y + 2
         end
 
+        local missing = h.missingRequests or {}
+        if #missing > 0 and y <= mh - 6 then
+            monitorUI.fillRow(y, C.panel)
+            monitorUI.center(
+                y,
+                "MISSING ITEMS (" .. tostring(#missing) .. ")",
+                C.danger, C.panel
+            )
+            y = y + 1
+
+            -- Preserve enough vertical space for Current Work. The full
+            -- shortage list is always available on the REQUESTS page.
+            local reserveForWork = 5
+            local availableLines = math.max(1, mh - y - reserveForWork)
+            local showCount = math.min(#missing, availableLines)
+
+            if #missing > showCount and showCount > 1 then
+                showCount = showCount - 1
+            end
+
+            for i = 1, showCount do
+                local row = missing[i]
+                monitorUI.fillRow(y, C.bg)
+                local qty = tonumber(row.remaining) or tonumber(row.requested) or 0
+                local itemText = tostring(
+                    row.displayName or row.item or row.name or "Unknown")
+                local text = tostring(qty) .. "x " .. itemText
+                monitorUI.writeAt(
+                    2, y,
+                    Util.clip(text, math.max(1, w - 2)),
+                    C.danger, C.bg
+                )
+                y = y + 1
+            end
+
+            if #missing > showCount and y <= mh - reserveForWork then
+                monitorUI.fillRow(y, C.bg)
+                monitorUI.writeAt(
+                    2, y,
+                    "+" .. tostring(#missing - showCount) ..
+                        " more - see REQUESTS",
+                    C.danger, C.bg
+                )
+                y = y + 1
+            end
+
+            if y <= mh - reserveForWork then y = y + 1 end
+        end
+
         local work = h.currentWork
         if work and y <= mh - 4 then
             local status = tostring(work.status or "UNKNOWN")
@@ -443,6 +512,120 @@ function M.new(config, store, cluster, transfer, engine, updater)
         local start = (page-1)*rowsPerPage+1
         for i=start,math.min(#data,start+rowsPerPage-1) do out[#out+1]=data[i] end
         return out,pages,page
+    end
+
+    local function drawRequests()
+        local w,h = monitorUI.size()
+        local snapshot = engine.healthSnapshot()
+        local data = snapshot.requestRows or {}
+        local missing = snapshot.missingRequests or {}
+        local rowsPerPage = math.max(1, h - 8)
+        local rows,pages,page = pagedRows(
+            data, self.requestPage, rowsPerPage)
+        self.requestPage = page
+
+        drawFrame(
+            "ACTIVE REQUESTS  " .. tostring(page) .. "/" .. tostring(pages),
+            "Active " .. tostring(#data) ..
+                "  |  Missing " .. tostring(#missing),
+            #missing > 0 and C.danger or C.good
+        )
+
+        local qtyW = 9
+        local statusW = 13
+        local usable = math.max(24, w - 5)
+        local itemW = math.max(16, math.floor(usable * 0.34))
+        local detailW = math.max(
+            8,
+            w - (2 + itemW + 1 + qtyW + 1 + statusW + 1)
+        )
+
+        local itemX = 2
+        local sep1X = itemX + itemW
+        local qtyX = sep1X + 1
+        local sep2X = qtyX + qtyW
+        local statusX = sep2X + 1
+        local sep3X = statusX + statusW
+        local detailX = sep3X + 1
+
+        monitorUI.fillRow(5, C.panel)
+        monitorUI.writeAt(itemX,5,Util.padRight("ITEM",itemW),C.dim,C.panel)
+        monitorUI.writeAt(sep1X,5,"|",C.dim,C.panel)
+        monitorUI.writeAt(qtyX,5,Util.padRight("REM/QTY",qtyW),C.dim,C.panel)
+        monitorUI.writeAt(sep2X,5,"|",C.dim,C.panel)
+        monitorUI.writeAt(statusX,5,Util.padRight("STATUS",statusW),C.dim,C.panel)
+        monitorUI.writeAt(sep3X,5,"|",C.dim,C.panel)
+        monitorUI.writeAt(
+            detailX,5,
+            Util.padRight("DETAIL",math.max(1,w-detailX+1)),
+            C.dim,C.panel
+        )
+
+        local y=6
+        for _,row in ipairs(rows) do
+            local bg=(y%2==0) and C.bg or C.panel
+            monitorUI.fillRow(y,bg)
+
+            local itemText=tostring(
+                row.displayName or row.item or row.name or "Unknown")
+            local qtyText=tostring(row.remaining or row.requested or 0) ..
+                "/" .. tostring(row.requested or 0)
+            local status=tostring(row.status or "WAITING")
+            local detail=tostring(row.detail or "")
+
+            monitorUI.writeAt(
+                itemX,y,Util.padRight(Util.clip(itemText,itemW),itemW),
+                status=="MISSING" and C.danger or C.text,bg
+            )
+            monitorUI.writeAt(sep1X,y,"|",C.dim,bg)
+            monitorUI.writeAt(
+                qtyX,y,Util.padRight(Util.clip(qtyText,qtyW),qtyW),
+                C.text,bg
+            )
+            monitorUI.writeAt(sep2X,y,"|",C.dim,bg)
+            monitorUI.writeAt(
+                statusX,y,
+                Util.padRight(Util.clip(status,statusW),statusW),
+                requestStatusColor(status),bg
+            )
+            monitorUI.writeAt(sep3X,y,"|",C.dim,bg)
+            monitorUI.writeAt(
+                detailX,y,
+                Util.clip(detail,math.max(1,w-detailX+1)),
+                C.dim,bg
+            )
+            y=y+1
+        end
+
+        if #data==0 then
+            monitorUI.center(
+                7,
+                "No active MineColonies requests.",
+                C.good,C.bg
+            )
+        end
+
+        monitorUI.addButton(
+            "req_prev",1,h-1,math.floor(w/3),h-1,"PREV",
+            C.nav,C.navText,function()
+                self.requestPage=math.max(1,self.requestPage-1)
+                self.draw()
+            end
+        )
+        monitorUI.addButton(
+            "req_refresh",math.floor(w/3)+1,h-1,
+            math.floor(2*w/3),h-1,"REFRESH",
+            C.navActive,C.navText,function()
+                self.draw()
+            end
+        )
+        monitorUI.addButton(
+            "req_next",math.floor(2*w/3)+1,h-1,w,h-1,"NEXT",
+            C.nav,C.navText,function()
+                self.requestPage=math.min(pages,self.requestPage+1)
+                self.draw()
+            end
+        )
     end
 
     local function drawHistory()
@@ -966,6 +1149,7 @@ function M.new(config, store, cluster, transfer, engine, updater)
         if not transfer.monitor then return false end
         if self.view=="home" then drawHome()
         elseif self.view=="health" then drawHealth()
+        elseif self.view=="requests" then drawRequests()
         elseif self.view=="history" then drawHistory()
         elseif self.view=="errors" then drawErrors()
         elseif self.view=="settings" then drawSettings()
@@ -1053,6 +1237,7 @@ function M.new(config, store, cluster, transfer, engine, updater)
             elseif ev=="timer" and a==refreshTimer then
                 if self.view=="home"
                     or self.view=="health"
+                    or self.view=="requests"
                     or self.view=="errors" then
                     pcall(self.draw)
                 end
