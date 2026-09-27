@@ -1223,19 +1223,9 @@ function M.new(config, store, matcher)
         end
 
         if next(list) == nil then
-            -- A bridge-acknowledged export must never be silently cleared just
-            -- because CC has not observed the staged item yet.
-            if tostring(p.stage or "") == "export_wait"
-                or floor(p.bridgeMoved) > 0 then
-                return false,
-                    "pending " .. tostring(p.direction or "?") ..
-                    " export was acknowledged by bridge but transfer chest " ..
-                    "is not visible yet; waiting fail-closed"
-            end
-
-            -- Before treating a later-stage empty chest as ambiguous, check
-            -- whether a stale saved chest binding caused us to read the wrong
-            -- inventory.
+            -- Before treating an empty selected chest as a failed/ambiguous
+            -- transaction, check whether the staged item appeared in another
+            -- barrel-like inventory because an older saved binding was stale.
             if tostring(p.stage or "") ~= "exporting"
                 and p.item ~= nil then
                 local alternate, alternateErr =
@@ -1266,6 +1256,51 @@ function M.new(config, store, matcher)
                         "pending transfer chest identity ambiguous: " ..
                         tostring(alternateErr)
                 end
+            end
+
+            -- export_wait is still pre-destination: the source bridge reported
+            -- movement, but Supply never observed the item in the transfer
+            -- chest and therefore never attempted the destination import.
+            -- Keep a short fail-closed grace period for delayed inventory
+            -- visibility, then retire the stale transaction instead of
+            -- blocking startup forever.
+            if tostring(p.stage or "") == "export_wait" then
+                local age = math.max(
+                    0,
+                    nowSeconds() - (tonumber(p.started) or nowSeconds())
+                )
+                local timeout = math.max(
+                    5,
+                    floor(config.exportWaitRecoverySeconds or 30)
+                )
+
+                if age < timeout then
+                    return false,
+                        "pending " .. tostring(p.direction or "?") ..
+                        " export was acknowledged by bridge but transfer chest " ..
+                        "is not visible yet; waiting " ..
+                        tostring(math.ceil(timeout - age)) .. "s fail-closed"
+                end
+
+                local detail =
+                    "retired stale pre-destination " ..
+                    tostring(p.direction or "?") .. " " ..
+                    tostring(p.item or "?") ..
+                    " after " .. tostring(math.floor(age)) ..
+                    "s; bridge reported " ..
+                    tostring(floor(p.bridgeMoved)) ..
+                    " moved but no transfer-chest item was ever observed"
+
+                clearPending()
+                store.addHistory("RECOVERY", {
+                    direction = tostring(p.direction or "?"),
+                    item = tostring(p.item or "?"),
+                    amount = floor(p.amount),
+                    requestId = p.requestId,
+                    detail = detail,
+                })
+                store.log("WARNING " .. detail)
+                return true, detail
             end
 
             -- A pre-staged export with no bridge acknowledgement and an empty
