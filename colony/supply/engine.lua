@@ -74,6 +74,18 @@ function M.new(config, store, cluster, matcher, transfer)
         statusMessage = "Starting",
     }
 
+    -- REQUESTS is display/diagnostic data. Keep it deliberately low-pressure
+    -- so adding the page does not turn into a burst of PRS/AP calls every
+    -- processor tick.
+    local requestStatusLastBuild = 0
+    local requestStatusSignature = ""
+    local craftableCache = {
+        lastAttempt = 0,
+        lastSuccess = 0,
+        ok = false,
+        names = {},
+    }
+
     local recoverRequestedChestToCRS
 
     local function safeCall(obj, method, ...)
@@ -1486,14 +1498,26 @@ function M.new(config, store, cluster, matcher, transfer)
             }
         end
 
+        if candidate.craftable then
+            return {
+                id=tostring(request.id),
+                name=tostring(request.name or "Request"),
+                requested=count,
+                item=candidate.name,
+                status="WAITING",
+                detail="exact item is craftable; AutoCraft is disabled",
+                usedPRSTurn=false,
+            }
+        end
+
         return {
             id=tostring(request.id),
             name=tostring(request.name or "Request"),
             requested=count,
             item=candidate.name,
             status="MISSING",
-            detail=candidate.craftable and "AutoCraft disabled"
-                or tostring(candidate.craftSource or "no exact stock or recipe"),
+            detail=tostring(candidate.craftSource or
+                "no exact stock or recipe"),
             usedPRSTurn=false,
         }
     end
@@ -1514,45 +1538,92 @@ function M.new(config, store, cluster, matcher, transfer)
         return status
     end
 
+    local function requestStatusActiveSignature(activeRequests)
+        local parts = {}
+        for _, request in ipairs(activeRequests or {}) do
+            parts[#parts + 1] =
+                tostring(request.id or "?") .. ":" ..
+                tostring(requestCount(request)) .. ":" ..
+                tostring(request.name or "")
+        end
+        table.sort(parts)
+        return table.concat(parts, "|")
+    end
+
+    local function refreshCraftableCache(now)
+        local refreshSeconds =
+            math.max(30, floor(config.requestCraftableRefreshSeconds or 60))
+
+        if craftableCache.lastAttempt > 0
+            and now - craftableCache.lastAttempt < refreshSeconds then
+            return
+        end
+
+        craftableCache.lastAttempt = now
+        local ok, list = safeCall(
+            transfer.playerRS, "listCraftableItems")
+
+        if ok and type(list) == "table" then
+            local names = {}
+            for _, item in pairs(list) do
+                if type(item) == "table" and item.name then
+                    names[tostring(item.name)] = true
+                end
+            end
+            craftableCache.names = names
+            craftableCache.ok = true
+            craftableCache.lastSuccess = now
+        elseif craftableCache.lastSuccess <= 0 then
+            craftableCache.ok = false
+            craftableCache.names = {}
+        end
+    end
+
     local function buildRequestStatusRows(activeRequests)
+        local now = nowSeconds()
+        local activeSignature =
+            requestStatusActiveSignature(activeRequests)
+        local refreshSeconds =
+            math.max(10, floor(config.requestStatusRefreshSeconds or 15))
+
+        if #self.requestRows > 0
+            and activeSignature == requestStatusSignature
+            and requestStatusLastBuild > 0
+            and now - requestStatusLastBuild < refreshSeconds then
+            return self.requestRows
+        end
+
+        requestStatusLastBuild = now
+        requestStatusSignature = activeSignature
+
         local rows = {}
-        local okItems, inventory = safeCall(transfer.playerRS, "listItems")
+        local okItems, inventory =
+            safeCall(transfer.playerRS, "listItems")
         if not okItems or type(inventory) ~= "table" then
             inventory = {}
         end
 
-        local craftableNames = {}
-        local okCraftList, craftList =
-            safeCall(transfer.playerRS, "listCraftableItems")
-        if okCraftList and type(craftList) == "table" then
-            for _, item in pairs(craftList) do
-                if type(item) == "table" and item.name then
-                    craftableNames[tostring(item.name)] = true
-                end
-            end
-        end
+        refreshCraftableCache(now)
 
-        local craftCache = {}
         local function craftLookup(candidate)
-            local key = tostring(candidate.identity or candidate.name)
-            local cached = craftCache[key]
-            if cached then
-                return cached.ok, cached.source
+            -- Exact-NBT craftability is intentionally left to the normal
+            -- processing path. Probing isItemCraftable/getPattern for every
+            -- NBT request just to paint the monitor can hammer RS.
+            if candidate.hasNBT then
+                return nil,
+                    "exact-NBT craftability checked during processing",
+                    false
             end
 
-            if not candidate.hasNBT
-                and craftableNames[tostring(candidate.name)] then
-                craftCache[key] = {
-                    ok = true,
-                    source = "listCraftableItems",
-                }
-                return true, "listCraftableItems"
+            if craftableCache.ok then
+                local craftable =
+                    craftableCache.names[tostring(candidate.name)] == true
+                return craftable,
+                    "cached listCraftableItems",
+                    true
             end
 
-            local ok, source =
-                matcher.craftable(transfer.playerRS, candidate, safeCall)
-            craftCache[key] = { ok = ok == true, source = source }
-            return ok == true, source
+            return nil, "craftable list unavailable", false
         end
 
         local pending = store.data.pending
@@ -1561,7 +1632,8 @@ function M.new(config, store, cluster, matcher, transfer)
             local count = requestCount(request)
             local signature = requestSignature(
                 request, count, matcher.canonicalNBT)
-            local ledger = store.data.requestLedger[tostring(request.id)] or {}
+            local ledger =
+                store.data.requestLedger[tostring(request.id)] or {}
             local sent = ledger.signature == signature
                 and floor(ledger.sentTotal or ledger.lastSent)
                 or 0
@@ -1585,8 +1657,14 @@ function M.new(config, store, cluster, matcher, transfer)
                 displayName = candidate and tostring(
                     candidate.displayName or candidate.name)
                     or tostring(request.name or "Request"),
-                prsStock = candidate and floor(candidate.stock) or 0,
-                craftable = candidate and candidate.craftable == true or false,
+                prsStock =
+                    candidate and floor(candidate.stock) or 0,
+                craftable =
+                    candidate and candidate.craftable == true or false,
+                craftabilityKnown =
+                    candidate
+                    and candidate.craftabilityKnown == true
+                    or false,
                 status = "WAITING",
                 detail = "",
                 class = class,
@@ -1599,15 +1677,18 @@ function M.new(config, store, cluster, matcher, transfer)
                 row.status = "MISSING"
                 row.detail = tostring(
                     chooseErr
-                    or ("no acceptable " .. tostring(class or "item") ..
+                    or ("no acceptable " ..
+                        tostring(class or "item") ..
                         " candidate"))
             elseif type(pending) == "table"
-                and tostring(pending.requestId or "") == tostring(request.id) then
+                and tostring(pending.requestId or "")
+                    == tostring(request.id) then
                 row.status = "IN PROGRESS"
                 row.detail = "transfer chest stage " ..
                     tostring(pending.stage or "unknown")
             elseif ledger.signature == signature and sent > 0 then
-                local phase = tostring(ledger.phase or "DELIVERING")
+                local phase = tostring(
+                    ledger.phase or "DELIVERING")
                 row.status = displayRequestStatus(phase)
                 if row.status == "DELIVERING" then
                     row.status = "IN PROGRESS"
@@ -1618,23 +1699,35 @@ function M.new(config, store, cluster, matcher, transfer)
                         "/" .. tostring(count) ..
                         "; phase=" .. tostring(phase)))
             else
-                local craftKey = candidate.identity or candidate.name
-                local craftJob = store.data.craftJobs[craftKey]
-                if type(craftJob) == "table" or type(craftJob) == "number" then
+                local craftKey =
+                    candidate.identity or candidate.name
+                local craftJob =
+                    store.data.craftJobs[craftKey]
+
+                if type(craftJob) == "table"
+                    or type(craftJob) == "number" then
                     row.status = "IN PROGRESS"
-                    row.detail = "craft job active; waiting for exact PRS output"
+                    row.detail =
+                        "craft job active; waiting for exact PRS output"
                 elseif floor(candidate.stock) > 0 then
                     row.status = "WAITING"
                     row.detail = "exact PRS stock available (" ..
                         tostring(floor(candidate.stock)) .. ")"
                 elseif candidate.craftable == true then
                     row.status = "WAITING"
-                    row.detail = store.data.settings.autoCraftEnabled == true
+                    row.detail =
+                        store.data.settings.autoCraftEnabled == true
                         and "exact item craftable; waiting for processing turn"
                         or "exact item craftable; AutoCraft is disabled"
+                elseif candidate.craftabilityKnown == false then
+                    row.status = "WAITING"
+                    row.detail = tostring(
+                        candidate.craftSource
+                        or "craftability check pending")
                 else
                     row.status = "MISSING"
-                    row.detail = "no exact PRS inventory and no exact craft path"
+                    row.detail =
+                        "no exact PRS inventory and no exact craft path"
                 end
             end
 
