@@ -184,33 +184,133 @@ function M.new(config, store, cluster, transfer, engine, updater)
         end
     end
 
+    local function errorReason(e)
+        local context = type(e) == "table" and e.context or nil
+        if type(context) ~= "table" then return nil end
+
+        local parts = {}
+
+        local function add(label, value)
+            if value == nil then return end
+            local text = tostring(value)
+            if text == "" then return end
+            parts[#parts + 1] = (label and (label .. ": ") or "") .. text
+        end
+
+        add(nil, context.reason)
+        add(nil, context.detail)
+        add(nil, context.error)
+
+        if type(context.checks) == "table" then
+            local ids = {}
+            for id in pairs(context.checks) do ids[#ids + 1] = tostring(id) end
+            table.sort(ids)
+            for _, id in ipairs(ids) do
+                local check = context.checks[id]
+                if type(check) == "table" and check.ok ~= true then
+                    add(id, check.detail or check.reason or check.message)
+                end
+            end
+        end
+
+        if type(context.extra) == "table" then
+            add(nil, context.extra.detail)
+            add("CRS error", context.extra.crsError)
+        end
+
+        if #parts == 0 then
+            add("Request", context.requestId)
+            add("Item", context.item)
+        end
+
+        if #parts == 0 then return nil end
+        return table.concat(parts, " | ")
+    end
+
     local function drawErrors()
         local w,h = monitorUI.size()
-        local rows,pages,page = pagedRows(store.data.errors or {},self.errorPage,math.max(1,h-7))
-        self.errorPage=page
-        drawFrame("ERROR / DEBUG DETAILS  " .. page .. "/" .. pages,
-            #(store.data.errors or {}) > 0 and (tostring(#(store.data.errors or {})).." recorded") or "No recorded errors",
-            #(store.data.errors or {}) > 0 and C.warn or C.good)
-        local y=5
-        for _,e in ipairs(rows) do
-            local line = tostring(e.time or "--:--:--") .. " [" .. tostring(e.severity or "ERROR") .. "] " ..
-                tostring(e.code or "") .. ": " .. tostring(e.message or "")
-            monitorUI.fillRow(y,(y%2==0) and C.panel or C.bg)
-            monitorUI.writeAt(2,y,Util.clip(line,w-2),e.severity=="WARNING" and C.warn or C.danger,(y%2==0) and C.panel or C.bg)
-            y=y+1
+        local errors = store.data.errors or {}
+        local pages = math.max(1, #errors)
+        self.errorPage = math.max(1, math.min(self.errorPage, pages))
+
+        drawFrame(
+            "ERROR / DEBUG DETAILS  " .. tostring(self.errorPage) .. "/" .. tostring(pages),
+            #errors > 0 and (tostring(#errors) .. " recorded") or "No recorded errors",
+            #errors > 0 and C.warn or C.good
+        )
+
+        local y = 5
+        local bottom = math.max(5, h - 2)
+
+        if #errors == 0 then
+            monitorUI.center(y + 1, "No recorded errors.", C.good, C.bg)
+        else
+            local e = errors[self.errorPage]
+            local header = tostring(e.time or "--:--:--") ..
+                "  [" .. tostring(e.severity or "ERROR") .. "]"
+            monitorUI.fillRow(y, C.panel)
+            monitorUI.writeAt(
+                2, y, Util.clip(header, math.max(1, w - 2)),
+                e.severity == "WARNING" and C.warn or C.danger, C.panel)
+            y = y + 1
+
+            monitorUI.fillRow(y, C.bg)
+            monitorUI.writeAt(2, y, "Code: " .. tostring(e.code or "ERROR"), C.title, C.bg)
+            y = y + 1
+
+            local function drawWrapped(label, text, color)
+                if y > bottom or text == nil or tostring(text) == "" then return end
+                monitorUI.fillRow(y, C.bg)
+                monitorUI.writeAt(2, y, label, C.dim, C.bg)
+                y = y + 1
+
+                local width = math.max(8, w - 4)
+                local lines = Util.wrapText(tostring(text), width)
+                for _, line in ipairs(lines) do
+                    if y > bottom then break end
+                    monitorUI.fillRow(y, C.bg)
+                    monitorUI.writeAt(3, y, Util.clip(line, width), color or C.text, C.bg)
+                    y = y + 1
+                end
+            end
+
+            drawWrapped("Message:", e.message, C.text)
+            drawWrapped("Reason:", errorReason(e) or "No additional reason recorded.", C.warn)
         end
-        monitorUI.addButton("err_prev",1,h-1,math.floor(w/4),h-1,"PREV",C.nav,C.navText,function()
-            self.errorPage=math.max(1,self.errorPage-1); self.draw()
-        end)
-        monitorUI.addButton("err_refresh",math.floor(w/4)+1,h-1,math.floor(w/2),h-1,"REFRESH",C.navActive,C.navText,function()
-            self.draw()
-        end)
-        monitorUI.addButton("err_clear",math.floor(w/2)+1,h-1,math.floor(3*w/4),h-1,"CLEAR",C.warn,C.navText,function()
-            store.clearErrors(); self.errorPage=1; self.draw()
-        end)
-        monitorUI.addButton("err_next",math.floor(3*w/4)+1,h-1,w,h-1,"NEXT",C.nav,C.navText,function()
-            self.errorPage=math.min(pages,self.errorPage+1); self.draw()
-        end)
+
+        monitorUI.addButton(
+            "err_prev", 1, h - 1, math.floor(w / 4), h - 1, "PREV",
+            C.nav, C.navText,
+            function()
+                self.errorPage = math.max(1, self.errorPage - 1)
+                self.draw()
+            end
+        )
+        monitorUI.addButton(
+            "err_refresh", math.floor(w / 4) + 1, h - 1,
+            math.floor(w / 2), h - 1, "REFRESH",
+            C.navActive, C.navText,
+            function() self.draw() end
+        )
+        monitorUI.addButton(
+            "err_clear", math.floor(w / 2) + 1, h - 1,
+            math.floor(3 * w / 4), h - 1, "CLEAR",
+            C.warn, C.navText,
+            function()
+                store.clearErrors()
+                self.errorPage = 1
+                self.draw()
+            end
+        )
+        monitorUI.addButton(
+            "err_next", math.floor(3 * w / 4) + 1, h - 1,
+            w, h - 1, "NEXT",
+            C.nav, C.navText,
+            function()
+                self.errorPage = math.min(math.max(1, #errors), self.errorPage + 1)
+                self.draw()
+            end
+        )
     end
 
     local function drawSettings()
