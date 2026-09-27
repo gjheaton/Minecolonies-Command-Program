@@ -1461,9 +1461,10 @@ local function drawListPage(page)
     local citizenTable = (page == "citizens")
     local buildingTable = (page == "buildings")
     local helpTable = (page == "help")
+    local visitorTable = (page == "visitors")
     local requestTable = (page == "requests")
     local orderTable = (page == "orders")
-    local fixedTable = citizenTable or buildingTable or helpTable or requestTable or orderTable
+    local fixedTable = citizenTable or buildingTable or helpTable or visitorTable or requestTable or orderTable
     local top = fixedTable and 6 or 5
     local bottom = h - 2
     local rows = math.max(1, bottom - top + 1)
@@ -1604,6 +1605,49 @@ local function drawListPage(page)
         writeAt(columns.filledX, 5, pad("FILLED", columns.filledW), colors.black, C.panel2)
         writeAt(columns.sep3X, 5, "|", colors.gray, C.panel2)
         writeAt(columns.openX, 5, pad("OPEN", columns.openW), colors.black, C.panel2)
+
+    elseif visitorTable then
+        -- Visitor evaluation: NAME | BEST FIT | OPEN FIT | RECRUIT COST
+        local usable = w - 2
+        local separatorCount = 3
+        local content = math.max(28, usable - separatorCount)
+
+        local nameW = math.max(12, math.floor(content * 0.24))
+        local bestW = math.max(14, math.floor(content * 0.25))
+        local openW = math.max(14, math.floor(content * 0.25))
+        local costW = content - nameW - bestW - openW
+
+        while costW < 12 and (nameW > 12 or bestW > 14 or openW > 14) do
+            if nameW > 12 then nameW = nameW - 1
+            elseif bestW > 14 then bestW = bestW - 1
+            elseif openW > 14 then openW = openW - 1 end
+            costW = content - nameW - bestW - openW
+        end
+        costW = math.max(1, costW)
+
+        local nameX = 2
+        local sep1X = nameX + nameW
+        local bestX = sep1X + 1
+        local sep2X = bestX + bestW
+        local openX = sep2X + 1
+        local sep3X = openX + openW
+        local costX = sep3X + 1
+
+        columns = {
+            nameX = nameX, nameW = nameW, sep1X = sep1X,
+            bestX = bestX, bestW = bestW, sep2X = sep2X,
+            openX = openX, openW = openW, sep3X = sep3X,
+            costX = costX, costW = math.max(1, w - costX + 1),
+        }
+
+        fill(1, 5, w, 5, C.panel2)
+        writeAt(columns.nameX, 5, pad("NAME", columns.nameW), colors.black, C.panel2)
+        writeAt(columns.sep1X, 5, "|", colors.gray, C.panel2)
+        writeAt(columns.bestX, 5, pad("BEST FIT", columns.bestW), colors.black, C.panel2)
+        writeAt(columns.sep2X, 5, "|", colors.gray, C.panel2)
+        writeAt(columns.openX, 5, pad("BEST OPEN", columns.openW), colors.black, C.panel2)
+        writeAt(columns.sep3X, 5, "|", colors.gray, C.panel2)
+        writeAt(columns.costX, 5, pad("RECRUIT COST", columns.costW), colors.black, C.panel2)
 
     elseif requestTable then
         -- Fixed-column request table tuned for the 5x3 monitor.
