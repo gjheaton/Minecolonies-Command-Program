@@ -4,7 +4,7 @@
 
 local M = {}
 
-M.COMPONENT_VERSION = "1.0.0"
+M.COMPONENT_VERSION = "1.1.0"
 M.PRIMARY_WEIGHT = 0.65
 M.SECONDARY_WEIGHT = 0.35
 
@@ -67,6 +67,60 @@ local JOBS = {
 }
 
 M.JOBS = JOBS
+
+-- Current MineColonies job identifiers / display aliases that correspond to
+-- the recommendation IDs above. This keeps Citizens-page matching accurate
+-- even when AP returns registry IDs while the UI shows friendlier names.
+local CURRENT_JOB_ALIASES = {
+    composter = {"composter"},
+    farmer = {"farmer"},
+    planter = {"planter"},
+    florist = {"florist"},
+    beekeeper = {"beekeeper"},
+    chickenherder = {"chickenherder", "chickenfarmer"},
+    cowboy = {"cowboy", "cowherder"},
+    stablemaster = {"stablemaster"},
+    fisherman = {"fisherman", "fisher"},
+    rabbitherder = {"rabbitherder"},
+    shepherd = {"shepherd"},
+    swineherder = {"swineherder"},
+
+    alchemist = {"alchemist"},
+    baker = {"baker"},
+    blacksmith = {"blacksmith"},
+    concretemixer = {"concretemixer"},
+    crusher = {"crusher"},
+    dyer = {"dyer"},
+    fletcher = {"fletcher"},
+    glassblower = {"glassblower"},
+    mechanic = {"mechanic"},
+    sawmill = {"sawmill"},
+    sifter = {"sifter"},
+    smelter = {"smelter"},
+    stonemason = {"stonemason"},
+    stonesmelter = {"stonesmeltery", "stonesmelter"},
+
+    courier = {"deliveryman", "delivery", "courier"},
+    teacher = {"teacher"},
+    researcher = {"researcher"},
+    builder = {"builder"},
+    cook = {"cook"},
+    chef = {"chef"},
+    lumberjack = {"lumberjack", "forester"},
+    healer = {"healer"},
+    miner = {"miner"},
+    quarrier = {"quarrier"},
+    enchanter = {"enchanter"},
+    undertaker = {"undertaker"},
+    netherworker = {"netherworker"},
+
+    knight = {"knight", "combattraining", "knighttraining", "knighttrainee"},
+    ranger = {"ranger", "archer", "archertraining", "archertrainee"},
+    druid = {"druid"},
+    marksman = {"marksman"},
+    huscarl = {"huscarl"},
+    cavalry = {"cavalry"},
+}
 
 local function norm(value)
     return tostring(value or ""):lower():gsub("[^%w]", "")
@@ -196,6 +250,55 @@ local function ranked(visitor, openJobs, openOnly)
     end)
 
     return rows
+end
+
+function M.bestJob(person)
+    local rows = ranked(person, nil, false)
+    return rows[1], rows
+end
+
+function M.currentJobMatches(currentJob, recommendation)
+    if type(recommendation) ~= "table" then return false end
+    local current = norm(currentJob)
+    if current == "" or current == "nojob" or current == "worker" then
+        return false
+    end
+
+    local aliases = CURRENT_JOB_ALIASES[recommendation.id] or {}
+    for _, alias in ipairs(aliases) do
+        if current == norm(alias) then return true end
+    end
+
+    -- Label comparison is a safe final fallback for localized/friendly values
+    -- already normalized by the Command Center.
+    return current == norm(recommendation.label)
+end
+
+function M.jobFitForCitizen(citizen, currentJob)
+    if type(citizen) ~= "table" then
+        return { applicable=false, reason="invalid citizen" }
+    end
+
+    local age = norm(citizen.age)
+    local job = norm(currentJob)
+    if age == "child"
+        or job == "child"
+        or job == "pupil"
+        or job == "student" then
+        return {
+            applicable = false,
+            reason = "training/child",
+            best = nil,
+            matches = nil,
+        }
+    end
+
+    local best = M.bestJob(citizen)
+    return {
+        applicable = best ~= nil,
+        best = best,
+        matches = best and M.currentJobMatches(currentJob, best) or false,
+    }
 end
 
 local function topN(rows, count)
