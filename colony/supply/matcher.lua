@@ -305,6 +305,74 @@ function M.new(config, store)
         return false, "no exact crafting recipe reported"
     end
 
+    function self.chooseFromSnapshot(request, inventoryItems, craftableLookup, remaining)
+        local candidates, class = self.requestCandidates(request)
+        if #candidates == 0 then
+            return nil, class, "no acceptable candidates"
+        end
+
+        inventoryItems = type(inventoryItems) == "table" and inventoryItems or {}
+
+        for _, candidate in ipairs(candidates) do
+            local variants, total = {}, 0
+            for _, item in pairs(inventoryItems) do
+                if type(item) == "table"
+                    and item.name == candidate.name
+                    and self.exactlyMatches(candidate.raw, item) then
+                    local amount = math.max(
+                        0, math.floor(tonumber(item.amount) or 0))
+                    if amount > 0 then
+                        variants[#variants + 1] = {
+                            name = item.name,
+                            amount = amount,
+                            nbt = item.nbt,
+                            fingerprint = item.fingerprint,
+                            displayName = item.displayName,
+                            raw = item,
+                        }
+                        total = total + amount
+                    end
+                end
+            end
+
+            table.sort(variants, function(a, b)
+                return a.amount > b.amount
+            end)
+
+            candidate.variants = variants
+            candidate.stock = total
+
+            if type(craftableLookup) == "function" then
+                local ok, source = craftableLookup(candidate)
+                candidate.craftable = ok == true
+                candidate.craftSource = source
+            else
+                candidate.craftable = false
+                candidate.craftSource = "craftability not checked"
+            end
+        end
+
+        table.sort(candidates, function(a, b)
+            if class and a.toolTier ~= b.toolTier then
+                return a.toolTier > b.toolTier
+            end
+
+            local aFull = a.stock >= remaining and remaining > 0
+            local bFull = b.stock >= remaining and remaining > 0
+            if aFull ~= bFull then return aFull end
+
+            local aAny = a.stock > 0
+            local bAny = b.stock > 0
+            if aAny ~= bAny then return aAny end
+
+            if a.craftable ~= b.craftable then return a.craftable end
+            if a.stock ~= b.stock then return a.stock > b.stock end
+            return a.identity < b.identity
+        end)
+
+        return candidates[1], class, nil
+    end
+
     function self.choose(request, playerBridge, safeCall, remaining)
         local candidates, class = self.requestCandidates(request)
         if #candidates == 0 then
