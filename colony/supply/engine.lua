@@ -368,7 +368,7 @@ function M.new(config, store, cluster, matcher, transfer)
             ledger.retryCraftRequestedAt = nil
         else
             ledger.retryCount = floor(ledger.retryCount)
-            ledger.phase = "WAITING_ACK"
+            ledger.phase = "DELIVERING"
         end
 
         ledger.stallRecorded = nil
@@ -489,8 +489,10 @@ function M.new(config, store, cluster, matcher, transfer)
             local craftable = matcher.craftable(
                 transfer.playerRS, candidate, safeCall)
             if craftable then
+                local craftAmount = math.min(
+                    remaining, floor(config.maxTransferChunk or 64))
                 local okCraft, craftDetail, usedTurn =
-                    startCraft(candidate, remaining)
+                    startCraft(candidate, craftAmount)
                 return {
                     id=tostring(request.id),
                     name=tostring(request.name or "Request"),
@@ -877,7 +879,9 @@ function M.new(config, store, cluster, matcher, transfer)
 
         if candidate.craftable
             and store.data.settings.autoCraftEnabled == true then
-            local ok, detail, usedTurn = startCraft(candidate, count)
+            local craftAmount = math.min(
+                count, floor(config.maxTransferChunk or 64))
+            local ok, detail, usedTurn = startCraft(candidate, craftAmount)
             return {
                 id=tostring(request.id),
                 name=tostring(request.name or "Request"),
