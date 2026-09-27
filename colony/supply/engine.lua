@@ -773,6 +773,23 @@ function M.new(config, store, cluster, matcher, transfer)
                 count = craftCount,
                 requestId = requestId and tostring(requestId) or nil,
                 stalledRecorded = false,
+                leaseState = "crafting",
+                candidate = {
+                    name = candidate.name,
+                    displayName = candidate.displayName,
+                    nbt = candidate.nbt,
+                    nbtCanonical = candidate.nbtCanonical,
+                    hasNBT = candidate.hasNBT == true,
+                    identity = candidate.identity,
+                    namespace = candidate.namespace,
+                    toolClass = candidate.toolClass,
+                    raw = {
+                        name = candidate.raw
+                            and candidate.raw.name or candidate.name,
+                        nbt = candidate.raw
+                            and candidate.raw.nbt or candidate.nbt,
+                    },
+                },
             }
             store.data.craftFailures[key] = nil
             store.save()
@@ -813,6 +830,238 @@ function M.new(config, store, cluster, matcher, transfer)
                 store.data.craftJobs[key] = nil
             end
         end
+    end
+
+    local function requestForCraftJob(activeRequests, requestId)
+        requestId = tostring(requestId or "")
+        for _, request in ipairs(activeRequests or {}) do
+            if tostring(request.id or "") == requestId then
+                return request
+            end
+        end
+        return nil
+    end
+
+    local function candidateForCraftJob(key, job, activeRequests)
+        if type(job) ~= "table" then return nil end
+
+        local candidate = job.candidate
+        if type(candidate) == "table"
+            and type(candidate.name) == "string"
+            and candidate.name ~= "" then
+            candidate.raw = type(candidate.raw) == "table"
+                and candidate.raw
+                or { name = candidate.name, nbt = candidate.nbt }
+            candidate.identity = candidate.identity
+                or tostring(key)
+            candidate.nbtCanonical = candidate.nbtCanonical
+                or matcher.canonicalNBT(candidate.nbt)
+            return candidate
+        end
+
+        -- Upgrade an older persisted craft job from the still-active request
+        -- without touching PRS.
+        local request =
+            requestForCraftJob(activeRequests, job.requestId)
+        if request then
+            local candidates = matcher.requestCandidates(request)
+            for _, value in ipairs(candidates or {}) do
+                if tostring(value.identity or "") == tostring(key)
+                    or tostring(value.name or "")
+                        == tostring(job.item or "") then
+                    job.candidate = {
+                        name = value.name,
+                        displayName = value.displayName,
+                        nbt = value.nbt,
+                        nbtCanonical = value.nbtCanonical,
+                        hasNBT = value.hasNBT == true,
+                        identity = value.identity,
+                        namespace = value.namespace,
+                        toolClass = value.toolClass,
+                        raw = {
+                            name = value.raw
+                                and value.raw.name or value.name,
+                            nbt = value.raw
+                                and value.raw.nbt or value.nbt,
+                        },
+                    }
+                    store.save()
+                    return job.candidate
+                end
+            end
+        end
+
+        return nil
+    end
+
+    local function activeLeaseCraftJob(activeRequests)
+        local activeIds = {}
+        for _, request in ipairs(activeRequests or {}) do
+            activeIds[tostring(request.id)] = true
+        end
+
+        local keys = {}
+        for key, job in pairs(store.data.craftJobs or {}) do
+            if type(job) == "table"
+                and job.leaseState ~= "stalled"
+                and job.requestId ~= nil
+                and activeIds[tostring(job.requestId)] then
+                keys[#keys + 1] = tostring(key)
+            end
+        end
+        table.sort(keys)
+
+        for _, key in ipairs(keys) do
+            local job = store.data.craftJobs[key]
+            local candidate =
+                candidateForCraftJob(key, job, activeRequests)
+            if candidate then return key, job, candidate end
+        end
+        return nil, nil, nil
+    end
+
+    local function manageCraftLease(activeRequests)
+        local key, job, candidate =
+            activeLeaseCraftJob(activeRequests)
+        if not job or not candidate then
+            return false, false, nil
+        end
+
+        cluster.holdTurn(
+            "AutoCraft " .. tostring(candidate.name))
+
+        local queryFilter = matcher.craftFilter(candidate, nil)
+        local okCrafting, crafting =
+            safeCall(
+                transfer.playerRS,
+                "isItemCrafting",
+                queryFilter
+            )
+
+        if not okCrafting then
+            job.leaseState = "status_unknown"
+            store.save()
+            return true, false,
+                "AutoCraft status unavailable for " ..
+                tostring(candidate.name) ..
+                "; PRS turn retained"
+        end
+
+        if crafting == true then
+            if job.outputSeenAt ~= nil
+                or floor(job.stableReads) > 0
+                or job.leaseState ~= "crafting" then
+                job.outputSeenAt = nil
+                job.stableReads = 0
+                job.readyForTransfer = nil
+                job.leaseState = "crafting"
+                store.save()
+            end
+            return true, false,
+                "AutoCraft running: " .. tostring(candidate.name) ..
+                "; PRS exclusively held"
+        end
+
+        local _, stock =
+            matcher.findStoredVariants(
+                transfer.playerRS,
+                candidate,
+                safeCall
+            )
+
+        local now = nowSeconds()
+        local age =
+            math.max(
+                0,
+                now -
+                (tonumber(job.startedAt or job.time) or now)
+            )
+
+        if stock <= 0 then
+            local waitSeconds =
+                math.max(
+                    30,
+                    floor(config.craftOutputWaitSeconds or 180)
+                )
+
+            if age < waitSeconds then
+                job.leaseState = "awaiting_output"
+                job.outputSeenAt = nil
+                job.stableReads = 0
+                store.save()
+                return true, false,
+                    "AutoCraft finished but output not visible yet: " ..
+                    tostring(candidate.name)
+            end
+
+            job.leaseState = "stalled"
+            if job.stalledRecorded ~= true then
+                job.stalledRecorded = true
+                job.stalledAt = now
+                store.save()
+                store.addError(
+                    "CRAFT_OUTPUT_STALLED",
+                    "Craft finished but output never stabilized in PRS",
+                    {
+                        requestId = job.requestId,
+                        item = candidate.name,
+                        identity = candidate.identity,
+                        ageSeconds = age,
+                        detail =
+                            "Shared PRS lease released; duplicate craft remains suppressed",
+                    },
+                    "WARNING"
+                )
+            else
+                store.save()
+            end
+
+            return false, false,
+                "AutoCraft output stalled for " ..
+                tostring(candidate.name)
+        end
+
+        if not job.outputSeenAt then
+            job.outputSeenAt = now
+            job.stableReads = 1
+        else
+            job.stableReads = floor(job.stableReads) + 1
+        end
+        job.leaseState = "stabilizing"
+
+        local quiet =
+            math.max(
+                0,
+                floor(config.craftPostCompleteQuietSeconds or 10)
+            )
+        local stableRequired =
+            math.max(
+                1,
+                floor(config.craftStableReadsRequired or 2)
+            )
+        local quietAge =
+            math.max(
+                0,
+                now - (tonumber(job.outputSeenAt) or now)
+            )
+
+        if quietAge < quiet
+            or floor(job.stableReads) < stableRequired then
+            store.save()
+            return true, false,
+                "Crafted output stabilizing: " ..
+                tostring(candidate.name) .. " " ..
+                tostring(quietAge) .. "/" .. tostring(quiet) ..
+                "s reads=" .. tostring(floor(job.stableReads)) ..
+                "/" .. tostring(stableRequired)
+        end
+
+        job.readyForTransfer = true
+        job.leaseState = "ready"
+        store.save()
+        return false, true,
+            "Crafted output stabilized: " ..
+            tostring(candidate.name)
     end
 
     local function resetLedger(ledger)
@@ -1034,6 +1283,7 @@ function M.new(config, store, cluster, matcher, transfer)
             floor(result.baselineCRS),
             false
         )
+        clearCraftJob(candidate)
 
         if floor(ledger.sentTotal) >= count then
             ledger.ackStartedAt = nowSeconds()
@@ -2077,6 +2327,20 @@ function M.new(config, store, cluster, matcher, transfer)
             return false
         end
 
+        local craftBlocked, craftReady, craftDetail =
+            manageCraftLease(activeRequests)
+
+        if craftBlocked then
+            self.statusMessage = tostring(craftDetail)
+            self.stats.crafting = self.stats.crafting + 1
+            cluster.holdTurn("AutoCraft stabilization")
+            return true
+        end
+
+        if craftReady then
+            self.statusMessage = tostring(craftDetail)
+        end
+
         self.requestRows = buildRequestStatusRows(activeRequests)
         refreshMissingRequests()
 
@@ -2133,8 +2397,16 @@ function M.new(config, store, cluster, matcher, transfer)
         end
 
         store.save()
-        self.statusMessage = self.stats.errors > 0 and "DEGRADED" or "ONLINE"
-        cluster.releaseTurn("scan complete")
+        self.statusMessage =
+            self.stats.errors > 0 and "DEGRADED" or "ONLINE"
+
+        local _, leaseJob =
+            activeLeaseCraftJob(activeRequests)
+        if leaseJob then
+            cluster.holdTurn("AutoCraft lease active")
+        else
+            cluster.releaseTurn("scan complete")
+        end
         return true
     end
 
