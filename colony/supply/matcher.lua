@@ -419,7 +419,13 @@ function M.new(config, store)
             candidate.variants = variants
             candidate.stock = total
 
-            if type(craftableLookup) == "function" then
+            if total > 0 then
+                -- For status-only inspection, stock already proves the request
+                -- is fillable. Avoid extra RS crafting API calls until stock is
+                -- actually absent.
+                candidate.craftable = false
+                candidate.craftSource = "exact stock available"
+            elseif type(craftableLookup) == "function" then
                 local ok, source = craftableLookup(candidate)
                 candidate.craftable = ok == true
                 candidate.craftSource = source
