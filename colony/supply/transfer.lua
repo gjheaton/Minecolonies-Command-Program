@@ -39,6 +39,8 @@ function M.new(config, store, matcher)
             colonyRS = false,
             warehouse = false,
             transferChest = false,
+            transferChestItemCount = nil,
+            transferChestStackCount = nil,
         },
     }
 
@@ -185,6 +187,23 @@ function M.new(config, store, matcher)
         self.health.colonyRS = false
         self.health.warehouse = false
         self.health.transferChest = chestOK
+        self.health.transferChestItemCount = nil
+        self.health.transferChestStackCount = nil
+
+        if chestOK then
+            local list = self.chestContents()
+            if type(list) == "table" then
+                local items, stacks = 0, 0
+                for _, item in pairs(list) do
+                    if type(item) == "table" then
+                        items = items + floor(item.count)
+                        stacks = stacks + 1
+                    end
+                end
+                self.health.transferChestItemCount = items
+                self.health.transferChestStackCount = stacks
+            end
+        end
 
         if bridgesOK and self.playerRS then
             self.health.playerRS = select(1, self.safeCall(self.playerRS, "getEnergyStorage"))
