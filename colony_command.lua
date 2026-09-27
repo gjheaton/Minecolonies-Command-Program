@@ -7,6 +7,7 @@
 --        lines removed so only warnings/errors appear below the health block.
 -- v3.0.0: Visitor job suitability analysis with overall/open-position
 --         recommendations based on MineColonies primary/secondary skills.
+-- v3.0.1: Citizens page BEST FIT column with current-job fit coloring.
 
 local REFRESH_SECONDS = 10
 local RAID_BLINK_SECONDS = 0.75
