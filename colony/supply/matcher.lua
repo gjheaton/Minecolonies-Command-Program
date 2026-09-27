@@ -45,6 +45,11 @@ local function canonical(value)
     end
     if type(value) ~= "table" then return tostring(value) end
 
+    -- MineColonies commonly exposes ordinary items as nbt = {}, while
+    -- Advanced Peripherals / Refined Storage may expose the same item with
+    -- nbt = nil. Both mean "no NBT" and must be the same exact identity.
+    if next(value) == nil then return "" end
+
     local function encode(v, seen)
         local t = type(v)
         if t == "nil" then return "nil" end
