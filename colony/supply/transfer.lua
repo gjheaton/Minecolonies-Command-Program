@@ -53,6 +53,12 @@ function M.new(config, store, matcher)
         return true, a, b, c, d
     end
 
+    local function supportsPeripheralTransfer(bridge)
+        return bridge
+            and type(bridge.exportItemToPeripheral) == "function"
+            and type(bridge.importItemFromPeripheral) == "function"
+    end
+
     local function bridgeInfo(bridge)
         local disk, external = 0, 0
         local okDisk, vDisk = self.safeCall(bridge, "getMaxItemDiskStorage")
@@ -206,16 +212,38 @@ function M.new(config, store, matcher)
         end
 
         if bridgesOK and self.playerRS then
-            self.health.playerRS = select(1, self.safeCall(self.playerRS, "getEnergyStorage"))
+            self.health.playerRS =
+                select(1, self.safeCall(
+                    self.playerRS, "getEnergyStorage"))
         end
         if bridgesOK and self.colonyRS then
-            self.health.colonyRS = select(1, self.safeCall(self.colonyRS, "getEnergyStorage"))
+            self.health.colonyRS =
+                select(1, self.safeCall(
+                    self.colonyRS, "getEnergyStorage"))
             if self.health.colonyRS then
                 local _, ext = bridgeInfo(self.colonyRS)
                 self.health.warehouse = ext > 0
             end
         end
-        return colonyOK and bridgesOK and self.health.playerRS and self.health.colonyRS and chestOK
+
+        if config.usePeripheralTransfer then
+            local peripheralOK =
+                supportsPeripheralTransfer(self.playerRS)
+                and supportsPeripheralTransfer(self.colonyRS)
+            if not peripheralOK then
+                self.health.playerRS = false
+                self.health.colonyRS = false
+                store.log(
+                    "ERROR exact peripheral transfer enabled but one or " ..
+                    "both RS Bridges lack import/export peripheral methods"
+                )
+            end
+        end
+
+        return colonyOK and bridgesOK
+            and self.health.playerRS
+            and self.health.colonyRS
+            and chestOK
     end
 
     function self.chestContents()
@@ -447,15 +475,23 @@ function M.new(config, store, matcher)
     end
 
     local function sourceExport(bridge, filter, direction)
-        if config.usePeripheralTransfer and self.transferChestName then
-            return exportPeripheral(bridge, filter, self.transferChestName)
+        if config.usePeripheralTransfer then
+            if not self.transferChestName then
+                return 0, "transfer chest peripheral name unavailable"
+            end
+            return exportPeripheral(
+                bridge, filter, self.transferChestName)
         end
         return exportDirectional(bridge, filter, direction)
     end
 
     local function destinationImport(bridge, filter, direction)
-        if config.usePeripheralTransfer and self.transferChestName then
-            return importPeripheral(bridge, filter, self.transferChestName)
+        if config.usePeripheralTransfer then
+            if not self.transferChestName then
+                return 0, "transfer chest peripheral name unavailable"
+            end
+            return importPeripheral(
+                bridge, filter, self.transferChestName)
         end
         return importDirectional(bridge, filter, direction)
     end
