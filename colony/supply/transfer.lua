@@ -893,21 +893,34 @@ function M.new(config, store, matcher)
         setPending(pending)
 
         local beforeChest = self.chestCount(candidate) or 0
-        local exported = sourceExport(self.colonyRS, filter, config.colonyToChestDirection)
+        local exported, exportErr =
+            sourceExport(
+                self.colonyRS,
+                filter,
+                config.colonyToChestDirection
+            )
         sleep(tonumber(config.transferSettleDelay) or 0.25)
         local afterChest = self.chestCount(candidate)
-        local staged = afterChest and math.max(0, afterChest - beforeChest) or 0
+        local staged = afterChest
+            and math.max(0, afterChest - beforeChest) or 0
         if floor(exported) <= 0 or staged <= 0 then
             clearPending()
             return false,
                 "CRS export failed: item=" .. tostring(candidate.name) ..
                 " mode=" .. tostring(mode) ..
-                " direction=" .. tostring(config.colonyToChestDirection) ..
+                " target=" ..
+                    tostring(
+                        config.usePeripheralTransfer
+                            and self.transferChestName
+                            or config.colonyToChestDirection
+                    ) ..
                 " requested=" .. tostring(quantity) ..
                 " bridge=" .. tostring(exported) ..
                 " chestBefore=" .. tostring(beforeChest) ..
                 " chestAfter=" .. tostring(afterChest) ..
-                " chestDelta=" .. tostring(staged)
+                " chestDelta=" .. tostring(staged) ..
+                (exportErr and
+                    (" error=" .. tostring(exportErr)) or "")
         end
 
         pending.stage = "staged"
@@ -920,33 +933,71 @@ function M.new(config, store, matcher)
             if encoded.nbt then importFilter.nbt = encoded.nbt end
         end
 
-        for _ = 1, math.max(1, floor(config.transferImportRetries or 3)) do
-            destinationImport(self.playerRS, importFilter, config.chestToPlayerDirection)
+        local importMoved = 0
+        local lastImportErr
+        for _ = 1, math.max(
+            1, floor(config.transferImportRetries or 3)) do
+            local n, importErr =
+                destinationImport(
+                    self.playerRS,
+                    importFilter,
+                    config.chestToPlayerDirection
+                )
+            importMoved = importMoved + floor(n)
+            if importErr then lastImportErr = importErr end
             sleep(tonumber(config.transferRetryDelay) or 0.25)
             local left = self.chestCount(candidate)
             if left ~= nil and left <= 0 then break end
         end
 
         local chestAfter = self.chestCount(candidate)
-        local physicalAccepted = math.max(0, staged - floor(chestAfter))
-        local playerAfter = self.playerAmount(candidate)
-        local gained = playerAfter and math.max(0, playerAfter - playerBefore) or 0
+        local physicalAccepted =
+            math.max(0, staged - floor(chestAfter))
 
-        if chestAfter == 0 and gained >= physicalAccepted and physicalAccepted > 0 then
+        pending.stage = "confirming"
+        pending.physicalAccepted = physicalAccepted
+        setPending(pending)
+
+        local confirmed, maxSeen =
+            verifyDestination(
+                self.playerRS,
+                candidate,
+                playerBefore,
+                physicalAccepted
+            )
+
+        if chestAfter == 0
+            and confirmed >= physicalAccepted
+            and physicalAccepted > 0 then
             clearPending()
             store.addHistory("TRANSFER", {
                 direction = "CRS>PRS",
                 item = candidate.name,
                 amount = physicalAccepted,
                 requestId = meta.requestId,
-                detail = tostring(meta.detail or "verified overstock return"),
+                detail = tostring(
+                    meta.detail or "verified overstock return"),
             })
             return true, physicalAccepted
         end
 
-        return false, "PRS destination unconfirmed: staged=" .. tostring(staged) ..
-            " physical=" .. tostring(physicalAccepted) .. " PRSgain=" .. tostring(gained) ..
-            " chest=" .. tostring(chestAfter)
+        return false,
+            "PRS destination unconfirmed: staged=" ..
+            tostring(staged) ..
+            " physical=" .. tostring(physicalAccepted) ..
+            " confirmed=" .. tostring(confirmed) ..
+            " PRS baseline=" .. tostring(playerBefore) ..
+            " PRS maxSeen=" .. tostring(maxSeen) ..
+            " bridgeImported=" .. tostring(importMoved) ..
+            " chest=" .. tostring(chestAfter) ..
+            " target=" ..
+                tostring(
+                    config.usePeripheralTransfer
+                        and self.transferChestName
+                        or config.chestToPlayerDirection
+                ) ..
+            (lastImportErr and
+                (" error=" .. tostring(lastImportErr)) or "")
     end
 
     function self.findSafeProbeCandidate()
