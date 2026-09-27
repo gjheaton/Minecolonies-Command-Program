@@ -1,5 +1,5 @@
 --[[
-MineColonies Supply Manager v3.0.11
+MineColonies Supply Manager v3.0.12
 Architectural rewrite for multi-colony serialized access to shared Player Refined Storage (PRS).
 
 Terms:
@@ -142,7 +142,7 @@ local function terminalLoop()
     end
 end
 
-store.log("Supply Manager v3.0.11 starting computer=" ..
+store.log("Supply Manager v3.0.12 starting computer=" ..
     tostring(os.getComputerID and os.getComputerID() or "?"))
 
 parallel.waitForAll(
