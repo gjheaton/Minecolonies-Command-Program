@@ -1,8 +1,8 @@
 -- MineColonies Control Suite v3 - Supply Manager configuration
 local C = {}
 
-C.PROGRAM_VERSION = "3.0.6"
-C.SUITE_VERSION = "3.0.7"
+C.PROGRAM_VERSION = "3.0.7"
+C.SUITE_VERSION = "3.0.8"
 
 -- Peripheral overrides. Leave nil for auto-detection.
 C.playerBridgeName = nil
@@ -25,6 +25,12 @@ C.maxTransferChunk = 64
 C.transferSettleDelay = 0.25
 C.transferImportRetries = 3
 C.transferRetryDelay = 0.25
+
+-- If the transfer chest contains no item matching an active MineColonies
+-- request and there is no pending transaction, quarantine the unchanged chest
+-- contents for this long before returning them to PRS automatically.
+C.orphanChestRecoverySeconds = 180
+
 C.destinationConfirmReads = 3
 C.destinationConfirmDelay = 0.15
 -- MineColonies acknowledgement reconciliation.
