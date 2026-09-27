@@ -1,8 +1,8 @@
 -- MineColonies Control Suite v3 - Supply Manager configuration
 local C = {}
 
-C.PROGRAM_VERSION = "3.0.13"
-C.SUITE_VERSION = "3.0.18"
+C.PROGRAM_VERSION = "3.0.14"
+C.SUITE_VERSION = "3.0.19"
 
 -- Peripheral overrides. Leave nil for auto-detection.
 C.playerBridgeName = nil
