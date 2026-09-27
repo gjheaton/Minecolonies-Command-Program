@@ -2,7 +2,7 @@
 local C = {}
 
 C.PROGRAM_VERSION = "3.0.8"
-C.SUITE_VERSION = "3.0.12"
+C.SUITE_VERSION = "3.0.13"
 
 -- Peripheral overrides. Leave nil for auto-detection.
 C.playerBridgeName = nil
