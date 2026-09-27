@@ -496,16 +496,42 @@ function M.new(config, store, cluster, matcher, transfer)
 
         local canPRS, turnStatus = cluster.canAccessPRS()
         if not canPRS then
-            local turnId = turnStatus and turnStatus.turnId or clusterStatus.turnId
+            local turnId =
+                turnStatus and turnStatus.turnId
+                or clusterStatus.turnId
+            local settle =
+                math.ceil(
+                    tonumber(
+                        turnStatus
+                        and turnStatus.turnSettleRemaining
+                        or 0
+                    ) or 0
+                )
+            local detail
+            if turnId == clusterStatus.id and settle > 0 then
+                detail =
+                    "PRS token acquired; handoff settling " ..
+                    tostring(settle) .. "s before RS access"
+                self.statusMessage =
+                    "PRS handoff settling " ..
+                    tostring(settle) .. "s"
+            else
+                detail =
+                    "waiting for PRS turn " ..
+                    tostring(turnId or "?") ..
+                    "; this computer is " ..
+                    tostring(clusterStatus.id)
+                self.statusMessage =
+                    "Waiting for computer " ..
+                    tostring(turnId or "?") ..
+                    " PRS turn"
+            end
             setCheck(
                 "movement",
                 false,
-                "waiting for PRS turn " .. tostring(turnId or "?") ..
-                    "; this computer is " .. tostring(clusterStatus.id),
+                detail,
                 "WAITING"
             )
-            self.statusMessage =
-                "Waiting for computer " .. tostring(turnId or "?") .. " PRS turn"
             self.startupRunning = false
             return nil, "WAITING"
         end
@@ -2343,22 +2369,40 @@ function M.new(config, store, cluster, matcher, transfer)
         self.lastScan = nowSeconds()
         self.lastScanText = Util.timeString()
 
+        -- Check cluster ownership before touching either RS Bridge. The new
+        -- owner must observe the configured handoff quiet window with zero
+        -- PRS/CRS API calls.
+        local clusterOK, clusterStatus = cluster.canAccessPRS()
+        if not clusterStatus.ok then
+            self.statusMessage =
+                "CLUSTER ERROR: " ..
+                tostring(clusterStatus.fault)
+            return false
+        end
+        if not clusterOK then
+            local settle = math.ceil(
+                tonumber(clusterStatus.turnSettleRemaining) or 0
+            )
+            if clusterStatus.turnId == clusterStatus.id
+                and settle > 0 then
+                self.statusMessage =
+                    "PRS handoff settling " ..
+                    tostring(settle) .. "s"
+            else
+                self.statusMessage =
+                    "Waiting for computer " ..
+                    tostring(clusterStatus.turnId) ..
+                    " turn"
+            end
+            return true
+        end
+
         if not transfer.refresh() then
             self.statusMessage = "Required peripheral offline"
             self.stats.errors = self.stats.errors + 1
             return false
         end
         cluster.setLocalName(transfer.colonyName)
-
-        local clusterOK, clusterStatus = cluster.canAccessPRS()
-        if not clusterStatus.ok then
-            self.statusMessage = "CLUSTER ERROR: " .. tostring(clusterStatus.fault)
-            return false
-        end
-        if not clusterOK then
-            self.statusMessage = "Waiting for computer " .. tostring(clusterStatus.turnId) .. " turn"
-            return true
-        end
 
         if not self.startupReady then
             self.runStartupChecks()
