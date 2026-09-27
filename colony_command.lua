@@ -1172,6 +1172,7 @@ local pages = {
     { id = "citizens", label = "CITIZENS" },
     { id = "buildings", label = "BUILDINGS" },
     { id = "help", label = "HELP WANTED" },
+    { id = "visitors", label = "VISITORS" },
     { id = "requests", label = "REQUESTS" },
     { id = "orders", label = "CONSTRUCTION" },
 }
@@ -1182,6 +1183,7 @@ local listPage = {
     citizens = 1,
     buildings = 1,
     help = 1,
+    visitors = 1,
     requests = 1,
     orders = 1,
 }
@@ -1366,10 +1368,28 @@ end
 -- List pages
 -- =========================
 
+local function visitorFitColor(rec)
+    if type(rec) ~= "table" then return C.dim end
+    local band = tostring(rec.band or "")
+    if band == "EXCELLENT" then return C.good end
+    if band == "STRONG" then return C.info end
+    if band == "FAIR" then return C.warn end
+    return C.dim
+end
+
+local function visitorFitText(rec, width)
+    if type(rec) ~= "table" then return "None" end
+    local text = tostring(rec.label or "Unknown") ..
+        " " .. string.format("%.1f", tonumber(rec.score) or 0)
+    if width then return clip(text, width) end
+    return text
+end
+
 local function listForPage(page)
     if page == "citizens" then return D.citizenDisplayRows or D.citizens end
     if page == "buildings" then return D.displayBuildings or visibleBuildings(D.buildings) end
     if page == "help" then return D.helpWanted or {} end
+    if page == "visitors" then return D.visitorAnalysis or {} end
     if page == "requests" then return D.requests end
     if page == "orders" then return D.workOrders end
     return {}
@@ -1389,6 +1409,14 @@ local function listRowText(page, item, width)
             .. " | L" .. tostring(building.level or "?")
             .. " | " .. tostring(item.filled or 0) .. "/" .. tostring(item.capacity or "?")
             .. " | OPEN " .. tostring(item.openings or 0), width)
+    elseif page == "visitors" then
+        local visitor = item.visitor or {}
+        return clip(
+            tostring(visitor.name or "Unknown") ..
+            " | " .. visitorFitText(item.best) ..
+            " | OPEN " .. visitorFitText(item.bestOpen),
+            width
+        )
     elseif page == "requests" then
         return clip(tostring(item.count or item.minCount or "?") .. "x "
             .. tostring(item.name or "Request") .. " | " .. tostring(item.target or ""), width)
@@ -1416,6 +1444,8 @@ local function listRowColor(page, item)
         return C.good
     elseif page == "help" then
         return C.warn
+    elseif page == "visitors" then
+        return visitorFitColor(item.best)
     elseif page == "requests" then
         return C.warn
     elseif page == "orders" then
