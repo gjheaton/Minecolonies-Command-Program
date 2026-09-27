@@ -259,6 +259,108 @@ function M.new(config, store, matcher)
         }
     end
 
+    function self.rebindTransferChest(name, reason)
+        name = tostring(name or "")
+        if name == ""
+            or not peripheral.isPresent(name)
+            or not hasType(name, "inventory") then
+            return false, "invalid transfer chest peripheral"
+        end
+
+        self.transferChestName = name
+        store.data.settings = store.data.settings or {}
+        store.data.settings.transferChestName = name
+        store.save()
+        store.log(
+            "TRANSFER CHEST rebound to " .. tostring(name) ..
+            (reason and (" reason=" .. tostring(reason)) or "")
+        )
+        return true, "transfer chest rebound to " .. tostring(name)
+    end
+
+    function self.findAlternateRequestedChest(activeRequests)
+        activeRequests =
+            type(activeRequests) == "table" and activeRequests or {}
+
+        local byName = {}
+
+        for _, name in ipairs(peripheral.getNames()) do
+            if name ~= self.transferChestName
+                and hasType(name, "inventory")
+                and looksLikeBarrel(name) then
+
+                local inv = peripheral.wrap(name)
+                local okList, list = pcall(inv.list)
+                if okList and type(list) == "table"
+                    and next(list) ~= nil then
+
+                    for slot, item in pairs(list) do
+                        if type(item) == "table" and item.name then
+                            local detail = item
+                            if type(inv.getItemDetail) == "function" then
+                                local okDetail, full =
+                                    pcall(inv.getItemDetail, slot)
+                                if okDetail and type(full) == "table" then
+                                    detail = full
+                                end
+                            end
+                            if detail.name == nil then
+                                detail.name = item.name
+                            end
+                            if detail.count == nil then
+                                detail.count = item.count
+                            end
+
+                            for _, request in ipairs(activeRequests) do
+                                local accepted, candidate, why =
+                                    matcher.requestAcceptsItem(
+                                        request, detail)
+                                if accepted and candidate then
+                                    local entry = byName[name]
+                                    if not entry then
+                                        entry = {
+                                            name = name,
+                                            matches = {},
+                                        }
+                                        byName[name] = entry
+                                    end
+                                    entry.matches[#entry.matches + 1] = {
+                                        request = request,
+                                        candidate = candidate,
+                                        slot = slot,
+                                        item = detail,
+                                        reason = why,
+                                    }
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+
+        local candidates = {}
+        for _, entry in pairs(byName) do
+            candidates[#candidates + 1] = entry
+        end
+        table.sort(candidates, function(a,b)
+            return tostring(a.name) < tostring(b.name)
+        end)
+
+        if #candidates == 0 then return nil, nil end
+        if #candidates > 1 then
+            local names = {}
+            for _, entry in ipairs(candidates) do
+                names[#names + 1] = tostring(entry.name)
+            end
+            return nil,
+                "multiple alternate transfer-chest candidates contain " ..
+                "active-request items: " .. table.concat(names, ", ")
+        end
+
+        return candidates[1], nil
+    end
+
     function self.chestCount(candidate)
         local list, err = self.chestContents()
         if not list then return nil, err end
