@@ -211,18 +211,18 @@ function M.new(config, store, cluster, matcher, transfer)
     local function startCraft(candidate, count)
         local key = craftFailureKey(candidate)
         local left, reason = craftCooldownRemaining(candidate)
-        if left > 0 then return false, "craft error cooldown " .. tostring(left) .. "s: " .. tostring(reason) end
+        if left > 0 then return false, "craft error cooldown " .. tostring(left) .. "s: " .. tostring(reason), false end
 
         local last = tonumber(store.data.craftJobs[key]) or 0
         if nowSeconds() - last < (tonumber(config.craftCooldownSeconds) or 30) then
-            return true, "craft cooldown"
+            return true, "craft cooldown", false
         end
 
         local craftable, source = matcher.craftable(transfer.playerRS, candidate, safeCall)
-        if not craftable then return false, source end
+        if not craftable then return false, source, false end
 
         local filter = matcher.craftFilter(candidate, math.max(1, floor(count)))
-        if candidate.hasNBT and filter.nbt == nil then return false, "exact NBT cannot be represented for crafting" end
+        if candidate.hasNBT and filter.nbt == nil then return false, "exact NBT cannot be represented for crafting", false end
 
         local ok, started, err = safeCall(transfer.playerRS, "craftItem", filter)
         if not ok then
@@ -236,16 +236,16 @@ function M.new(config, store, cluster, matcher, transfer)
             store.save()
             store.addError("CRAFT_EXCEPTION", "PRS craftItem failed for " .. candidate.name,
                 { candidate = candidate, count = count, error = err or started, failures = failures }, "ERROR")
-            return false, "craftItem error: " .. tostring(err or started)
+            return false, "craftItem error: " .. tostring(err or started), true
         end
         if started == true then
             store.data.craftJobs[key] = nowSeconds()
             store.data.craftFailures[key] = nil
             store.save()
             store.addHistory("CRAFT", { item=candidate.name, amount=count, detail="started via " .. tostring(source) })
-            return true, "craft started"
+            return true, "craft started", true
         end
-        return false, tostring(err or "RS refused craft")
+        return false, tostring(err or "RS refused craft"), true
     end
 
     local function ledgerFor(requestId)
@@ -260,79 +260,465 @@ function M.new(config, store, cluster, matcher, transfer)
         end
     end
 
+    local function resetLedger(ledger)
+        for k in pairs(ledger) do ledger[k] = nil end
+    end
+
+    local function candidateSnapshot(candidate)
+        return {
+            name = candidate.name,
+            displayName = candidate.displayName,
+            nbt = candidate.nbt,
+            nbtCanonical = candidate.nbtCanonical,
+            hasNBT = candidate.hasNBT == true,
+            identity = candidate.identity,
+            namespace = candidate.namespace,
+            raw = {
+                name = candidate.raw and candidate.raw.name or candidate.name,
+                nbt = candidate.raw and candidate.raw.nbt or candidate.nbt,
+            },
+        }
+    end
+
+    local function candidateFromLedger(ledger)
+        local candidate = ledger and ledger.candidate
+        if type(candidate) ~= "table" or not candidate.name then return nil end
+        candidate.raw = type(candidate.raw) == "table"
+            and candidate.raw or { name = candidate.name, nbt = candidate.nbt }
+        candidate.identity = candidate.identity
+            or (tostring(candidate.name) .. "|NBT|" .. matcher.canonicalNBT(candidate.nbt))
+        candidate.nbtCanonical = candidate.nbtCanonical
+            or matcher.canonicalNBT(candidate.nbt)
+        return candidate
+    end
+
+    local function recordAckStalled(request, ledger, detail, context)
+        ledger.phase = "ACK_STALLED"
+        ledger.stalledAt = ledger.stalledAt or nowSeconds()
+        ledger.stallDetail = tostring(detail or "MineColonies acknowledgement did not change")
+
+        if ledger.stallRecorded ~= true then
+            ledger.stallRecorded = true
+            store.addError(
+                "ACK_STALLED",
+                "MineColonies request remained unchanged after bounded delivery reconciliation",
+                {
+                    requestId = request.id,
+                    requestName = request.name,
+                    signature = ledger.signature,
+                    item = ledger.item,
+                    identity = ledger.identity,
+                    firstSentAt = ledger.firstSentAt,
+                    lastSentAt = ledger.lastSentAt,
+                    sentTotal = ledger.sentTotal,
+                    lastSent = ledger.lastSent,
+                    retryCount = ledger.retryCount,
+                    baselineCRS = ledger.baselineCRS,
+                    peakCRS = ledger.peakCRS,
+                    lastObservedCRS = ledger.lastObservedCRS,
+                    detail = ledger.stallDetail,
+                    extra = context,
+                },
+                "WARNING"
+            )
+        else
+            store.save()
+        end
+
+        return {
+            id = tostring(request.id),
+            name = tostring(request.name or "Request"),
+            requested = requestCount(request),
+            item = tostring(ledger.item or "?"),
+            status = "ACK STALLED",
+            detail = ledger.stallDetail,
+            usedPRSTurn = false,
+        }
+    end
+
+    local function noteVerifiedSend(ledger, signature, candidate, moved, baselineCRS, retry)
+        local stamp = nowSeconds()
+        if not ledger.firstSentAt then ledger.firstSentAt = stamp end
+        ledger.signature = signature
+        ledger.item = candidate.name
+        ledger.identity = candidate.identity
+        ledger.candidate = candidateSnapshot(candidate)
+        ledger.lastSent = floor(moved)
+        ledger.sentTotal = floor(ledger.sentTotal) + floor(moved)
+        ledger.lastSentAt = stamp
+        ledger.sentAt = stamp
+        if ledger.baselineCRS == nil then ledger.baselineCRS = floor(baselineCRS) end
+
+        local currentCRS = transfer.colonyAmount(candidate)
+        if currentCRS ~= nil then
+            ledger.lastObservedCRS = floor(currentCRS)
+            ledger.peakCRS = math.max(floor(ledger.peakCRS), floor(currentCRS))
+        end
+
+        if retry then
+            ledger.retryCount = floor(ledger.retryCount) + 1
+            ledger.phase = "RETRY_WAIT"
+            ledger.retryCraftRequestedAt = nil
+        else
+            ledger.retryCount = floor(ledger.retryCount)
+            ledger.phase = "WAITING_ACK"
+        end
+
+        ledger.stallRecorded = nil
+        ledger.stalledAt = nil
+        ledger.stallDetail = nil
+        store.save()
+    end
+
+    local function reconcileAcknowledgement(request, signature, ledger)
+        local candidate = candidateFromLedger(ledger)
+        if not candidate then
+            return recordAckStalled(
+                request, ledger,
+                "Cannot reconstruct exact delivered item identity for reconciliation")
+        end
+
+        local stamp = nowSeconds()
+        local firstSentAt = tonumber(ledger.firstSentAt or ledger.sentAt) or stamp
+        local lastSentAt = tonumber(ledger.lastSentAt or ledger.sentAt) or firstSentAt
+        local retryCount = floor(ledger.retryCount)
+        local maxRetries = math.max(0, floor(config.requestAckMaxRetries or 1))
+        local waitSeconds = math.max(1, floor(config.requestAckWaitSeconds or 60))
+        local retrySeconds = math.max(waitSeconds, floor(config.requestAckRetrySeconds or 180))
+        local postRetrySeconds = math.max(1, floor(config.requestAckPostRetrySeconds or 60))
+        local craftWaitSeconds = math.max(
+            postRetrySeconds, floor(config.requestAckRetryCraftWaitSeconds or 180))
+
+        local currentCRS, crsErr = transfer.colonyAmount(candidate)
+        if currentCRS ~= nil then
+            ledger.lastObservedCRS = floor(currentCRS)
+            ledger.peakCRS = math.max(floor(ledger.peakCRS), floor(currentCRS))
+        end
+
+        if retryCount >= maxRetries and maxRetries > 0 then
+            local retryAge = stamp - lastSentAt
+            if retryAge < postRetrySeconds then
+                store.save()
+                return {
+                    id=tostring(request.id),
+                    name=tostring(request.name or "Request"),
+                    requested=requestCount(request),
+                    item=tostring(ledger.item or "?"),
+                    status="WAITING ACK",
+                    detail="retry " .. tostring(retryCount) .. "/" ..
+                        tostring(maxRetries) .. " verified; awaiting acknowledgement " ..
+                        tostring(retryAge) .. "/" .. tostring(postRetrySeconds) .. "s",
+                    usedPRSTurn=false,
+                }
+            end
+            return recordAckStalled(
+                request, ledger,
+                "Request unchanged after " .. tostring(retryCount) ..
+                    " verified retry; automatic resends stopped")
+        end
+
+        local age = stamp - firstSentAt
+        if age < waitSeconds then
+            store.save()
+            return {
+                id=tostring(request.id),
+                name=tostring(request.name or "Request"),
+                requested=requestCount(request),
+                item=tostring(ledger.item or "?"),
+                status="WAITING ACK",
+                detail="verified sent " .. tostring(ledger.sentTotal or ledger.lastSent or 0) ..
+                    "; waiting " .. tostring(age) .. "/" .. tostring(waitSeconds) .. "s",
+                usedPRSTurn=false,
+            }
+        end
+
+        if age < retrySeconds then
+            ledger.phase = "VERIFYING"
+            store.save()
+            return {
+                id=tostring(request.id),
+                name=tostring(request.name or "Request"),
+                requested=requestCount(request),
+                item=tostring(ledger.item or "?"),
+                status="VERIFYING DELIVERY",
+                detail="request unchanged; CRS baseline=" ..
+                    tostring(ledger.baselineCRS or "?") .. " current=" ..
+                    tostring(ledger.lastObservedCRS or "?") ..
+                    " retry check at " .. tostring(retrySeconds) .. "s",
+                usedPRSTurn=false,
+            }
+        end
+
+        if currentCRS == nil then
+            return recordAckStalled(
+                request, ledger,
+                "Retry deadline reached but CRS stock could not be read safely",
+                { crsError = crsErr })
+        end
+
+        local baseline = floor(ledger.baselineCRS)
+        if floor(currentCRS) > baseline then
+            return recordAckStalled(
+                request, ledger,
+                "Request unchanged, but delivered stock is still visible in CRS above baseline; duplicate retry suppressed",
+                { baselineCRS = baseline, currentCRS = floor(currentCRS) })
+        end
+
+        if maxRetries <= 0 then
+            return recordAckStalled(
+                request, ledger,
+                "Request unchanged at reconciliation deadline; retries disabled")
+        end
+
+        local variants, exactStock = matcher.findStoredVariants(
+            transfer.playerRS, candidate, safeCall)
+
+        if exactStock > 0 and #variants > 0 then
+            local retryAmount = math.min(
+                math.max(1, floor(ledger.lastSent or ledger.sentTotal or 1)),
+                requestCount(request),
+                exactStock,
+                floor(config.maxTransferChunk or 64)
+            )
+            local retryBaseline = floor(currentCRS)
+            local ok, movedOrErr = transfer.playerToColony(candidate, retryAmount, {
+                requestId=request.id,
+                detail="bounded ACK reconciliation retry " ..
+                    tostring(retryCount + 1) .. "/" .. tostring(maxRetries)
+            })
+
+            if ok then
+                noteVerifiedSend(
+                    ledger, signature, candidate, movedOrErr, retryBaseline, true)
+                return {
+                    id=tostring(request.id),
+                    name=tostring(request.name or "Request"),
+                    requested=requestCount(request),
+                    item=candidate.name,
+                    status="WAITING ACK",
+                    detail="bounded retry " .. tostring(ledger.retryCount) .. "/" ..
+                        tostring(maxRetries) ..
+                        " verified; awaiting acknowledgement",
+                    usedPRSTurn=true,
+                }
+            end
+
+            store.addError(
+                "ACK_RETRY_TRANSFER",
+                "Bounded acknowledgement retry transfer failed",
+                {
+                    requestId=request.id,
+                    item=candidate.name,
+                    count=retryAmount,
+                    detail=movedOrErr,
+                },
+                "ERROR"
+            )
+            return {
+                id=tostring(request.id),
+                name=tostring(request.name or "Request"),
+                requested=requestCount(request),
+                item=candidate.name,
+                status="ERROR",
+                detail="ACK retry failed: " .. tostring(movedOrErr),
+                usedPRSTurn=true,
+            }
+        end
+
+        if store.data.settings.autoCraftEnabled == true then
+            local craftable = matcher.craftable(
+                transfer.playerRS, candidate, safeCall)
+
+            if craftable then
+                local retryAmount = math.min(
+                    math.max(1, floor(ledger.lastSent or ledger.sentTotal or 1)),
+                    requestCount(request),
+                    floor(config.maxTransferChunk or 64)
+                )
+
+                if ledger.retryCraftRequestedAt then
+                    local filter = matcher.craftFilter(candidate, nil)
+                    local crafting = false
+                    if not candidate.hasNBT or filter.nbt ~= nil then
+                        local okCrafting, value = safeCall(
+                            transfer.playerRS, "isItemCrafting", filter)
+                        crafting = okCrafting and value == true
+                    end
+
+                    local craftAge = stamp -
+                        (tonumber(ledger.retryCraftRequestedAt) or stamp)
+
+                    if crafting or craftAge < craftWaitSeconds then
+                        store.save()
+                        return {
+                            id=tostring(request.id),
+                            name=tostring(request.name or "Request"),
+                            requested=requestCount(request),
+                            item=candidate.name,
+                            status="CRAFTING RETRY",
+                            detail=crafting
+                                and "crafting exact replacement for bounded retry"
+                                or ("waiting for retry craft output " ..
+                                    tostring(craftAge) .. "/" ..
+                                    tostring(craftWaitSeconds) .. "s"),
+                            usedPRSTurn=false,
+                        }
+                    end
+
+                    return recordAckStalled(
+                        request, ledger,
+                        "Bounded retry craft did not produce exact replacement stock",
+                        { craftAge = craftAge })
+                end
+
+                local okCraft, craftDetail, usedTurn =
+                    startCraft(candidate, retryAmount)
+
+                if usedTurn then
+                    ledger.retryCraftRequestedAt = stamp
+                    ledger.phase = "RETRY_CRAFTING"
+                    store.save()
+                end
+
+                return {
+                    id=tostring(request.id),
+                    name=tostring(request.name or "Request"),
+                    requested=requestCount(request),
+                    item=candidate.name,
+                    status=okCraft and "CRAFTING RETRY" or "BLOCKED",
+                    detail="ACK retry: " .. tostring(craftDetail),
+                    usedPRSTurn=usedTurn == true,
+                }
+            end
+        end
+
+        return recordAckStalled(
+            request, ledger,
+            "Retry deadline reached, delivered stock is no longer visible, and no exact replacement is available or craftable")
+    end
+
     local function processRequest(request)
         local count = requestCount(request)
         local signature = requestSignature(request, count)
         local ledger = ledgerFor(request.id)
 
         if ledger.signature and ledger.signature ~= signature then
-            store.log("REQUEST changed id=" .. tostring(request.id) .. "; clearing WAITING ACK gate")
-            ledger.signature = nil
-            ledger.sent = nil
-            ledger.sentAt = nil
-            ledger.item = nil
+            store.addHistory("ACK", {
+                item = ledger.item,
+                amount = ledger.sentTotal or ledger.lastSent,
+                requestId = request.id,
+                detail = "MineColonies request changed after delivery; acknowledgement accepted",
+            })
+            store.log(
+                "REQUEST changed id=" .. tostring(request.id) ..
+                "; clearing acknowledgement reconciliation state")
+            resetLedger(ledger)
         end
 
-        if ledger.signature == signature and floor(ledger.sent) > 0 then
-            local age = nowSeconds() - (tonumber(ledger.sentAt) or nowSeconds())
-            local detail = "WAITING ACK; sent " .. tostring(ledger.sent) ..
-                " " .. tostring(ledger.item or "") .. " " .. tostring(age) .. "s ago"
-            if age >= (tonumber(config.requestAckWarnSeconds) or 120) then
-                detail = detail .. " (acknowledgement delayed)"
-            end
-            return {
-                id=tostring(request.id), name=tostring(request.name or "Request"), requested=count,
-                item=tostring(ledger.item or "?"), status="WAITING ACK", detail=detail,
-            }
+        if ledger.signature == signature
+            and floor(ledger.sentTotal or ledger.lastSent) > 0 then
+            return reconcileAcknowledgement(request, signature, ledger)
         end
 
-        local candidate, class, chooseErr = matcher.choose(request, transfer.playerRS, safeCall, count)
+        local candidate, class, chooseErr = matcher.choose(
+            request, transfer.playerRS, safeCall, count)
+
         if not candidate then
             return {
-                id=tostring(request.id), name=tostring(request.name or "Request"), requested=count,
-                item="-", status="BLOCKED",
-                detail=tostring(chooseErr or ("no acceptable " .. tostring(class or "item") .. " candidate")),
+                id=tostring(request.id),
+                name=tostring(request.name or "Request"),
+                requested=count,
+                item="-",
+                status="BLOCKED",
+                detail=tostring(chooseErr or
+                    ("no acceptable " .. tostring(class or "item") .. " candidate")),
+                usedPRSTurn=false,
             }
         end
 
         if candidate.stock > 0 then
-            local amount = math.min(count, candidate.stock, floor(config.maxTransferChunk or 64))
-            local ok, movedOrErr = transfer.playerToColony(candidate, amount, {
-                requestId=request.id, detail="MineColonies request " .. tostring(request.name or request.id)
-            })
-            if ok then
-                ledger.signature = signature
-                ledger.sent = floor(movedOrErr)
-                ledger.sentAt = nowSeconds()
-                ledger.item = candidate.name
-                ledger.identity = candidate.identity
-                store.save()
+            local amount = math.min(
+                count, candidate.stock, floor(config.maxTransferChunk or 64))
+            local baselineCRS = transfer.colonyAmount(candidate)
+
+            if baselineCRS == nil then
                 return {
-                    id=tostring(request.id), name=tostring(request.name or "Request"), requested=count,
-                    item=candidate.name, status="WAITING ACK",
-                    detail="verified sent " .. tostring(movedOrErr) .. "; awaiting MineColonies acknowledgement",
+                    id=tostring(request.id),
+                    name=tostring(request.name or "Request"),
+                    requested=count,
+                    item=candidate.name,
+                    status="ERROR",
+                    detail="cannot read CRS baseline before transfer",
+                    usedPRSTurn=false,
                 }
             end
-            store.addError("SUPPLY_TRANSFER", "PRS->CRS request transfer failed",
-                { requestId=request.id, item=candidate.name, count=amount, detail=movedOrErr }, "ERROR")
+
+            local ok, movedOrErr = transfer.playerToColony(candidate, amount, {
+                requestId=request.id,
+                detail="MineColonies request " ..
+                    tostring(request.name or request.id)
+            })
+
+            if ok then
+                noteVerifiedSend(
+                    ledger, signature, candidate, movedOrErr, baselineCRS, false)
+                return {
+                    id=tostring(request.id),
+                    name=tostring(request.name or "Request"),
+                    requested=count,
+                    item=candidate.name,
+                    status="WAITING ACK",
+                    detail="verified sent " .. tostring(movedOrErr) ..
+                        "; awaiting MineColonies acknowledgement",
+                    usedPRSTurn=true,
+                }
+            end
+
+            store.addError(
+                "SUPPLY_TRANSFER",
+                "PRS->CRS request transfer failed",
+                {
+                    requestId=request.id,
+                    item=candidate.name,
+                    count=amount,
+                    detail=movedOrErr,
+                },
+                "ERROR"
+            )
             return {
-                id=tostring(request.id), name=tostring(request.name or "Request"), requested=count,
-                item=candidate.name, status="ERROR", detail=tostring(movedOrErr),
+                id=tostring(request.id),
+                name=tostring(request.name or "Request"),
+                requested=count,
+                item=candidate.name,
+                status="ERROR",
+                detail=tostring(movedOrErr),
+                usedPRSTurn=true,
             }
         end
 
-        if candidate.craftable and store.data.settings.autoCraftEnabled == true then
-            local ok, detail = startCraft(candidate, count)
+        if candidate.craftable
+            and store.data.settings.autoCraftEnabled == true then
+            local ok, detail, usedTurn = startCraft(candidate, count)
             return {
-                id=tostring(request.id), name=tostring(request.name or "Request"), requested=count,
-                item=candidate.name, status=ok and "CRAFTING" or "BLOCKED", detail=tostring(detail),
+                id=tostring(request.id),
+                name=tostring(request.name or "Request"),
+                requested=count,
+                item=candidate.name,
+                status=ok and "CRAFTING" or "BLOCKED",
+                detail=tostring(detail),
+                usedPRSTurn=usedTurn == true,
             }
         end
 
         return {
-            id=tostring(request.id), name=tostring(request.name or "Request"), requested=count,
-            item=candidate.name, status="MISSING",
-            detail=candidate.craftable and "AutoCraft disabled" or tostring(candidate.craftSource or "no exact stock or recipe"),
+            id=tostring(request.id),
+            name=tostring(request.name or "Request"),
+            requested=count,
+            item=candidate.name,
+            status="MISSING",
+            detail=candidate.craftable and "AutoCraft disabled"
+                or tostring(candidate.craftSource or "no exact stock or recipe"),
+            usedPRSTurn=false,
         }
     end
 
@@ -428,26 +814,50 @@ function M.new(config, store, cluster, matcher, transfer)
         end
 
         local active = {}
+        local activeRequests = {}
+
+        -- Build the complete authoritative active set before processing anything.
+        -- A turn-ending mutation must never cause later active request ledgers to
+        -- be pruned simply because this scan did not reach them.
         for _, request in pairs(requests) do
             if requestActive(request) then
                 local id = tostring(request.id)
                 active[id] = true
-                self.stats.active = self.stats.active + 1
-                local row = processRequest(request)
-                self.rows[#self.rows + 1] = row
-                if row.status == "WAITING ACK" then self.stats.waiting = self.stats.waiting + 1
-                elseif row.status == "CRAFTING" then self.stats.crafting = self.stats.crafting + 1
-                elseif row.status == "ERROR" then self.stats.errors = self.stats.errors + 1
-                elseif row.status == "BLOCKED" or row.status == "MISSING" then self.stats.blocked = self.stats.blocked + 1
-                else self.stats.ready = self.stats.ready + 1 end
-
-                -- Exactly one PRS mutation per turn. A transfer or craft consumes
-                -- this colony's turn, which prevents same-turn multi-request races.
-                if row.status == "WAITING ACK" or row.status == "CRAFTING" or row.status == "ERROR" then
-                    break
-                end
+                activeRequests[#activeRequests + 1] = request
             end
         end
+
+        table.sort(activeRequests, function(a, b)
+            return tostring(a.id or "") < tostring(b.id or "")
+        end)
+
+        for _, request in ipairs(activeRequests) do
+            self.stats.active = self.stats.active + 1
+            local row = processRequest(request)
+            self.rows[#self.rows + 1] = row
+
+            if row.status == "WAITING ACK"
+                or row.status == "VERIFYING DELIVERY" then
+                self.stats.waiting = self.stats.waiting + 1
+            elseif row.status == "CRAFTING"
+                or row.status == "CRAFTING RETRY" then
+                self.stats.crafting = self.stats.crafting + 1
+            elseif row.status == "ERROR" then
+                self.stats.errors = self.stats.errors + 1
+            elseif row.status == "BLOCKED"
+                or row.status == "MISSING"
+                or row.status == "ACK STALLED" then
+                self.stats.blocked = self.stats.blocked + 1
+            else
+                self.stats.ready = self.stats.ready + 1
+            end
+
+            -- WAITING ACK, VERIFYING DELIVERY, and ACK STALLED are local to
+            -- that request. They do not block unrelated construction requests.
+            -- End this colony's turn only after this scan actually touched PRS.
+            if row.usedPRSTurn == true then break end
+        end
+
         cleanLedger(active)
 
         if self.stats.active == 0 then
