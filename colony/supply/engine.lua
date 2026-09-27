@@ -2128,6 +2128,10 @@ function M.new(config, store, cluster, matcher, transfer)
             colonyRS = transfer.health.colonyRS,
             warehouse = transfer.health.warehouse,
             transferChest = transfer.health.transferChest,
+            transferChestItemCount =
+                transfer.health.transferChestItemCount,
+            transferChestStackCount =
+                transfer.health.transferChestStackCount,
             cluster = cs,
             startupReady = self.startupReady,
             startupChecks = checks,
