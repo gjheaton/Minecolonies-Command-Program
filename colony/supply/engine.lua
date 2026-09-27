@@ -1666,13 +1666,7 @@ function M.new(config, store, cluster, matcher, transfer)
                     tostring(row.item or requestRow.displayName or requestRow.name)
                 requestRow.detail = tostring(row.detail or requestRow.detail or "")
 
-                local signature = requestSignature(
-                    { id=requestRow.id, name=requestRow.name },
-                    requestRow.requested,
-                    matcher.canonicalNBT
-                )
-                -- Sent/remaining are refreshed from the authoritative ledger
-                -- below without relying on the simplified signature above.
+                -- Sent/remaining are refreshed from the authoritative ledger.
                 local ledger = store.data.requestLedger[id] or {}
                 local sent = floor(ledger.sentTotal or ledger.lastSent)
                 requestRow.sent = math.max(requestRow.sent or 0, sent)
@@ -1881,24 +1875,12 @@ function M.new(config, store, cluster, matcher, transfer)
             return false
         end
 
-        -- A stray transfer-chest item can appear after startup as well (for
-        -- example after an interrupted/failed import). Quarantine it before
-        -- processing new requests so repeated transfers do not just produce a
-        -- permanent "transfer chest not empty" error loop.
-        local chestReady, chestDetail = handleOrphanChest(requests)
-        if not chestReady then
-            self.statusMessage = "TRANSFER CHEST: " .. tostring(chestDetail)
-            self.stats.blocked = self.stats.blocked + 1
-            cluster.releaseTurn("transfer chest quarantine")
-            return false
-        end
-
         local active = {}
         local activeRequests = {}
 
-        -- Build the complete authoritative active set before processing anything.
-        -- A turn-ending mutation must never cause later active request ledgers to
-        -- be pruned simply because this scan did not reach them.
+        -- Build the complete authoritative active set before processing
+        -- anything. The Requests page must represent every active request even
+        -- though an actual PRS mutation ends this colony's turn early.
         for _, request in pairs(requests) do
             if requestActive(request) then
                 local id = tostring(request.id)
@@ -1913,11 +1895,28 @@ function M.new(config, store, cluster, matcher, transfer)
 
         self.stats.active = #activeRequests
 
+        -- A stray transfer-chest item can appear after startup as well. Active
+        -- requested contents are recovered into CRS first; only truly unrelated
+        -- leftovers enter the 180-second PRS-return quarantine.
+        local chestReady, chestDetail = handleOrphanChest(requests)
+        if not chestReady then
+            self.requestRows = buildRequestStatusRows(activeRequests)
+            refreshMissingRequests()
+            self.statusMessage = "TRANSFER CHEST: " .. tostring(chestDetail)
+            self.stats.blocked = self.stats.blocked + 1
+            cluster.releaseTurn("transfer chest quarantine")
+            return false
+        end
+
+        self.requestRows = buildRequestStatusRows(activeRequests)
+        refreshMissingRequests()
+
         local currentWorkRequest
         local currentWorkRow
         for _, request in ipairs(activeRequests) do
             local row = processRequest(request)
             self.rows[#self.rows + 1] = row
+            updateRequestRowFromProcess(row)
 
             -- Choose which request to display now, but defer the PRS/CRS stock
             -- snapshot until processing is finished. This keeps the Home
@@ -1957,6 +1956,7 @@ function M.new(config, store, cluster, matcher, transfer)
             self.currentWork = nil
         end
 
+        refreshMissingRequests()
         cleanLedger(active)
 
         if self.stats.active == 0 then
@@ -1990,6 +1990,8 @@ function M.new(config, store, cluster, matcher, transfer)
             autoCraftEnabled = store.data.settings.autoCraftEnabled == true,
             statusMessage = self.statusMessage,
             lastScanText = self.lastScanText,
+            requestRows = self.requestRows,
+            missingRequests = self.missingRequests,
             currentWork = self.currentWork,
         }
     end
