@@ -1586,8 +1586,7 @@ function M.new(config, store, cluster, matcher, transfer)
         local refreshSeconds =
             math.max(10, floor(config.requestStatusRefreshSeconds or 15))
 
-        if #self.requestRows > 0
-            and activeSignature == requestStatusSignature
+        if activeSignature == requestStatusSignature
             and requestStatusLastBuild > 0
             and now - requestStatusLastBuild < refreshSeconds then
             return self.requestRows
