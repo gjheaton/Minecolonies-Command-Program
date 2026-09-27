@@ -496,6 +496,99 @@ function M.new(config, store, matcher)
         return false, "rollback incomplete: chest=" .. tostring(chestAfter) .. " PRS gain=" .. tostring(gained) .. " bridge=" .. tostring(moved)
     end
 
+    function self.adoptChestToColony(candidate, count, meta)
+        meta = meta or {}
+        if type(store.data.pending) == "table" then
+            return false, "pending transaction exists; requested chest recovery refused"
+        end
+
+        count = math.min(
+            math.max(1, floor(count)),
+            floor(config.maxTransferChunk or 64)
+        )
+
+        local chestBefore = self.chestCount(candidate)
+        if chestBefore == nil then
+            return false, "cannot read requested item in transfer chest"
+        end
+        if chestBefore <= 0 then
+            return false, "requested transfer-chest item is no longer present"
+        end
+
+        local quantity = math.min(count, chestBefore)
+        local colonyBefore = self.colonyAmount(candidate)
+        if colonyBefore == nil then
+            return false, "cannot read CRS baseline before chest recovery"
+        end
+
+        local importFilter = { name = candidate.name, count = quantity }
+        if candidate.hasNBT then
+            local encoded = matcher.craftFilter(candidate, quantity)
+            if encoded.nbt then importFilter.nbt = encoded.nbt end
+        end
+
+        for _ = 1, math.max(1, floor(config.transferImportRetries or 3)) do
+            destinationImport(
+                self.colonyRS,
+                importFilter,
+                config.chestToColonyDirection
+            )
+            sleep(tonumber(config.transferRetryDelay) or 0.25)
+
+            local left = self.chestCount(candidate)
+            if left ~= nil and left <= math.max(0, chestBefore - quantity) then
+                break
+            end
+        end
+
+        local chestAfter = self.chestCount(candidate)
+        if chestAfter == nil then
+            return false, "cannot verify transfer chest after requested-item recovery"
+        end
+
+        local physicalAccepted =
+            math.max(0, math.min(quantity, chestBefore - chestAfter))
+        if physicalAccepted <= 0 then
+            return false,
+                "CRS did not import requested transfer-chest item"
+        end
+
+        local confirmed = verifyDestination(
+            self.colonyRS,
+            candidate,
+            colonyBefore,
+            physicalAccepted
+        )
+        if confirmed < physicalAccepted then
+            return false,
+                "requested chest item moved but CRS confirmation failed: physical=" ..
+                tostring(physicalAccepted) ..
+                " confirmed=" .. tostring(confirmed)
+        end
+
+        store.addHistory(
+            "RECOVERY",
+            {
+                direction = "CHEST>CRS",
+                item = candidate.name,
+                amount = confirmed,
+                requestId = meta.requestId,
+                detail = tostring(
+                    meta.detail
+                    or "recovered active-request item from transfer chest into CRS"
+                ),
+            }
+        )
+
+        return true, {
+            moved = confirmed,
+            baselineCRS = colonyBefore,
+            item = candidate.name,
+            detail = "recovered " .. tostring(confirmed) .. "x " ..
+                tostring(candidate.name) .. " from transfer chest into CRS",
+        }
+    end
+
     function self.playerToColony(candidate, count, meta)
         count = math.min(math.max(1, floor(count)), floor(config.maxTransferChunk or 64))
         meta = meta or {}
