@@ -315,6 +315,7 @@ function M.new(config, store, cluster, matcher, transfer)
                     item = ledger.item,
                     identity = ledger.identity,
                     firstSentAt = ledger.firstSentAt,
+                    ackStartedAt = ledger.ackStartedAt,
                     lastSentAt = ledger.lastSentAt,
                     sentTotal = ledger.sentTotal,
                     lastSent = ledger.lastSent,
@@ -376,6 +377,146 @@ function M.new(config, store, cluster, matcher, transfer)
         store.save()
     end
 
+    local function continueOutstandingDelivery(request, signature, ledger)
+        local candidate = candidateFromLedger(ledger)
+        if not candidate then
+            return recordAckStalled(
+                request, ledger,
+                "Cannot reconstruct exact item identity while completing a partial delivery")
+        end
+
+        local requested = requestCount(request)
+        local sentTotal = floor(ledger.sentTotal or ledger.lastSent)
+        local remaining = math.max(0, requested - sentTotal)
+
+        if remaining <= 0 then
+            if not ledger.ackStartedAt then
+                ledger.ackStartedAt = tonumber(ledger.lastSentAt) or nowSeconds()
+                ledger.phase = "WAITING_ACK"
+                store.save()
+            end
+            return nil
+        end
+
+        local variants, exactStock = matcher.findStoredVariants(
+            transfer.playerRS, candidate, safeCall)
+
+        if exactStock > 0 and #variants > 0 then
+            local amount = math.min(
+                remaining,
+                exactStock,
+                floor(config.maxTransferChunk or 64)
+            )
+            local baselineCRS = transfer.colonyAmount(candidate)
+            if baselineCRS == nil then
+                return {
+                    id=tostring(request.id),
+                    name=tostring(request.name or "Request"),
+                    requested=requested,
+                    item=candidate.name,
+                    status="ERROR",
+                    detail="cannot read CRS baseline while continuing partial delivery",
+                    usedPRSTurn=false,
+                }
+            end
+
+            local ok, movedOrErr = transfer.playerToColony(candidate, amount, {
+                requestId=request.id,
+                detail="continuing verified request delivery; local sent=" ..
+                    tostring(sentTotal) .. "/" .. tostring(requested)
+            })
+
+            if not ok then
+                store.addError(
+                    "PARTIAL_DELIVERY_TRANSFER",
+                    "Failed while continuing a verified multi-chunk request delivery",
+                    {
+                        requestId=request.id,
+                        item=candidate.name,
+                        requested=requested,
+                        alreadySent=sentTotal,
+                        attempted=amount,
+                        detail=movedOrErr,
+                    },
+                    "ERROR"
+                )
+                return {
+                    id=tostring(request.id),
+                    name=tostring(request.name or "Request"),
+                    requested=requested,
+                    item=candidate.name,
+                    status="ERROR",
+                    detail=tostring(movedOrErr),
+                    usedPRSTurn=true,
+                }
+            end
+
+            noteVerifiedSend(
+                ledger, signature, candidate, movedOrErr, baselineCRS, false)
+
+            local newSent = floor(ledger.sentTotal)
+            if newSent >= requested then
+                ledger.ackStartedAt = nowSeconds()
+                ledger.phase = "WAITING_ACK"
+                store.save()
+                return {
+                    id=tostring(request.id),
+                    name=tostring(request.name or "Request"),
+                    requested=requested,
+                    item=candidate.name,
+                    status="WAITING ACK",
+                    detail="full requested quantity physically delivered (" ..
+                        tostring(newSent) .. "/" .. tostring(requested) ..
+                        "); acknowledgement timer started",
+                    usedPRSTurn=true,
+                }
+            end
+
+            return {
+                id=tostring(request.id),
+                name=tostring(request.name or "Request"),
+                requested=requested,
+                item=candidate.name,
+                status="SUPPLYING",
+                detail="verified physical delivery " .. tostring(newSent) ..
+                    "/" .. tostring(requested) ..
+                    "; remaining=" .. tostring(math.max(0, requested - newSent)),
+                usedPRSTurn=true,
+            }
+        end
+
+        if store.data.settings.autoCraftEnabled == true then
+            local craftable = matcher.craftable(
+                transfer.playerRS, candidate, safeCall)
+            if craftable then
+                local okCraft, craftDetail, usedTurn =
+                    startCraft(candidate, remaining)
+                return {
+                    id=tostring(request.id),
+                    name=tostring(request.name or "Request"),
+                    requested=requested,
+                    item=candidate.name,
+                    status=okCraft and "CRAFTING" or "BLOCKED",
+                    detail="partial delivery " .. tostring(sentTotal) .. "/" ..
+                        tostring(requested) .. "; " .. tostring(craftDetail),
+                    usedPRSTurn=usedTurn == true,
+                }
+            end
+        end
+
+        return {
+            id=tostring(request.id),
+            name=tostring(request.name or "Request"),
+            requested=requested,
+            item=candidate.name,
+            status="MISSING",
+            detail="partial delivery " .. tostring(sentTotal) .. "/" ..
+                tostring(requested) ..
+                "; exact remaining stock unavailable and no craft path available",
+            usedPRSTurn=false,
+        }
+    end
+
     local function reconcileAcknowledgement(request, signature, ledger)
         local candidate = candidateFromLedger(ledger)
         if not candidate then
@@ -386,7 +527,8 @@ function M.new(config, store, cluster, matcher, transfer)
 
         local stamp = nowSeconds()
         local firstSentAt = tonumber(ledger.firstSentAt or ledger.sentAt) or stamp
-        local lastSentAt = tonumber(ledger.lastSentAt or ledger.sentAt) or firstSentAt
+        local ackStartedAt = tonumber(ledger.ackStartedAt or ledger.lastSentAt or ledger.sentAt) or stamp
+        local lastSentAt = tonumber(ledger.lastSentAt or ledger.sentAt) or ackStartedAt
         local retryCount = floor(ledger.retryCount)
         local maxRetries = math.max(0, floor(config.requestAckMaxRetries or 1))
         local waitSeconds = math.max(1, floor(config.requestAckWaitSeconds or 60))
@@ -423,7 +565,7 @@ function M.new(config, store, cluster, matcher, transfer)
                     " verified retry; automatic resends stopped")
         end
 
-        local age = stamp - firstSentAt
+        local age = stamp - ackStartedAt
         if age < waitSeconds then
             store.save()
             return {
@@ -623,6 +765,17 @@ function M.new(config, store, cluster, matcher, transfer)
 
         if ledger.signature == signature
             and floor(ledger.sentTotal or ledger.lastSent) > 0 then
+            local sentTotal = floor(ledger.sentTotal or ledger.lastSent)
+            if sentTotal < count then
+                local row = continueOutstandingDelivery(
+                    request, signature, ledger)
+                if row then return row end
+            end
+            if not ledger.ackStartedAt then
+                ledger.ackStartedAt = tonumber(ledger.lastSentAt) or nowSeconds()
+                ledger.phase = "WAITING_ACK"
+                store.save()
+            end
             return reconcileAcknowledgement(request, signature, ledger)
         end
 
@@ -668,14 +821,34 @@ function M.new(config, store, cluster, matcher, transfer)
             if ok then
                 noteVerifiedSend(
                     ledger, signature, candidate, movedOrErr, baselineCRS, false)
+
+                if floor(ledger.sentTotal) >= count then
+                    ledger.ackStartedAt = nowSeconds()
+                    ledger.phase = "WAITING_ACK"
+                    store.save()
+                    return {
+                        id=tostring(request.id),
+                        name=tostring(request.name or "Request"),
+                        requested=count,
+                        item=candidate.name,
+                        status="WAITING ACK",
+                        detail="full requested quantity physically delivered (" ..
+                            tostring(ledger.sentTotal) .. "/" .. tostring(count) ..
+                            "); acknowledgement timer started",
+                        usedPRSTurn=true,
+                    }
+                end
+
                 return {
                     id=tostring(request.id),
                     name=tostring(request.name or "Request"),
                     requested=count,
                     item=candidate.name,
-                    status="WAITING ACK",
-                    detail="verified sent " .. tostring(movedOrErr) ..
-                        "; awaiting MineColonies acknowledgement",
+                    status="SUPPLYING",
+                    detail="verified physical delivery " ..
+                        tostring(ledger.sentTotal) .. "/" .. tostring(count) ..
+                        "; remaining=" ..
+                        tostring(math.max(0, count - floor(ledger.sentTotal))),
                     usedPRSTurn=true,
                 }
             end
@@ -847,7 +1020,8 @@ function M.new(config, store, cluster, matcher, transfer)
                 or row.status == "VERIFYING DELIVERY" then
                 self.stats.waiting = self.stats.waiting + 1
             elseif row.status == "CRAFTING"
-                or row.status == "CRAFTING RETRY" then
+                or row.status == "CRAFTING RETRY"
+                or row.status == "SUPPLYING" then
                 self.stats.crafting = self.stats.crafting + 1
             elseif row.status == "ERROR" then
                 self.stats.errors = self.stats.errors + 1
