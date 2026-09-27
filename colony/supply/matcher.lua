@@ -76,11 +76,22 @@ local function canonical(value)
     return encode(value, {})
 end
 
+local function isOpaqueNBTHash(nbt)
+    if type(nbt) ~= "string" then return false end
+    local s = tostring(nbt):lower()
+    -- CC:Tweaked / Advanced Peripherals commonly expose item NBT as an
+    -- opaque 32-character hex identity hash. That proves variant identity but
+    -- does not by itself mean the item is enchanted or carries a specific NBT
+    -- requirement that MineColonies asked for.
+    return #s == 32 and s:match("^[0-9a-f]+$") ~= nil
+end
+
 local function hasMeaningfulNBT(item)
     if type(item) ~= "table" then return false end
     local nbt = item.nbt
     if nbt == nil then return false end
     if type(nbt) == "table" then return next(nbt) ~= nil end
+    if isOpaqueNBTHash(nbt) then return false end
     local s = tostring(nbt)
     return s ~= "" and s ~= "{}" and s ~= "nil"
 end
@@ -168,8 +179,21 @@ function M.new(config, store)
     end
 
     function self.exactlyMatches(requestItem, storedItem)
-        if type(requestItem) ~= "table" or type(storedItem) ~= "table" then return false end
+        if type(requestItem) ~= "table" or type(storedItem) ~= "table" then
+            return false
+        end
         if requestItem.name ~= storedItem.name then return false end
+
+        local requestSpecific = hasMeaningfulNBT(requestItem)
+        local storedSpecific = hasMeaningfulNBT(storedItem)
+
+        -- A generic/no-specific-NBT request may be compared with an item whose
+        -- inventory API only exposes an opaque NBT hash. Do not let that hash
+        -- turn an otherwise ordinary tool into a false mismatch.
+        if not requestSpecific and not storedSpecific then
+            return true
+        end
+
         return canonical(requestItem.nbt) == canonical(storedItem.nbt)
     end
 
