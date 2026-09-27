@@ -1,5 +1,5 @@
 -- MineColonies Control Suite Installer
--- Suite package version 3.0.6
+-- Suite package version 3.0.7
 --
 -- Modular GitHub installer.
 -- The repository layout mirrors the CC:Tweaked filesystem.
@@ -9,15 +9,15 @@
 local mode, arg2, arg3 = ...
 
 local SUITE_INFO = {
-    suiteVersion = "3.0.6",
-    installerVersion = "3.0.6",
+    suiteVersion = "3.0.7",
+    installerVersion = "3.0.7",
     apps = {
-        command = { version = "2.16", program = "/colony_command.lua", displayName = "MineColonies Command Center" },
+        command = { version = "3.0.0", program = "/colony_command.lua", displayName = "MineColonies Command Center" },
         supply = { version = "3.0.6", program = "/colony_supply.lua", displayName = "MineColonies Supply Manager" },
     },
     components = {
         startup = "1.0.0", util = "1.1.0", ui = "1.1.0",
-        version = "1.0.0", updater = "1.1.1", installer = "3.0.6",
+        version = "1.0.0", updater = "1.1.1", installer = "3.0.7",
     },
 }
 
@@ -49,6 +49,7 @@ local PACKAGE_FILES = {
     { path = "/colony/lib/version.lua", app = "common",  remote = "colony/lib/version.lua" },
     { path = "/colony/lib/updater.lua", app = "common",  remote = "colony/lib/updater.lua" },
     { path = "/colony_command.lua",     app = "command", remote = "colony_command.lua" },
+    { path = "/colony/command/visitor_jobs.lua", app = "command", remote = "colony/command/visitor_jobs.lua" },
     { path = "/colony_supply.lua",      app = "supply",  remote = "colony_supply.lua" },
     { path = "/colony/supply/config.lua",   app = "supply", remote = "colony/supply/config.lua" },
     { path = "/colony/supply/state.lua",    app = "supply", remote = "colony/supply/state.lua" },
