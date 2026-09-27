@@ -10,12 +10,13 @@
 -- v3.0.1: Citizens page BEST FIT column with current-job fit coloring.
 -- v3.0.2: Supply-style CHECK NOW / UPDATE button on the Home screen.
 -- v3.0.3: Citizen BEST FIT scores and wider STATE / compact STATUS columns.
+-- v3.0.4: Left-align BEST FIT job names and right-align fit scores.
 
 local REFRESH_SECONDS = 10
 local RAID_BLINK_SECONDS = 0.75
 local TEXT_SCALE = 0.5
-local PROGRAM_VERSION = "3.0.3"
-local SUITE_VERSION = "3.0.12"
+local PROGRAM_VERSION = "3.0.4"
+local SUITE_VERSION = "3.0.13"
 
 local Util = require("colony.lib.util")
 local SharedUI = require("colony.lib.ui")
@@ -260,31 +261,21 @@ local function updateCitizenJobFits(citizens)
     end
 end
 
-local function citizenBestFit(citizen, width)
+local function citizenBestFit(citizen)
     local fit = type(citizen) == "table" and citizen._jobFit or nil
     if type(fit) ~= "table" or fit.applicable ~= true
         or type(fit.best) ~= "table" then
-        return "N/A", C.dim
+        return "N/A", nil, C.dim
     end
 
     local label = tostring(fit.best.label or "Unknown")
     local score = string.format("%.1f", tonumber(fit.best.score) or 0)
-    local text
-
-    if width and tonumber(width) and tonumber(width) > 0 then
-        width = math.floor(tonumber(width))
-        local labelWidth = math.max(1, width - #score - 1)
-        text = clip(label, labelWidth) .. " " .. score
-        text = clip(text, width)
-    else
-        text = label .. " " .. score
-    end
 
     if fit.training == true then
-        return text, C.text
+        return label, score, C.text
     end
 
-    return text, fit.matches == true and C.good or C.warn
+    return label, score, fit.matches == true and C.good or C.warn
 end
 
 -- Military citizens are kept in a separate section at the bottom of the
@@ -1872,17 +1863,33 @@ local function drawListPage(page)
                     center(y, header, C.title, C.panel2)
                 else
                     local statusText, statusColor = citizenStatus(item)
-                    local bestFitText, bestFitColor =
-                        citizenBestFit(item, columns.bestW)
+                    local bestFitJob, bestFitScore, bestFitColor =
+                        citizenBestFit(item)
                     writeAt(columns.nameX, y, pad(item.name or "Unknown", columns.nameW), C.text, bg)
                     writeAt(columns.sep1X, y, "|", C.dim, bg)
                     writeAt(columns.jobX, y, pad(citizenJob(item), columns.jobW), C.accent, bg)
                     writeAt(columns.sep2X, y, "|", C.dim, bg)
+
+                    local scoreWidth = bestFitScore and #bestFitScore or 0
+                    local jobWidth = math.max(
+                        1,
+                        columns.bestW - scoreWidth -
+                            (bestFitScore and 1 or 0)
+                    )
                     writeAt(
                         columns.bestX, y,
-                        pad(clip(bestFitText, columns.bestW), columns.bestW),
+                        clip(bestFitJob, jobWidth),
                         bestFitColor, bg
                     )
+                    if bestFitScore then
+                        local scoreX =
+                            columns.bestX + columns.bestW - scoreWidth
+                        writeAt(
+                            scoreX, y,
+                            bestFitScore,
+                            bestFitColor, bg
+                        )
+                    end
                     writeAt(columns.sep3X, y, "|", C.dim, bg)
                     writeAt(
                         columns.stateX, y,
