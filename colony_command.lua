@@ -1798,6 +1798,28 @@ local function drawListPage(page)
                 writeAt(columns.sep3X, y, "|", C.dim, bg)
                 writeAt(columns.openX, y, pad(openText, columns.openW), C.warn, bg)
 
+            elseif visitorTable then
+                local visitor = item.visitor or {}
+                local bestText = visitorFitText(item.best, columns.bestW)
+                local openText = visitorFitText(item.bestOpen, columns.openW)
+                local costText = VisitorJobs.formatRecruitCost(visitor)
+
+                writeAt(columns.nameX, y,
+                    pad(tostring(visitor.name or "Unknown"), columns.nameW),
+                    C.text, bg)
+                writeAt(columns.sep1X, y, "|", C.dim, bg)
+                writeAt(columns.bestX, y,
+                    pad(bestText, columns.bestW),
+                    visitorFitColor(item.best), bg)
+                writeAt(columns.sep2X, y, "|", C.dim, bg)
+                writeAt(columns.openX, y,
+                    pad(openText, columns.openW),
+                    item.bestOpen and visitorFitColor(item.bestOpen) or C.dim, bg)
+                writeAt(columns.sep3X, y, "|", C.dim, bg)
+                writeAt(columns.costX, y,
+                    pad(costText, columns.costW),
+                    C.accent, bg)
+
             elseif requestTable then
                 local requestName = tostring(item.name or "Request")
                 local amount = item.count
