@@ -414,11 +414,33 @@ function M.new(config, store, cluster, matcher, transfer)
         setCheck("pending", okPending, pendingDetail)
 
         local empty, emptyDetail = transfer.chestEmpty()
+        if okPending and not empty then
+            -- Before deciding an occupied chest is permanently blocking
+            -- startup, compare its exact contents with the colony's current
+            -- requests. Only genuinely unrequested contents are eligible for
+            -- the timed automatic return to PRS.
+            local okRequests, startupRequests =
+                safeCall(transfer.colony, "getRequests")
+            if okRequests and type(startupRequests) == "table" then
+                local recovered, recoveryDetail =
+                    handleOrphanChest(startupRequests)
+                empty = recovered == true
+                emptyDetail = recoveryDetail
+            else
+                empty = false
+                emptyDetail =
+                    "transfer chest occupied; active requests could not be " ..
+                    "verified, so automatic cleanup is suppressed"
+            end
+        elseif empty then
+            clearOrphanChestState()
+        end
+
         setCheck(
             "chest_empty",
             empty,
             empty
-                and "transfer chest empty"
+                and tostring(emptyDetail or "transfer chest empty")
                 or tostring(emptyDetail or "transfer chest occupied")
         )
 
@@ -1522,6 +1544,18 @@ function M.new(config, store, cluster, matcher, transfer)
             store.addError("REQUEST_API", "MineColonies getRequests failed", {detail=requests}, "ERROR")
             self.statusMessage = "MineColonies request API error"
             cluster.releaseTurn("request API error")
+            return false
+        end
+
+        -- A stray transfer-chest item can appear after startup as well (for
+        -- example after an interrupted/failed import). Quarantine it before
+        -- processing new requests so repeated transfers do not just produce a
+        -- permanent "transfer chest not empty" error loop.
+        local chestReady, chestDetail = handleOrphanChest(requests)
+        if not chestReady then
+            self.statusMessage = "TRANSFER CHEST: " .. tostring(chestDetail)
+            self.stats.blocked = self.stats.blocked + 1
+            cluster.releaseTurn("transfer chest quarantine")
             return false
         end
 
