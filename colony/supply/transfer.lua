@@ -521,6 +521,19 @@ function M.new(config, store, matcher)
             return false, "cannot read CRS baseline before chest recovery"
         end
 
+        local pending = {
+            schema = 3,
+            direction = "CHEST>CRS",
+            stage = "staged",
+            item = candidate.name,
+            identity = candidate.identity,
+            amount = quantity,
+            requestId = meta.requestId,
+            started = nowSeconds(),
+            recovery = true,
+        }
+        setPending(pending)
+
         local importFilter = { name = candidate.name, count = quantity }
         if candidate.hasNBT then
             local encoded = matcher.craftFilter(candidate, quantity)
@@ -549,9 +562,14 @@ function M.new(config, store, matcher)
         local physicalAccepted =
             math.max(0, math.min(quantity, chestBefore - chestAfter))
         if physicalAccepted <= 0 then
+            clearPending()
             return false,
                 "CRS did not import requested transfer-chest item"
         end
+
+        pending.stage = "confirming"
+        pending.physicalAccepted = physicalAccepted
+        setPending(pending)
 
         local confirmed = verifyDestination(
             self.colonyRS,
@@ -566,6 +584,7 @@ function M.new(config, store, matcher)
                 " confirmed=" .. tostring(confirmed)
         end
 
+        clearPending()
         store.addHistory(
             "RECOVERY",
             {
