@@ -35,6 +35,12 @@ C.transferSettleDelay = 0.25
 C.transferImportRetries = 3
 C.transferRetryDelay = 0.25
 
+-- A bridge call can complete before CC:Tweaked sees the Sophisticated Storage
+-- inventory update. Poll the transfer chest for up to ~5 seconds before
+-- classifying a source export as unstaged.
+C.transferStageConfirmReads = 20
+C.transferStageConfirmDelay = 0.25
+
 -- If the transfer chest contains no item matching an active MineColonies
 -- request and there is no pending transaction, quarantine the unchanged chest
 -- contents for this long before returning them to PRS automatically.
@@ -55,6 +61,14 @@ C.requestAckRetrySeconds = 180
 C.requestAckMaxRetries = 1
 C.requestAckPostRetrySeconds = 60
 C.requestAckRetryCraftWaitSeconds = 180
+
+-- Craft submission safety. Once a craft is accepted, do not submit the same
+-- exact item again merely because it has not appeared in PRS yet.
+-- Keep the shared PRS turn while a craft is actively running, then require
+-- the output to remain visible across multiple scans plus a quiet window
+-- before Supply tries to move it.
+C.craftStableReadsRequired = 2
+C.craftPostCompleteQuietSeconds = 10
 
 -- Craft submission safety. Once a craft is accepted, do not submit the same
 -- exact item again merely because it has not appeared in PRS yet. After this
