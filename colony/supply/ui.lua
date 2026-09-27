@@ -182,12 +182,18 @@ function M.new(config, store, cluster, transfer, engine, updater)
             not h.startupReady
             and type(movementCheck) == "table"
             and movementCheck.severity == "WAITING"
+        local waitingDetail =
+            startupWaiting and tostring(movementCheck.detail or "") or ""
+        local startupWaitingLabel =
+            waitingDetail:lower():find("orphan", 1, true)
+                and "WAITING CHEST"
+                or "WAITING TURN"
 
         line(
             "Startup",
             h.startupReady
                 and "PASSED"
-                or (startupWaiting and "WAITING TURN" or "BLOCKED"),
+                or (startupWaiting and startupWaitingLabel or "BLOCKED"),
             h.startupReady
                 and C.good
                 or (startupWaiting and C.warn or C.danger)
