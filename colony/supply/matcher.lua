@@ -237,14 +237,20 @@ function M.new(config, store)
 
     function self.exportFilterForVariant(candidate, variant, count)
         count = math.max(1, math.floor(tonumber(count) or 1))
-        if variant and type(variant.fingerprint) == "string" and variant.fingerprint ~= "" then
-            return { fingerprint = variant.fingerprint, count = count }, "fingerprint"
-        end
 
-        -- If no NBT exists, registry-name export is exact enough because there is
-        -- no NBT distinction to collapse. NBT-bearing variants require a fingerprint.
+        -- Ordinary non-NBT items use the proven AP/RS registry-name path.
+        -- Do NOT prefer a fingerprint simply because listItems() exposes one:
+        -- AP 0.7.x can return 0 for fingerprint exports which export normally
+        -- by registry name. Exact NBT variants remain fingerprint-only so RS
+        -- cannot substitute another same-name stack.
         if not candidate.hasNBT then
             return { name = candidate.name, count = count }, "name"
+        end
+
+        if variant
+            and type(variant.fingerprint) == "string"
+            and variant.fingerprint ~= "" then
+            return { fingerprint = variant.fingerprint, count = count }, "fingerprint"
         end
 
         return nil, "exact NBT variant has no export fingerprint"
