@@ -42,6 +42,8 @@ function M.new(config, store)
     local self = {
         id = tonumber(os.getComputerID and os.getComputerID() or 0) or 0,
         peers = {},
+        memberNames = {},
+        localName = nil,
         active = {},
         expected = {},
         masterId = nil,
@@ -82,6 +84,41 @@ function M.new(config, store)
             if present and id then expected[id] = true end
         end
         self.expected = expected
+    end
+
+    local function cleanName(value)
+        local name = tostring(value or "")
+        name = name:gsub("^%s+", ""):gsub("%s+$", "")
+        if name == "" then return nil end
+        return name
+    end
+
+    function self.setLocalName(name)
+        name = cleanName(name)
+        if not name then return false end
+        self.localName = name
+        self.memberNames[self.id] = name
+        return true
+    end
+
+    local function namesSnapshot()
+        local names = {}
+        for id, name in pairs(self.memberNames or {}) do
+            id = tonumber(id)
+            name = cleanName(name)
+            if id and name then names[tostring(id)] = name end
+        end
+        if self.localName then names[tostring(self.id)] = self.localName end
+        return names
+    end
+
+    local function mergeNames(names)
+        if type(names) ~= "table" then return end
+        for id, name in pairs(names) do
+            id = tonumber(id)
+            name = cleanName(name)
+            if id and name then self.memberNames[id] = name end
+        end
     end
 
     function self.openModems()
@@ -203,6 +240,7 @@ function M.new(config, store)
             masterId = self.masterId,
             turnId = self.turnId,
             generation = self.generation,
+            memberNames = namesSnapshot(),
             reason = tostring(reason or "advance"),
         })
     end
@@ -211,6 +249,9 @@ function M.new(config, store)
         sender = tonumber(sender)
         if not sender or sender == self.id or type(msg) ~= "table" then return end
         self.peers[sender] = now()
+        local incomingName = cleanName(msg.colonyName)
+        if incomingName then self.memberNames[sender] = incomingName end
+        mergeNames(msg.memberNames)
         rememberKnown(sender)
         recomputeMembership()
 
@@ -227,6 +268,7 @@ function M.new(config, store)
                     masterId = self.masterId,
                     turnId = self.turnId,
                     generation = self.generation,
+                    memberNames = namesSnapshot(),
                     reason = "hello-sync",
                 })
             end
@@ -234,6 +276,7 @@ function M.new(config, store)
             if sender == self.masterId and tonumber(msg.masterId) == self.masterId then
                 self.turnId = tonumber(msg.turnId)
                 self.generation = math.max(self.generation, tonumber(msg.generation) or self.generation)
+                mergeNames(msg.memberNames)
                 self.lastMasterSeen = now()
             end
         elseif kind == "release_turn" then
@@ -263,6 +306,8 @@ function M.new(config, store)
                 kind = "hello",
                 version = 3,
                 id = self.id,
+                colonyName = self.localName,
+                memberNames = namesSnapshot(),
                 programVersion = config.PROGRAM_VERSION,
             })
         end
@@ -282,6 +327,7 @@ function M.new(config, store)
                     masterId = self.masterId,
                     turnId = nil,
                     generation = self.generation,
+                    memberNames = namesSnapshot(),
                     reason = "fault: " .. fault,
                 })
             end
@@ -311,6 +357,7 @@ function M.new(config, store)
                     masterId = self.masterId,
                     turnId = self.turnId,
                     generation = self.generation,
+                    memberNames = namesSnapshot(),
                     reason = "heartbeat",
                 })
             end
@@ -322,6 +369,14 @@ function M.new(config, store)
         local fault = faultStatus()
         local activeIds = copySortedIds(self.active)
         local expectedIds = copySortedIds(self.expected)
+        local names = namesSnapshot()
+        local members = {}
+        for _, id in ipairs(activeIds) do
+            members[#members + 1] = {
+                id = id,
+                name = names[tostring(id)] or ("Computer " .. tostring(id)),
+            }
+        end
         return {
             id = self.id,
             ok = fault == nil,
@@ -331,6 +386,8 @@ function M.new(config, store)
             role = self.masterId == self.id and "MASTER" or "MEMBER",
             activeIds = activeIds,
             expectedIds = expectedIds,
+            memberNames = names,
+            members = members,
             activeCount = #activeIds,
             expectedCount = #expectedIds,
         }
