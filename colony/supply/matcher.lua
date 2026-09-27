@@ -1,0 +1,330 @@
+-- MineColonies Control Suite v3 - exact request identity and candidate selection
+local M = {}
+
+local TOOL_WORDS = {
+    axe = "axe",
+    pickaxe = "pickaxe",
+    shovel = "shovel",
+    hoe = "hoe",
+    sword = "sword",
+    fishing_rod = "fishing rod",
+    shears = "shears",
+    bow = "bow",
+    crossbow = "crossbow",
+    shield = "shield",
+    helmet = "helmet",
+    chestplate = "chestplate",
+    leggings = "leggings",
+    boots = "boots",
+    lighter = "flint and steel",
+    lead = "lead",
+    spear = "spear",
+}
+
+local function cleanText(value)
+    local s = tostring(value or "")
+    s = s:gsub("§.", "")
+    s = s:gsub("_", " "):gsub("-", " ")
+    s = s:gsub("%s+", " ")
+    return (s:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+local function namespace(name)
+    return tostring(name or ""):match("^([^:]+):") or ""
+end
+
+local function path(name)
+    return tostring(name or ""):match("^[^:]+:(.+)$") or tostring(name or "")
+end
+
+local function canonical(value)
+    if value == nil then return "" end
+    if type(value) == "string" then
+        if value == "{}" or value == "nil" then return "" end
+        return value
+    end
+    if type(value) ~= "table" then return tostring(value) end
+
+    local function encode(v, seen)
+        local t = type(v)
+        if t == "nil" then return "nil" end
+        if t == "boolean" or t == "number" then return tostring(v) end
+        if t == "string" then return string.format("%q", v) end
+        if t ~= "table" then return "<" .. t .. ":" .. tostring(v) .. ">" end
+        if seen[v] then return "<cycle>" end
+        seen[v] = true
+        local keys = {}
+        for k in pairs(v) do keys[#keys + 1] = k end
+        table.sort(keys, function(a,b) return tostring(a) < tostring(b) end)
+        local out = {"{"}
+        for i, k in ipairs(keys) do
+            if i > 1 then out[#out + 1] = "," end
+            out[#out + 1] = canonical(k)
+            out[#out + 1] = "="
+            out[#out + 1] = canonical(v[k])
+        end
+        out[#out + 1] = "}"
+        seen[v] = nil
+        return table.concat(out)
+    end
+
+    return encode(value, {})
+end
+
+local function hasMeaningfulNBT(item)
+    if type(item) ~= "table" then return false end
+    local nbt = item.nbt
+    if nbt == nil then return false end
+    if type(nbt) == "table" then return next(nbt) ~= nil end
+    local s = tostring(nbt)
+    return s ~= "" and s ~= "{}" and s ~= "nil"
+end
+
+local function identityFrom(item)
+    return tostring(item.name or "") .. "|NBT|" .. canonical(item.nbt)
+end
+
+local function requestToolClass(request)
+    local text = cleanText(
+        tostring(request and request.name or "") .. " " ..
+        tostring(request and request.displayName or "") .. " " ..
+        tostring(request and request.description or "")
+    ):lower()
+
+    if text:find("flint and steel", 1, true) then return "lighter" end
+    if text:find("fishing rod", 1, true) then return "fishing_rod" end
+    if text:find("crossbow", 1, true) then return "crossbow" end
+    if text:find("pickaxe", 1, true) then return "pickaxe" end
+    if text:find("chestplate", 1, true) then return "chestplate" end
+    if text:find("leggings", 1, true) then return "leggings" end
+    if text:find("helmet", 1, true) then return "helmet" end
+    if text:find("boots", 1, true) then return "boots" end
+    if text:find("shears", 1, true) then return "shears" end
+    if text:find("shield", 1, true) then return "shield" end
+    if text:find("sword", 1, true) then return "sword" end
+    if text:find("shovel", 1, true) then return "shovel" end
+    if text:find("spear", 1, true) then return "spear" end
+    if text:find(" lead", 1, true) or text == "lead" then return "lead" end
+    if text:find(" bow", 1, true) or text == "bow" then return "bow" end
+    if text:find(" axe", 1, true) or text == "axe" then return "axe" end
+    if text:find(" hoe", 1, true) or text == "hoe" then return "hoe" end
+    return nil
+end
+
+local function candidateMatchesClass(candidate, class)
+    local p = path(candidate.name):lower()
+    local display = cleanText(candidate.displayName or ""):lower()
+
+    if class == "pickaxe" then return p == "pickaxe" or p:match("_pickaxe$") ~= nil end
+    if class == "axe" then
+        return not p:find("pickaxe", 1, true) and (p == "axe" or p:match("_axe$") ~= nil)
+    end
+    if class == "shovel" then return p == "shovel" or p:match("_shovel$") ~= nil end
+    if class == "hoe" then return p == "hoe" or p:match("_hoe$") ~= nil end
+    if class == "sword" then return p == "sword" or p:match("_sword$") ~= nil end
+    if class == "fishing_rod" then return p == "fishing_rod" or p:match("_fishing_rod$") ~= nil end
+    if class == "shears" then return p == "shears" or p:match("_shears$") ~= nil end
+    if class == "bow" then return p == "bow" or (p:match("_bow$") ~= nil and not p:find("crossbow",1,true)) end
+    if class == "crossbow" then return p == "crossbow" or p:match("_crossbow$") ~= nil end
+    if class == "shield" then return p == "shield" or p:match("_shield$") ~= nil end
+    if class == "helmet" or class == "chestplate" or class == "leggings" or class == "boots" then
+        return p == class or p:match("_" .. class .. "$") ~= nil
+    end
+    if class == "lighter" then return p == "flint_and_steel" or display:find("flint and steel",1,true) ~= nil end
+    if class == "lead" then return p == "lead" end
+    if class == "spear" then return p == "spear" or p:match("_spear$") ~= nil end
+    return false
+end
+
+local function toolTier(candidate)
+    local text = (path(candidate.name) .. " " .. cleanText(candidate.displayName or "")):lower()
+    if text:find("netherite",1,true) then return 4 end
+    if text:find("diamond",1,true) then return 3 end
+    if text:find("iron",1,true) then return 2 end
+    if text:find("stone",1,true) then return 1 end
+    return 0
+end
+
+function M.new(config, store)
+    local self = {}
+
+    function self.canonicalNBT(nbt)
+        return canonical(nbt)
+    end
+
+    function self.requestIdentity(item)
+        if type(item) ~= "table" then return nil end
+        return identityFrom(item)
+    end
+
+    function self.itemIdentity(item)
+        if type(item) ~= "table" then return nil end
+        return identityFrom(item)
+    end
+
+    function self.exactlyMatches(requestItem, storedItem)
+        if type(requestItem) ~= "table" or type(storedItem) ~= "table" then return false end
+        if requestItem.name ~= storedItem.name then return false end
+        return canonical(requestItem.nbt) == canonical(storedItem.nbt)
+    end
+
+    function self.requestCandidates(request)
+        local out = {}
+        local seen = {}
+        local class = requestToolClass(request)
+
+        for _, item in pairs(type(request) == "table" and type(request.items) == "table" and request.items or {}) do
+            if type(item) == "table" and type(item.name) == "string" and item.name ~= "" then
+                local candidate = {
+                    name = item.name,
+                    displayName = item.displayName or item.name,
+                    nbt = item.nbt,
+                    nbtCanonical = canonical(item.nbt),
+                    hasNBT = hasMeaningfulNBT(item),
+                    identity = identityFrom(item),
+                    namespace = namespace(item.name),
+                    toolClass = class,
+                    toolTier = 0,
+                    exactClass = true,
+                    raw = item,
+                }
+
+                if class then
+                    candidate.exactClass = candidateMatchesClass(candidate, class)
+                    candidate.toolTier = toolTier(candidate)
+                    if config.equipmentAllowedNamespaces[candidate.namespace] ~= true then
+                        candidate.rejected = "equipment namespace not allowed"
+                    elseif not candidate.exactClass then
+                        candidate.rejected = "not exact " .. tostring(TOOL_WORDS[class] or class) .. " class"
+                    end
+                end
+
+                if not candidate.rejected and not seen[candidate.identity] then
+                    seen[candidate.identity] = true
+                    out[#out + 1] = candidate
+                elseif candidate.rejected then
+                    store.log("MATCH reject request=" .. tostring(request.id or "?") ..
+                        " item=" .. tostring(candidate.name) .. " reason=" .. candidate.rejected)
+                end
+            end
+        end
+        return out, class
+    end
+
+    function self.findStoredVariants(bridge, candidate, safeCall)
+        local ok, items = safeCall(bridge, "listItems")
+        if not ok or type(items) ~= "table" then return {}, 0 end
+        local variants, total = {}, 0
+        for _, item in pairs(items) do
+            if type(item) == "table" and item.name == candidate.name and self.exactlyMatches(candidate.raw, item) then
+                local amount = math.max(0, math.floor(tonumber(item.amount) or 0))
+                if amount > 0 then
+                    variants[#variants + 1] = {
+                        name = item.name,
+                        amount = amount,
+                        nbt = item.nbt,
+                        fingerprint = item.fingerprint,
+                        displayName = item.displayName,
+                        raw = item,
+                    }
+                    total = total + amount
+                end
+            end
+        end
+        table.sort(variants, function(a,b) return a.amount > b.amount end)
+        return variants, total
+    end
+
+    function self.exportFilterForVariant(candidate, variant, count)
+        count = math.max(1, math.floor(tonumber(count) or 1))
+        if variant and type(variant.fingerprint) == "string" and variant.fingerprint ~= "" then
+            return { fingerprint = variant.fingerprint, count = count }, "fingerprint"
+        end
+
+        -- If no NBT exists, registry-name export is exact enough because there is
+        -- no NBT distinction to collapse. NBT-bearing variants require a fingerprint.
+        if not candidate.hasNBT then
+            return { name = candidate.name, count = count }, "name"
+        end
+
+        return nil, "exact NBT variant has no export fingerprint"
+    end
+
+    function self.craftFilter(candidate, count)
+        local filter = { name = candidate.name }
+        if count ~= nil then filter.count = math.max(1, math.floor(tonumber(count) or 1)) end
+
+        -- For NBT-bearing requests, pass the exact NBT only if AP exposed it in a
+        -- serializable form. If the bridge cannot craft by exact NBT, the engine
+        -- treats that as not craftable rather than weakening the match.
+        if candidate.hasNBT then
+            if type(candidate.nbt) == "string" then
+                filter.nbt = candidate.nbt
+            elseif type(candidate.nbt) == "table" then
+                local ok, encoded = pcall(textutils.serializeJSON, candidate.nbt)
+                if ok and encoded then filter.nbt = encoded end
+            end
+        end
+        return filter
+    end
+
+    function self.craftable(bridge, candidate, safeCall)
+        local filter = self.craftFilter(candidate, nil)
+        if candidate.hasNBT and filter.nbt == nil then
+            return false, "exact NBT cannot be represented for crafting"
+        end
+
+        local ok, value = safeCall(bridge, "isItemCraftable", filter)
+        if ok and value == true then return true, "isItemCraftable" end
+
+        local okPattern, pattern = safeCall(bridge, "getPattern", filter)
+        if okPattern and type(pattern) == "table" then return true, "getPattern" end
+
+        if not candidate.hasNBT then
+            local okList, craftables = safeCall(bridge, "listCraftableItems")
+            if okList and type(craftables) == "table" then
+                for _, item in pairs(craftables) do
+                    if type(item) == "table" and item.name == candidate.name then
+                        return true, "listCraftableItems"
+                    end
+                end
+            end
+        end
+
+        return false, "no exact crafting recipe reported"
+    end
+
+    function self.choose(request, playerBridge, safeCall, remaining)
+        local candidates, class = self.requestCandidates(request)
+        if #candidates == 0 then
+            return nil, class, "no acceptable candidates"
+        end
+
+        for _, c in ipairs(candidates) do
+            c.variants, c.stock = self.findStoredVariants(playerBridge, c, safeCall)
+            c.craftable, c.craftSource = self.craftable(playerBridge, c, safeCall)
+        end
+
+        table.sort(candidates, function(a,b)
+            if class and a.toolTier ~= b.toolTier then return a.toolTier > b.toolTier end
+
+            local aFull = a.stock >= remaining and remaining > 0
+            local bFull = b.stock >= remaining and remaining > 0
+            if aFull ~= bFull then return aFull end
+
+            local aAny = a.stock > 0
+            local bAny = b.stock > 0
+            if aAny ~= bAny then return aAny end
+
+            if a.craftable ~= b.craftable then return a.craftable end
+            if a.stock ~= b.stock then return a.stock > b.stock end
+            return a.identity < b.identity
+        end)
+
+        return candidates[1], class, nil
+    end
+
+    return self
+end
+
+return M
