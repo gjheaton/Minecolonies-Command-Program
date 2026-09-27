@@ -1227,6 +1227,7 @@ function M.new(config, store, cluster, matcher, transfer)
             self.stats.errors = self.stats.errors + 1
             return false
         end
+        cluster.setLocalName(transfer.colonyName)
 
         local clusterOK, clusterStatus = cluster.canAccessPRS()
         if not clusterStatus.ok then
