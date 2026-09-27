@@ -462,6 +462,14 @@ function M.new(config, store, cluster, transfer, engine, updater)
             {"Colony RS (CRS)", h.colonyRS, transfer.colonyBridgeName or "?"},
             {"Warehouse external", h.warehouse, h.warehouse and "external storage online" or "not detected"},
             {"Transfer chest", h.transferChest, transfer.transferChestName or "?"},
+            {
+                "Transfer contents",
+                h.transferChestItemCount ~= nil,
+                h.transferChestItemCount ~= nil
+                    and (tostring(h.transferChestItemCount) .. " item(s) / " ..
+                        tostring(h.transferChestStackCount or 0) .. " stack(s)")
+                    or "unavailable"
+            },
             {"Cluster link", h.cluster.ok, h.cluster.ok and table.concat(h.cluster.activeIds,",") or h.cluster.fault},
             {
                 "Startup suite",
@@ -496,7 +504,10 @@ function M.new(config, store, cluster, transfer, engine, updater)
                     or ((c.severity == "WARNING" or c.severity == "WAITING")
                         and C.warn or C.danger)
                 monitorUI.fillRow(y,C.bg)
-                monitorUI.writeAt(2,y,Util.padRight("Startup "..id,20),C.dim,C.bg)
+                local checkLabel = id == "chest_empty"
+                    and "Startup chest check"
+                    or ("Startup " .. id)
+                monitorUI.writeAt(2,y,Util.padRight(checkLabel,20),C.dim,C.bg)
                 monitorUI.writeAt(23,y,checkWord,checkColor,C.bg)
                 monitorUI.writeAt(30,y,Util.clip(c.detail or "",math.max(1,w-30)),C.text,C.bg)
                 y=y+1
