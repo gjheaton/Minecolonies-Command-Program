@@ -1004,7 +1004,6 @@ function M.new(config, store, cluster, matcher, transfer)
             transfer.playerRS, candidate, safeCall)
 
         if exactStock > 0 and #variants > 0 then
-            clearCraftJob(candidate)
             local amount = math.min(
                 remaining,
                 exactStock,
@@ -1056,6 +1055,10 @@ function M.new(config, store, cluster, matcher, transfer)
 
             noteVerifiedSend(
                 ledger, signature, candidate, movedOrErr, baselineCRS, false)
+            -- Crafted output becoming visible is not enough to release the
+            -- duplicate-craft gate. Release it only after a verified transfer
+            -- into CRS succeeds.
+            clearCraftJob(candidate)
 
             local newSent = floor(ledger.sentTotal)
             if newSent >= requested then
@@ -1401,7 +1404,6 @@ function M.new(config, store, cluster, matcher, transfer)
         end
 
         if candidate.stock > 0 then
-            clearCraftJob(candidate)
             local amount = math.min(
                 count, candidate.stock, floor(config.maxTransferChunk or 64))
             local baselineCRS = transfer.colonyAmount(candidate)
@@ -1427,6 +1429,9 @@ function M.new(config, store, cluster, matcher, transfer)
             if ok then
                 noteVerifiedSend(
                     ledger, signature, candidate, movedOrErr, baselineCRS, false)
+                -- Keep the craft lock through visibility/desync windows. A
+                -- successful, verified CRS transfer is the release point.
+                clearCraftJob(candidate)
 
                 if floor(ledger.sentTotal) >= count then
                     ledger.ackStartedAt = nowSeconds()
