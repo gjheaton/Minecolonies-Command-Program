@@ -1200,18 +1200,30 @@ function M.new(config, store, matcher)
 
     function self.recoverPending()
         local p = store.data.pending
-        if type(p) ~= "table" then return true, "nothing pending" end
+        if type(p) ~= "table" then
+            return true, "nothing pending"
+        end
 
-        -- v3 only auto-recovers a staged PRS->CRS transaction by returning the
-        -- visible barrel contents to PRS. It never guesses that an empty barrel
-        -- means the colony accepted a prior shipment.
         local list, err = self.chestContents()
-        if not list then return false, "cannot inspect pending transfer chest: " .. tostring(err) end
+        if not list then
+            return false,
+                "cannot inspect pending transfer chest: " .. tostring(err)
+        end
+
         if next(list) == nil then
+            -- A bridge-acknowledged export must never be silently cleared just
+            -- because CC has not observed the staged item yet.
+            if tostring(p.stage or "") == "export_wait"
+                or floor(p.bridgeMoved) > 0 then
+                return false,
+                    "pending " .. tostring(p.direction or "?") ..
+                    " export was acknowledged by bridge but transfer chest " ..
+                    "is not visible yet; waiting fail-closed"
+            end
+
             -- Before treating a later-stage empty chest as ambiguous, check
             -- whether a stale saved chest binding caused us to read the wrong
-            -- inventory. Rebind only when exactly one alternate barrel-like
-            -- inventory contains the pending registry item.
+            -- inventory.
             if tostring(p.stage or "") ~= "exporting"
                 and p.item ~= nil then
                 local alternate, alternateErr =
@@ -1244,16 +1256,13 @@ function M.new(config, store, matcher)
                 end
             end
 
-            -- If the persisted transaction never advanced beyond the exporting
-            -- stage, no item was ever positively observed in the transfer chest.
-            -- This is exactly the state left by a bridge export that returned 0.
-            -- Clear that pre-staged marker automatically instead of permanently
-            -- blocking startup. Later stages remain fail-closed because an empty
-            -- chest there can mean the destination consumed the item.
+            -- A pre-staged export with no bridge acknowledgement and an empty
+            -- chest means no movement was positively observed.
             if tostring(p.stage or "") == "exporting" then
                 local detail =
-                    "cleared pre-staged pending " .. tostring(p.direction or "?") ..
-                    " " .. tostring(p.item or "?") ..
+                    "cleared pre-staged pending " ..
+                    tostring(p.direction or "?") .. " " ..
+                    tostring(p.item or "?") ..
                     "; transfer chest is empty and no staged item was confirmed"
                 clearPending()
                 store.addHistory("RECOVERY", {
@@ -1268,42 +1277,186 @@ function M.new(config, store, matcher)
 
             return false,
                 "pending transaction stage=" .. tostring(p.stage or "?") ..
-                " exists but transfer chest is empty; outcome is ambiguous and manual diagnosis is required"
+                " exists but transfer chest is empty; outcome is ambiguous"
         end
 
-        local one
-        for _, item in pairs(list) do
-            if type(item) == "table" then
-                if one and one.name ~= item.name then
-                    return false, "pending recovery found mixed transfer chest contents"
-                end
-                one = item
+        local snapshot, snapshotErr = self.chestSnapshot()
+        if not snapshot then
+            return false,
+                "cannot inspect pending chest details: " ..
+                tostring(snapshotErr)
+        end
+
+        local entries = snapshot.entries or {}
+        if #entries == 0 then
+            return false, "pending recovery could not identify barrel item"
+        end
+
+        local itemName = tostring(p.item or entries[1].name or "")
+        local total = 0
+        local firstDetail
+
+        for _, entry in ipairs(entries) do
+            if tostring(entry.name or "") ~= itemName then
+                return false,
+                    "pending recovery found mixed/unexpected transfer chest " ..
+                    "contents; expected " .. itemName
+            end
+            total = total + floor(entry.count)
+            if not firstDetail and type(entry.detail) == "table" then
+                firstDetail = entry.detail
             end
         end
-        if not one then return false, "pending recovery could not identify barrel item" end
+
+        if total <= 0 or not firstDetail then
+            return false, "pending recovery found no usable staged item"
+        end
 
         local candidate = {
-            name = one.name,
-            displayName = one.name,
-            nbt = nil,
-            nbtCanonical = "",
-            hasNBT = false,
-            identity = tostring(one.name) .. "|NBT|",
-            namespace = tostring(one.name):match("^([^:]+):") or "",
-            raw = { name = one.name, nbt = nil },
+            name = itemName,
+            displayName = firstDetail.displayName or itemName,
+            nbt = firstDetail.nbt,
+            nbtCanonical = matcher.canonicalNBT(firstDetail.nbt),
+            hasNBT = firstDetail.nbt ~= nil,
+            identity =
+                itemName .. "|NBT|" ..
+                matcher.canonicalNBT(firstDetail.nbt),
+            namespace =
+                tostring(itemName):match("^([^:]+):") or "",
+            raw = {
+                name = itemName,
+                nbt = firstDetail.nbt,
+            },
         }
-        local ok, detail = self.rollbackChestToPlayer(candidate, floor(one.count))
-        if ok then
-            clearPending()
-            store.addHistory("RECOVERY", {
-                direction = "CHEST>PRS",
-                item = one.name,
-                amount = floor(one.count),
-                detail = "recovered persisted pending transfer",
-            })
-            return true, detail
+
+        local direction = tostring(p.direction or "")
+        local destination
+        local destinationDirection
+        local destinationLabel
+
+        if direction == "PRS>CRS" or direction == "CHEST>CRS" then
+            destination = self.colonyRS
+            destinationDirection = config.chestToColonyDirection
+            destinationLabel = "CRS"
+        elseif direction == "CRS>PRS" or direction == "CHEST>PRS" then
+            destination = self.playerRS
+            destinationDirection = config.chestToPlayerDirection
+            destinationLabel = "PRS"
+        else
+            return false,
+                "pending recovery does not recognize direction " .. direction
         end
-        return false, detail
+
+        local baseline = rsAmount(destination, candidate)
+        if baseline == nil then
+            return false,
+                "cannot read " .. destinationLabel ..
+                " baseline while resuming pending transfer"
+        end
+
+        local quantity = math.min(
+            total,
+            math.max(1, floor(p.amount or total))
+        )
+
+        p.stage = "staged"
+        p.amount = quantity
+        setPending(p)
+
+        -- The transfer chest is the isolation boundary. Resume the original
+        -- direction by name only; the physical staged item was already selected
+        -- before it entered the chest.
+        local filter = {
+            name = itemName,
+            count = quantity,
+        }
+
+        for _ = 1, math.max(
+            1, floor(config.transferImportRetries or 3)) do
+            destinationImport(
+                destination,
+                filter,
+                destinationDirection
+            )
+            sleep(tonumber(config.transferRetryDelay) or 0.25)
+
+            local nowList = self.chestContents()
+            if type(nowList) ~= "table" then break end
+
+            local remaining = 0
+            for _, item in pairs(nowList) do
+                if type(item) == "table"
+                    and tostring(item.name or "") == itemName then
+                    remaining = remaining + floor(item.count)
+                end
+            end
+            if remaining <= math.max(0, total - quantity) then
+                break
+            end
+        end
+
+        local afterList, afterErr = self.chestContents()
+        if type(afterList) ~= "table" then
+            return false,
+                "cannot verify transfer chest after pending recovery: " ..
+                tostring(afterErr)
+        end
+
+        local left = 0
+        for _, item in pairs(afterList) do
+            if type(item) == "table"
+                and tostring(item.name or "") == itemName then
+                left = left + floor(item.count)
+            end
+        end
+
+        local physicalAccepted =
+            math.max(0, math.min(quantity, total - left))
+
+        if physicalAccepted <= 0 then
+            p.lastError =
+                destinationLabel ..
+                " import moved 0 while resuming pending transfer"
+            setPending(p)
+            return false, p.lastError
+        end
+
+        p.stage = "confirming"
+        p.physicalAccepted = physicalAccepted
+        setPending(p)
+
+        local confirmed =
+            verifyDestination(
+                destination,
+                candidate,
+                baseline,
+                physicalAccepted
+            )
+
+        if confirmed < physicalAccepted then
+            p.lastError =
+                destinationLabel ..
+                " confirmation incomplete while resuming pending transfer: " ..
+                "physical=" .. tostring(physicalAccepted) ..
+                " confirmed=" .. tostring(confirmed)
+            setPending(p)
+            return false, p.lastError
+        end
+
+        clearPending()
+        store.addHistory("RECOVERY", {
+            direction = direction,
+            item = itemName,
+            amount = confirmed,
+            requestId = p.requestId,
+            detail =
+                "resumed staged pending transfer toward " ..
+                destinationLabel,
+        })
+
+        return true,
+            "resumed " .. tostring(confirmed) .. "x " ..
+            itemName .. " to " .. destinationLabel
     end
 
     return self
