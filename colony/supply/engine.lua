@@ -206,6 +206,45 @@ function M.new(config, store, cluster, matcher, transfer)
         end
 
         if #(snapshot.entries or {}) == 0 then
+            local alternate, alternateErr =
+                transfer.findAlternateRequestedChest(
+                    activeRequestArray(requests))
+
+            if alternate then
+                local okRebind, rebindDetail =
+                    transfer.rebindTransferChest(
+                        alternate.name,
+                        "selected chest read empty while alternate chest " ..
+                        "contained active-request item"
+                    )
+                if not okRebind then
+                    return false,
+                        "alternate transfer chest detected but rebind failed: " ..
+                        tostring(rebindDetail),
+                        "ERROR"
+                end
+
+                store.addHistory(
+                    "RECOVERY",
+                    {
+                        direction = "CHEST_REBIND",
+                        detail = tostring(rebindDetail),
+                    }
+                )
+
+                -- Re-read through the newly persisted chest identity. If the
+                -- staged item belongs to an active request, the normal recovery
+                -- path below will import it into CRS.
+                return handleOrphanChest(requests)
+            end
+
+            if alternateErr then
+                return false,
+                    "transfer chest identity ambiguous: " ..
+                    tostring(alternateErr),
+                    "ERROR"
+            end
+
             clearOrphanChestState()
             return true, "transfer chest empty", "EMPTY"
         end
@@ -740,6 +779,18 @@ function M.new(config, store, cluster, matcher, transfer)
     local function cleanLedger(active)
         for id in pairs(store.data.requestLedger) do
             if not active[id] then store.data.requestLedger[id] = nil end
+        end
+
+        -- A craft gate belongs to the MineColonies request that caused it.
+        -- Keep it fail-closed while that request is active, but remove stale
+        -- gates after the request disappears so a future unrelated request is
+        -- not blocked forever.
+        for key, job in pairs(store.data.craftJobs or {}) do
+            if type(job) == "table"
+                and job.requestId ~= nil
+                and not active[tostring(job.requestId)] then
+                store.data.craftJobs[key] = nil
+            end
         end
     end
 
