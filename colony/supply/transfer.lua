@@ -535,7 +535,7 @@ function M.new(config, store, matcher)
         setPending(pending)
 
         local importFilter = { name = candidate.name, count = quantity }
-        if candidate.hasNBT then
+        if candidate.hasNBT and candidate.genericClassAcceptance ~= true then
             local encoded = matcher.craftFilter(candidate, quantity)
             if encoded.nbt then importFilter.nbt = encoded.nbt end
         end
