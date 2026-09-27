@@ -101,6 +101,10 @@ C.clusterHelloSeconds = 1
 C.clusterPeerTimeoutSeconds = 8
 C.clusterMasterTimeoutSeconds = 5
 C.clusterMembershipSettleSeconds = 3
+-- After PRS ownership changes computers, the new owner waits before making
+-- any RS Bridge API call. This gives the previous owner's asynchronous
+-- Refined Storage activity time to settle before the next computer touches PRS.
+C.clusterTurnHandoffDelaySeconds = 5
 C.clusterTurnTimeoutSeconds = 45
 C.clusterStateBroadcastSeconds = 0.75
 
