@@ -1902,6 +1902,23 @@ local function addDetailLine(lines, label, value, color)
     lines[#lines + 1] = { label = label, value = tostr(value, "N/A"), color = color or C.text }
 end
 
+local function visitorRecommendationText(rec)
+    if type(rec) ~= "table" then return "None" end
+    return tostring(rec.label or "Unknown") ..
+        " | score " .. string.format("%.1f", tonumber(rec.score) or 0) ..
+        " | " .. tostring(rec.primary or "?") .. " " ..
+        tostring(rec.primaryLevel or 0) ..
+        " / " .. tostring(rec.secondary or "?") .. " " ..
+        tostring(rec.secondaryLevel or 0)
+end
+
+local function prettySkillName(value)
+    local s = tostring(value or ""):gsub("_", " "):gsub("%-", " ")
+    s = s:gsub("(%l)(%u)", "%1 %2")
+    s = s:gsub("^%l", string.upper)
+    return s
+end
+
 local function detailLines(page, item)
     local lines = {}
 
@@ -1998,6 +2015,68 @@ local function detailLines(page, item)
         end
         addDetailLine(lines, "Location", posText(building.location))
 
+    elseif page == "visitors" then
+        local visitor = item.visitor or {}
+        addDetailLine(lines, "Name", visitor.name)
+        addDetailLine(lines, "Gender", visitor.gender)
+        addDetailLine(lines, "Happiness", visitor.happiness)
+        addDetailLine(lines, "Recruit cost",
+            VisitorJobs.formatRecruitCost(visitor), C.accent)
+        addDetailLine(lines, "Fit formula",
+            "65% primary + 35% secondary", C.dim)
+
+        if item.best then
+            addDetailLine(lines, "Best overall",
+                visitorRecommendationText(item.best),
+                visitorFitColor(item.best))
+            addDetailLine(lines, "Overall grade",
+                item.best.band, visitorFitColor(item.best))
+        else
+            addDetailLine(lines, "Best overall",
+                "No job mapping available", C.dim)
+        end
+
+        for i = 2, math.min(3, #(item.overall or {})) do
+            local rec = item.overall[i]
+            addDetailLine(lines, "Overall #" .. tostring(i),
+                visitorRecommendationText(rec),
+                visitorFitColor(rec))
+        end
+
+        if item.bestOpen then
+            addDetailLine(lines, "Best open job",
+                visitorRecommendationText(item.bestOpen),
+                visitorFitColor(item.bestOpen))
+            addDetailLine(lines, "Open positions",
+                item.bestOpen.openings or 0, C.warn)
+            if #(item.bestOpen.buildings or {}) > 0 then
+                addDetailLine(lines, "Open building(s)",
+                    table.concat(item.bestOpen.buildings, ", "), C.info)
+            end
+            for i = 2, math.min(3, #(item.open or {})) do
+                local rec = item.open[i]
+                addDetailLine(lines, "Open fit #" .. tostring(i),
+                    visitorRecommendationText(rec),
+                    visitorFitColor(rec))
+            end
+        else
+            addDetailLine(lines, "Best open job",
+                "No matching Help Wanted opening", C.dim)
+        end
+
+        local skills = VisitorJobs.skillsDescending(visitor)
+        if #skills == 0 then
+            addDetailLine(lines, "Skills", "Not reported by integrator", C.dim)
+        else
+            for i, skill in ipairs(skills) do
+                addDetailLine(lines,
+                    i == 1 and "Skills" or "",
+                    prettySkillName(skill.name) .. " " ..
+                        tostring(skill.level or 0),
+                    i <= 3 and C.info or C.text)
+            end
+        end
+
     elseif page == "requests" then
         addDetailLine(lines, "Request", item.name)
         addDetailLine(lines, "State", item.state)
@@ -2076,7 +2155,14 @@ local function drawDetail()
         return
     end
 
-    local names = { citizens = "CITIZEN", buildings = "BUILDING", requests = "REQUEST", orders = "CONSTRUCTION ORDER" }
+    local names = {
+        citizens = "CITIZEN",
+        buildings = "BUILDING",
+        help = "HELP WANTED",
+        visitors = "VISITOR",
+        requests = "REQUEST",
+        orders = "CONSTRUCTION ORDER",
+    }
     center(4, names[detail.page] .. " DETAILS", C.title, C.bg)
 
     local lines = flattenDetailLines(detailLines(detail.page, item), w - 4)
