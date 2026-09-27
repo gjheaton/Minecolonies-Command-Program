@@ -229,6 +229,9 @@ function M.new(config, store, matcher)
                     if okDetail and type(full) == "table" then detail = full end
                 end
 
+                if detail.name == nil then detail.name = item.name end
+                if detail.count == nil then detail.count = item.count end
+
                 local count = floor(item.count or detail.count)
                 local nbtCanonical = matcher.canonicalNBT(detail.nbt)
                 entries[#entries + 1] = {
