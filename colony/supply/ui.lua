@@ -129,8 +129,16 @@ function M.new(config, store, cluster, transfer, engine, updater)
                 updateColor = C.dim
             end
 
-            local buttonWidth = math.min(14, math.max(10, math.floor(w / 5)))
+            local updateButtonLabel = updater.availableVersion
+                and (updater.buttonLabel() or ("UPDATE v" .. tostring(updater.availableVersion)))
+                or "CHECK NOW"
+            local updateButtonBg = updater.availableVersion and C.warn or C.navActive
+            local buttonWidth = math.min(
+                math.max(12, #updateButtonLabel + 2),
+                math.max(12, math.floor(w / 4))
+            )
             local bx = math.max(32, w - buttonWidth + 1)
+
             monitorUI.fillRow(y, C.bg)
             monitorUI.writeAt(2, y, Util.padRight("Update", 18), C.dim, C.bg)
             monitorUI.writeAt(
@@ -139,10 +147,18 @@ function M.new(config, store, cluster, transfer, engine, updater)
                 updateColor, C.bg
             )
             monitorUI.addButton(
-                "check_update", bx, y, w, y, "CHECK NOW",
-                C.navActive, C.navText,
+                "home_update", bx, y, w, y, updateButtonLabel,
+                updateButtonBg, C.navText,
                 function()
                     if self.checkingUpdate then return end
+
+                    -- Once a newer version has been found, this same Home-page
+                    -- control becomes the installer button.
+                    if updater.availableVersion then
+                        updater.install()
+                        return
+                    end
+
                     self.checkingUpdate = true
                     self.draw()
                     pcall(updater.check)
