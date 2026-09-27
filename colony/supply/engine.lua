@@ -103,6 +103,160 @@ function M.new(config, store, cluster, matcher, transfer)
         return true, "required peripheral functions available"
     end
 
+    local function activeRequestArray(requests)
+        local out = {}
+        for _, request in pairs(type(requests) == "table" and requests or {}) do
+            if requestActive(request) then out[#out + 1] = request end
+        end
+        return out
+    end
+
+    local function chestSummary(snapshot)
+        local totals = {}
+        for _, entry in ipairs(
+            type(snapshot) == "table" and snapshot.entries or {}
+        ) do
+            totals[entry.name] = (totals[entry.name] or 0) + floor(entry.count)
+        end
+
+        local parts = {}
+        local total = 0
+        for name, count in pairs(totals) do
+            total = total + count
+            parts[#parts + 1] = tostring(count) .. "x " .. tostring(name)
+        end
+        table.sort(parts)
+        return table.concat(parts, ", "), total
+    end
+
+    local function chestContainsActiveRequest(snapshot, requests)
+        local active = activeRequestArray(requests)
+        for _, request in ipairs(active) do
+            local candidates = matcher.requestCandidates(request)
+            for _, candidate in ipairs(candidates or {}) do
+                for _, entry in ipairs(snapshot.entries or {}) do
+                    if type(entry.detail) == "table"
+                        and matcher.exactlyMatches(
+                            candidate.raw, entry.detail) then
+                        return true,
+                            tostring(entry.count) .. "x " ..
+                                tostring(entry.name) ..
+                                " matches active request " ..
+                                tostring(request.id)
+                    end
+                end
+            end
+        end
+        return false, nil
+    end
+
+    local function clearOrphanChestState()
+        store.data.recovery = store.data.recovery or {}
+        if store.data.recovery.orphanChest ~= nil then
+            store.data.recovery.orphanChest = nil
+            store.save()
+        end
+    end
+
+    local function handleOrphanChest(requests)
+        if type(store.data.pending) == "table" then
+            clearOrphanChestState()
+            return false,
+                "transfer chest recovery deferred: pending transaction exists"
+        end
+
+        local snapshot, snapshotErr = transfer.chestSnapshot()
+        if not snapshot then
+            return false,
+                "cannot inspect transfer chest: " .. tostring(snapshotErr)
+        end
+
+        if #(snapshot.entries or {}) == 0 then
+            clearOrphanChestState()
+            return true, "transfer chest empty"
+        end
+
+        local requested, requestedDetail =
+            chestContainsActiveRequest(snapshot, requests)
+        if requested then
+            clearOrphanChestState()
+            return false,
+                "transfer chest contains an item matching an active request; " ..
+                "automatic PRS return suppressed: " ..
+                tostring(requestedDetail)
+        end
+
+        store.data.recovery = store.data.recovery or {}
+        local quarantine = store.data.recovery.orphanChest
+        local signature = tostring(snapshot.signature or "")
+        local summary, total = chestSummary(snapshot)
+        local now = nowSeconds()
+        local waitSeconds =
+            math.max(30, floor(config.orphanChestRecoverySeconds or 180))
+
+        if type(quarantine) ~= "table"
+            or tostring(quarantine.signature or "") ~= signature then
+            quarantine = {
+                signature = signature,
+                firstSeen = now,
+                lastSeen = now,
+                summary = summary,
+                amount = total,
+            }
+            store.data.recovery.orphanChest = quarantine
+            store.save()
+            store.addError(
+                "ORPHAN_CHEST_QUARANTINE",
+                "Unrequested item found in transfer chest; automatic PRS return timer started",
+                {
+                    detail = summary,
+                    amount = total,
+                    recoverySeconds = waitSeconds,
+                },
+                "WARNING"
+            )
+        else
+            quarantine.lastSeen = now
+            quarantine.summary = summary
+            quarantine.amount = total
+            store.save()
+        end
+
+        local elapsed = math.max(
+            0, now - (tonumber(quarantine.firstSeen) or now))
+        if elapsed < waitSeconds then
+            return false,
+                "unrequested transfer chest contents quarantined " ..
+                tostring(elapsed) .. "/" .. tostring(waitSeconds) ..
+                "s: " .. tostring(summary)
+        end
+
+        local okReturn, result = transfer.returnEntireChestToPlayer()
+        if not okReturn then
+            quarantine.lastAttempt = now
+            quarantine.lastError = tostring(result)
+            store.save()
+            return false,
+                "orphan chest auto-return failed: " .. tostring(result)
+        end
+
+        clearOrphanChestState()
+        result = type(result) == "table" and result or {}
+        store.addHistory(
+            "RECOVERY",
+            {
+                direction = "CHEST>PRS",
+                amount = tonumber(result.moved) or total,
+                detail = tostring(
+                    result.detail
+                    or ("returned orphan chest contents to PRS: " .. summary)
+                ),
+            }
+        )
+        return true,
+            tostring(result.detail or "orphan chest returned to PRS")
+    end
+
     local function desyncHeuristic()
         local ok1, first = safeCall(transfer.playerRS, "listItems")
         sleep(0.15)
