@@ -49,6 +49,9 @@ local function defaultData(config)
         requestLedger = {},
         craftJobs = {},
         craftFailures = {},
+        recovery = {
+            orphanChest = nil,
+        },
         history = {},
         errors = {},
         cluster = {
@@ -85,6 +88,8 @@ local function mergeDefaults(data, config)
     data.requestLedger = type(data.requestLedger) == "table" and data.requestLedger or {}
     data.craftJobs = type(data.craftJobs) == "table" and data.craftJobs or {}
     data.craftFailures = type(data.craftFailures) == "table" and data.craftFailures or {}
+    data.recovery = type(data.recovery) == "table" and data.recovery or base.recovery
+    data.recovery.orphanChest = data.recovery.orphanChest
     data.history = type(data.history) == "table" and data.history or {}
     data.errors = type(data.errors) == "table" and data.errors or {}
     data.cluster = type(data.cluster) == "table" and data.cluster or base.cluster
