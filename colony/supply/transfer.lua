@@ -823,6 +823,29 @@ function M.new(config, store, matcher)
         }
     end
 
+    local function waitForChestIncrease(candidate, baseline, expected)
+        baseline = math.max(0, floor(baseline))
+        expected = math.max(1, floor(expected))
+
+        local reads = math.max(
+            1, floor(config.transferStageConfirmReads or 12))
+        local delay = tonumber(config.transferStageConfirmDelay) or 0.25
+        local maxSeen = baseline
+
+        for i = 1, reads do
+            local amount = self.chestCount(candidate)
+            if amount ~= nil and amount > maxSeen then
+                maxSeen = amount
+            end
+            if math.max(0, maxSeen - baseline) >= expected then
+                break
+            end
+            if i < reads then sleep(delay) end
+        end
+
+        return math.max(0, maxSeen - baseline), maxSeen
+    end
+
     function self.playerToColony(candidate, count, meta)
         count = math.min(math.max(1, floor(count)), floor(config.maxTransferChunk or 64))
         meta = meta or {}
@@ -854,22 +877,48 @@ function M.new(config, store, matcher)
         setPending(pending)
 
         local chestBefore = self.chestCount(candidate) or 0
-        local exported, exportErr = sourceExport(self.playerRS, filter, config.playerToChestDirection)
-        sleep(tonumber(config.transferSettleDelay) or 0.25)
-        local chestAfterExport = self.chestCount(candidate)
-        local physicallyExported = chestAfterExport and math.max(0, chestAfterExport - chestBefore) or 0
+        local exported, exportErr =
+            sourceExport(
+                self.playerRS,
+                filter,
+                config.playerToChestDirection
+            )
 
-        if exported <= 0 or physicallyExported <= 0 then
+        -- RS/AP movement and CC inventory visibility are not guaranteed to be
+        -- synchronous. Do not turn a successfully exported item into an orphan
+        -- merely because the barrel still reads empty 250 ms later.
+        local physicallyExported, chestAfterExport =
+            waitForChestIncrease(candidate, chestBefore, quantity)
+
+        if physicallyExported <= 0 then
+            if exported > 0 then
+                pending.stage = "export_wait"
+                pending.bridgeMoved = floor(exported)
+                pending.lastError =
+                    "bridge reported export but transfer chest is not visible yet"
+                setPending(pending)
+                return false,
+                    "PRS export acknowledged by bridge (" ..
+                    tostring(exported) ..
+                    ") but transfer chest visibility is delayed; " ..
+                    "pending retained"
+            end
+
             clearPending()
             return false,
                 "PRS export failed: item=" .. tostring(candidate.name) ..
                 " mode=" .. tostring(filterMode) ..
-                " direction=" .. tostring(config.playerToChestDirection) ..
+                " target=" ..
+                    tostring(
+                        config.usePeripheralTransfer
+                            and self.transferChestName
+                            or config.playerToChestDirection
+                    ) ..
                 " requested=" .. tostring(quantity) ..
                 " bridge=" .. tostring(exported) ..
                 " chestBefore=" .. tostring(chestBefore) ..
                 " chestAfter=" .. tostring(chestAfterExport) ..
-                " chestDelta=" .. tostring(physicallyExported) ..
+                " chestDelta=0" ..
                 (exportErr and (" error=" .. tostring(exportErr)) or "")
         end
 
@@ -967,11 +1016,24 @@ function M.new(config, store, matcher)
                 filter,
                 config.colonyToChestDirection
             )
-        sleep(tonumber(config.transferSettleDelay) or 0.25)
-        local afterChest = self.chestCount(candidate)
-        local staged = afterChest
-            and math.max(0, afterChest - beforeChest) or 0
-        if floor(exported) <= 0 or staged <= 0 then
+
+        local staged, afterChest =
+            waitForChestIncrease(candidate, beforeChest, quantity)
+
+        if staged <= 0 then
+            if floor(exported) > 0 then
+                pending.stage = "export_wait"
+                pending.bridgeMoved = floor(exported)
+                pending.lastError =
+                    "bridge reported CRS export but transfer chest is not visible yet"
+                setPending(pending)
+                return false,
+                    "CRS export acknowledged by bridge (" ..
+                    tostring(exported) ..
+                    ") but transfer chest visibility is delayed; " ..
+                    "pending retained"
+            end
+
             clearPending()
             return false,
                 "CRS export failed: item=" .. tostring(candidate.name) ..
@@ -986,7 +1048,7 @@ function M.new(config, store, matcher)
                 " bridge=" .. tostring(exported) ..
                 " chestBefore=" .. tostring(beforeChest) ..
                 " chestAfter=" .. tostring(afterChest) ..
-                " chestDelta=" .. tostring(staged) ..
+                " chestDelta=0" ..
                 (exportErr and
                     (" error=" .. tostring(exportErr)) or "")
         end
