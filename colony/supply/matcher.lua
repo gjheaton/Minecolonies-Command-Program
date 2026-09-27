@@ -181,6 +181,10 @@ function M.new(config, store)
         end
 
         local candidates, class = self.requestCandidates(request)
+        local hasSpecificNBT = false
+        for _, candidate in ipairs(candidates or {}) do
+            if candidate.hasNBT then hasSpecificNBT = true end
+        end
 
         -- First prefer the strict exact alternative identity used everywhere
         -- else in Supply.
@@ -215,7 +219,7 @@ function M.new(config, store)
         -- item may be a valid vanilla/MineColonies tool even when that exact
         -- registry name was not present in the request's serialized alternative
         -- list. Use the same class + namespace rules as normal Supply matching.
-        if class then
+        if class and not hasSpecificNBT then
             local ns = namespace(physicalItem.name)
             local physicalCandidate = {
                 name = physicalItem.name,
