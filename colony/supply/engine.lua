@@ -62,6 +62,7 @@ end
 function M.new(config, store, cluster, matcher, transfer)
     local self = {
         rows = {},
+        currentWork = nil,
         health = {},
         lastScan = nil,
         lastScanText = "--:--:--",
@@ -447,6 +448,62 @@ function M.new(config, store, cluster, matcher, transfer)
             status = "ACK STALLED",
             detail = ledger.stallDetail,
             usedPRSTurn = false,
+        }
+    end
+
+    local function workCandidate(request, row, ledger)
+        local fromLedger = candidateFromLedger(ledger)
+        if fromLedger and tostring(fromLedger.name) == tostring(row.item) then
+            return fromLedger
+        end
+
+        local candidates = matcher.requestCandidates(request)
+        for _, candidate in ipairs(candidates or {}) do
+            if tostring(candidate.name) == tostring(row.item) then
+                return candidate
+            end
+        end
+        return nil
+    end
+
+    local function captureWorkSnapshot(request, row)
+        local requested = requestCount(request)
+        local ledger = store.data.requestLedger[tostring(request.id)] or {}
+        local signature = requestSignature(
+            request, requested, matcher.canonicalNBT)
+
+        local sent = 0
+        if ledger.signature == signature then
+            sent = floor(ledger.sentTotal or ledger.lastSent)
+        end
+
+        local candidate = workCandidate(request, row, ledger)
+        local prsStock, crsStock
+        local displayName = tostring(row.item or request.name or "Request")
+
+        if candidate then
+            displayName = tostring(candidate.displayName or candidate.name)
+            local _, exactStock = matcher.findStoredVariants(
+                transfer.playerRS, candidate, safeCall)
+            prsStock = floor(exactStock)
+            local colonyAmount = transfer.colonyAmount(candidate)
+            if colonyAmount ~= nil then crsStock = floor(colonyAmount) end
+        end
+
+        return {
+            id = tostring(request.id),
+            requestName = tostring(request.name or "Request"),
+            item = tostring(row.item or "-"),
+            displayName = displayName,
+            requested = requested,
+            sent = sent,
+            remaining = math.max(0, requested - sent),
+            prsStock = prsStock,
+            crsStock = crsStock,
+            status = tostring(row.status or "UNKNOWN"),
+            detail = tostring(row.detail or ""),
+            usedPRSTurn = row.usedPRSTurn == true,
+            capturedAt = Util.timeString(),
         }
     end
 
@@ -1218,9 +1275,15 @@ function M.new(config, store, cluster, matcher, transfer)
 
         self.stats.active = #activeRequests
 
+        local currentWork
         for _, request in ipairs(activeRequests) do
             local row = processRequest(request)
             self.rows[#self.rows + 1] = row
+
+            local work = captureWorkSnapshot(request, row)
+            if not currentWork or row.usedPRSTurn == true then
+                currentWork = work
+            end
 
             if row.status == "WAITING ACK"
                 or row.status == "VERIFYING DELIVERY" then
@@ -1243,6 +1306,12 @@ function M.new(config, store, cluster, matcher, transfer)
             -- that request. They do not block unrelated construction requests.
             -- End this colony's turn only after this scan actually touched PRS.
             if row.usedPRSTurn == true then break end
+        end
+
+        if currentWork then
+            self.currentWork = currentWork
+        elseif #activeRequests == 0 then
+            self.currentWork = nil
         end
 
         cleanLedger(active)
@@ -1278,6 +1347,7 @@ function M.new(config, store, cluster, matcher, transfer)
             autoCraftEnabled = store.data.settings.autoCraftEnabled == true,
             statusMessage = self.statusMessage,
             lastScanText = self.lastScanText,
+            currentWork = self.currentWork,
         }
     end
 
