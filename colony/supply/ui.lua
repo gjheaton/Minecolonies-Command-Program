@@ -77,45 +77,135 @@ function M.new(config, store, cluster, transfer, engine, updater)
         local h = engine.healthSnapshot()
         local cs = h.cluster
         local w, mh = monitorUI.size()
-        drawFrame("SUPPLY STATUS",
+
+        local function colonyNameFor(id)
+            if id == nil then return "-" end
+            local names = cs.memberNames or {}
+            return tostring(
+                names[tostring(id)]
+                or names[tonumber(id)]
+                or ("Computer " .. tostring(id))
+            )
+        end
+
+        local turnName = colonyNameFor(cs.turnId)
+        drawFrame(
+            "SUPPLY STATUS",
             (h.overall and "ONLINE" or "DEGRADED") ..
-            "  |  " .. tostring(cs.role) ..
-            "  |  Turn " .. tostring(cs.turnId or "-"),
-            h.overall and C.good or C.warn)
+                "  |  " .. tostring(cs.role) ..
+                "  |  Turn " .. turnName,
+            h.overall and C.good or C.warn
+        )
+
+        -- The upper status area is intentionally split into two columns.
+        -- Left: this computer / transfer state.
+        -- Right: live cluster membership using colony names.
+        local split = math.max(40, math.floor(w * 0.57))
+        split = math.min(split, math.max(22, w - 24))
+        local rightX = math.min(w, split + 2)
+        local leftValueX = math.min(split, 16)
+        local leftValueWidth = math.max(1, split - leftValueX)
 
         local y = 5
         local function line(label, value, color)
-            monitorUI.fillRow(y, C.bg)
-            monitorUI.writeAt(2, y, Util.padRight(label, 18), C.dim, C.bg)
-            monitorUI.writeAt(21, y, Util.clip(value, math.max(1,w-21)), color or C.text, C.bg)
+            monitorUI.fill(1, y, split, y, C.bg, C.text)
+            monitorUI.writeAt(
+                2, y,
+                Util.padRight(label, math.max(1, leftValueX - 3)),
+                C.dim, C.bg
+            )
+            monitorUI.writeAt(
+                leftValueX, y,
+                Util.clip(tostring(value or ""), leftValueWidth),
+                color or C.text, C.bg
+            )
             y = y + 1
+        end
+
+        -- Right-hand cluster member list.
+        if rightX <= w then
+            monitorUI.fill(rightX, 5, w, 5, C.panel, C.title)
+            monitorUI.center(
+                5, "CLUSTER COLONIES", C.title, C.panel, rightX, w
+            )
+
+            local ry = 6
+            for _, member in ipairs(cs.members or {}) do
+                if ry >= mh then break end
+                local memberId = tonumber(member.id)
+                local memberColor = C.text
+                if memberId == tonumber(cs.turnId) then
+                    memberColor = C.good
+                elseif memberId == tonumber(cs.masterId) then
+                    memberColor = C.info
+                end
+
+                monitorUI.fill(rightX, ry, w, ry, C.bg, C.text)
+                monitorUI.writeAt(
+                    rightX + 1, ry,
+                    Util.clip(
+                        "(" .. tostring(member.id) .. ") " ..
+                            tostring(member.name or colonyNameFor(member.id)),
+                        math.max(1, w - rightX)
+                    ),
+                    memberColor, C.bg
+                )
+                ry = ry + 1
+            end
         end
 
         line("Colony", transfer.colonyName, C.info)
         line("Computer", tostring(cs.id) .. " / " .. tostring(cs.role), C.info)
-        line("Cluster", cs.ok and ("ONLINE [" .. table.concat(cs.activeIds,",") .. "]") or tostring(cs.fault),
-            cs.ok and C.good or C.danger)
-        line("Master", tostring(cs.masterId or "-"), C.text)
-        line("PRS Turn", tostring(cs.turnId or "-"), cs.turnId == cs.id and C.good or C.dim)
+        line(
+            "Cluster",
+            cs.ok and ("ONLINE [" .. table.concat(cs.activeIds,",") .. "]")
+                or tostring(cs.fault),
+            cs.ok and C.good or C.danger
+        )
+        line("Master", colonyNameFor(cs.masterId), C.info)
+        line(
+            "PRS Turn",
+            colonyNameFor(cs.turnId),
+            cs.turnId == cs.id and C.good or C.dim
+        )
         line("PRS", Util.healthWord(h.playerRS), statusColor(h.playerRS))
         line("CRS", Util.healthWord(h.colonyRS), statusColor(h.colonyRS))
-        line("Transfer Chest", Util.healthWord(h.transferChest), statusColor(h.transferChest))
-
-        local movementCheck = h.startupChecks and h.startupChecks.movement or nil
-        local startupWaiting = not h.startupReady
-            and type(movementCheck) == "table"
-            and movementCheck.severity == "WAITING"
         line(
-            "Startup",
-            h.startupReady and "PASSED" or (startupWaiting and "WAITING TURN" or "BLOCKED"),
-            h.startupReady and C.good or (startupWaiting and C.warn or C.danger)
+            "Transfer Chest",
+            Util.healthWord(h.transferChest),
+            statusColor(h.transferChest)
         )
 
-        line("AutoCraft", h.autoCraftEnabled and "ON" or "OFF", h.autoCraftEnabled and C.good or C.warn)
-        line("Overstock", h.overstockEnabled and "ON" or "OFF", h.overstockEnabled and C.good or C.dim)
+        local movementCheck =
+            h.startupChecks and h.startupChecks.movement or nil
+        local startupWaiting =
+            not h.startupReady
+            and type(movementCheck) == "table"
+            and movementCheck.severity == "WAITING"
+
+        line(
+            "Startup",
+            h.startupReady
+                and "PASSED"
+                or (startupWaiting and "WAITING TURN" or "BLOCKED"),
+            h.startupReady
+                and C.good
+                or (startupWaiting and C.warn or C.danger)
+        )
+
+        line(
+            "AutoCraft",
+            h.autoCraftEnabled and "ON" or "OFF",
+            h.autoCraftEnabled and C.good or C.warn
+        )
+        line(
+            "Overstock",
+            h.overstockEnabled and "ON" or "OFF",
+            h.overstockEnabled and C.good or C.dim
+        )
         line("Last Scan", tostring(h.lastScanText), C.dim)
 
-        if y <= mh-2 then
+        if y <= mh - 2 then
             local updateText
             local updateColor
             if self.checkingUpdate then
@@ -125,20 +215,27 @@ function M.new(config, store, cluster, transfer, engine, updater)
                 updateText = "ERROR: " .. tostring(updater.checkError)
                 updateColor = C.danger
             elseif updater.availableVersion then
-                updateText = "AVAILABLE v" .. tostring(updater.availableVersion)
+                updateText =
+                    "AVAILABLE v" .. tostring(updater.availableVersion)
                 updateColor = C.warn
             elseif updater.remoteSuiteVersion then
-                updateText = "CURRENT v" .. tostring(updater.remoteSuiteVersion)
+                updateText =
+                    "CURRENT v" .. tostring(updater.remoteSuiteVersion)
                 updateColor = C.good
             else
                 updateText = "NOT CHECKED"
                 updateColor = C.dim
             end
 
-            local updateButtonLabel = updater.availableVersion
-                and (updater.buttonLabel() or ("UPDATE v" .. tostring(updater.availableVersion)))
+            local updateButtonLabel =
+                updater.availableVersion
+                and (
+                    updater.buttonLabel()
+                    or ("UPDATE v" .. tostring(updater.availableVersion))
+                )
                 or "CHECK NOW"
-            local updateButtonBg = updater.availableVersion and C.warn or C.navActive
+            local updateButtonBg =
+                updater.availableVersion and C.warn or C.navActive
             local buttonWidth = math.min(
                 math.max(12, #updateButtonLabel + 2),
                 math.max(12, math.floor(w / 4))
@@ -146,7 +243,9 @@ function M.new(config, store, cluster, transfer, engine, updater)
             local bx = math.max(32, w - buttonWidth + 1)
 
             monitorUI.fillRow(y, C.bg)
-            monitorUI.writeAt(2, y, Util.padRight("Update", 18), C.dim, C.bg)
+            monitorUI.writeAt(
+                2, y, Util.padRight("Update", 18), C.dim, C.bg
+            )
             monitorUI.writeAt(
                 21, y,
                 Util.clip(updateText, math.max(1, bx - 22)),
@@ -158,8 +257,6 @@ function M.new(config, store, cluster, transfer, engine, updater)
                 function()
                     if self.checkingUpdate then return end
 
-                    -- Once a newer version has been found, this same Home-page
-                    -- control becomes the installer button.
                     if updater.availableVersion then
                         updater.install()
                         return
@@ -175,15 +272,18 @@ function M.new(config, store, cluster, transfer, engine, updater)
             y = y + 1
         end
 
-        if y <= mh-2 then
+        if y <= mh - 2 then
             monitorUI.fillRow(y, C.panel)
-            monitorUI.center(y,
+            monitorUI.center(
+                y,
                 "Active " .. engine.stats.active ..
-                " | Waiting " .. engine.stats.waiting ..
-                " | Craft " .. engine.stats.crafting ..
-                " | Blocked " .. engine.stats.blocked ..
-                " | Errors " .. engine.stats.errors,
-                engine.stats.errors > 0 and C.warn or C.text, C.panel)
+                    " | Waiting " .. engine.stats.waiting ..
+                    " | Craft " .. engine.stats.crafting ..
+                    " | Blocked " .. engine.stats.blocked ..
+                    " | Errors " .. engine.stats.errors,
+                engine.stats.errors > 0 and C.warn or C.text,
+                C.panel
+            )
             y = y + 2
         end
 
@@ -216,7 +316,7 @@ function M.new(config, store, cluster, transfer, engine, updater)
                 8, y,
                 Util.clip(
                     tostring(work.displayName or work.item or "-") ..
-                    "  [" .. tostring(work.item or "-") .. "]",
+                        "  [" .. tostring(work.item or "-") .. "]",
                     math.max(1, w - 8)
                 ),
                 C.text, C.bg
@@ -228,9 +328,15 @@ function M.new(config, store, cluster, transfer, engine, updater)
                 "Need " .. tostring(work.requested or 0) ..
                 " | Sent " .. tostring(work.sent or 0) ..
                 " | Rem " .. tostring(work.remaining or 0) ..
-                " | PRS " .. tostring(work.prsStock == nil and "?" or work.prsStock) ..
-                " | CRS " .. tostring(work.crsStock == nil and "?" or work.crsStock)
-            monitorUI.writeAt(2, y, Util.clip(counts, math.max(1, w - 2)), C.text, C.bg)
+                " | PRS " ..
+                    tostring(work.prsStock == nil and "?" or work.prsStock) ..
+                " | CRS " ..
+                    tostring(work.crsStock == nil and "?" or work.crsStock)
+            monitorUI.writeAt(
+                2, y,
+                Util.clip(counts, math.max(1, w - 2)),
+                C.text, C.bg
+            )
             y = y + 1
 
             monitorUI.fillRow(y, C.bg)
@@ -238,7 +344,8 @@ function M.new(config, store, cluster, transfer, engine, updater)
             monitorUI.writeAt(
                 10, y,
                 Util.clip(
-                    status .. "  @ " .. tostring(work.capturedAt or "--:--:--"),
+                    status .. "  @ " ..
+                        tostring(work.capturedAt or "--:--:--"),
                     math.max(1, w - 10)
                 ),
                 statusFg, C.bg
@@ -249,13 +356,20 @@ function M.new(config, store, cluster, transfer, engine, updater)
                 monitorUI.fillRow(y, C.bg)
                 monitorUI.writeAt(
                     2, y,
-                    Util.clip(tostring(work.detail), math.max(1, w - 2)),
+                    Util.clip(
+                        tostring(work.detail),
+                        math.max(1, w - 2)
+                    ),
                     C.dim, C.bg
                 )
             end
         elseif not work and y <= mh - 2 then
             monitorUI.fillRow(y, C.panel)
-            monitorUI.center(y, "CURRENT WORK: no active request", C.dim, C.panel)
+            monitorUI.center(
+                y,
+                "CURRENT WORK: no active request",
+                C.dim, C.panel
+            )
         end
     end
 
@@ -813,8 +927,18 @@ function M.new(config, store, cluster, transfer, engine, updater)
         SharedUI.setTerminalColor(colors.white)
         print("Cluster:     " .. (cs.ok and "ONLINE" or "ERROR") ..
             " [" .. table.concat(cs.activeIds or {},",") .. "]")
-        print("Role:        " .. tostring(cs.role) .. "  Master: " .. tostring(cs.masterId or "-"))
-        print("PRS turn:    " .. tostring(cs.turnId or "-"))
+        local memberNames = cs.memberNames or {}
+        local function terminalColonyName(id)
+            if id == nil then return "-" end
+            return tostring(
+                memberNames[tostring(id)]
+                or memberNames[tonumber(id)]
+                or ("Computer " .. tostring(id))
+            )
+        end
+        print("Role:        " .. tostring(cs.role) ..
+            "  Master: " .. terminalColonyName(cs.masterId))
+        print("PRS turn:    " .. terminalColonyName(cs.turnId))
         print("PRS:         " .. Util.healthWord(h.playerRS) .. " [" .. tostring(transfer.playerBridgeName or "?") .. "]")
         print("CRS:         " .. Util.healthWord(h.colonyRS) .. " [" .. tostring(transfer.colonyBridgeName or "?") .. "]")
         print("Transfer:    " .. Util.healthWord(h.transferChest) .. " [" .. tostring(transfer.transferChestName or "?") .. "]")
@@ -848,17 +972,27 @@ function M.new(config, store, cluster, transfer, engine, updater)
     function self.eventLoop()
         resolveMonitor()
         self.draw()
+        local refreshTimer = os.startTimer(1)
+
         while true do
             local ev,a,b,c = os.pullEvent()
+
             if ev=="monitor_touch" and transfer.monitor then
                 local okName,name=pcall(peripheral.getName,transfer.monitor)
                 if okName and a==name then
                     local button=monitorUI.hitButton(b,c)
-                    if button and type(button.action)=="function" then pcall(button.action) end
+                    if button and type(button.action)=="function" then
+                        pcall(button.action)
+                    end
                 end
             elseif ev=="peripheral" or ev=="peripheral_detach" then
                 resolveMonitor()
                 self.draw()
+            elseif ev=="timer" and a==refreshTimer then
+                if self.view=="home" or self.view=="health" then
+                    pcall(self.draw)
+                end
+                refreshTimer=os.startTimer(1)
             end
         end
     end
