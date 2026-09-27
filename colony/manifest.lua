@@ -1,12 +1,12 @@
 -- MineColonies Control Suite local manifest
--- Suite version: 3.0.6
+-- Suite version: 3.0.7
 return {
-    suiteVersion = "3.0.6",
+    suiteVersion = "3.0.7",
     repositoryLayout = "cc-mirror",
 
     components = {
         startup = "1.0.0",
-        installer = "3.0.6",
+        installer = "3.0.7",
         util = "1.1.0",
         ui = "1.1.0",
         version = "1.0.0",
@@ -15,7 +15,7 @@ return {
 
     apps = {
         command = {
-            version = "2.16",
+            version = "3.0.0",
             program = "/colony_command.lua",
         },
         supply = {
@@ -32,6 +32,7 @@ return {
         { path = "/colony/lib/version.lua",  app = "common" },
         { path = "/colony/lib/updater.lua",  app = "common" },
         { path = "/colony_command.lua",      app = "command" },
+        { path = "/colony/command/visitor_jobs.lua", app = "command" },
         { path = "/colony_supply.lua",       app = "supply" },
         { path = "/colony/supply/config.lua",   app = "supply" },
         { path = "/colony/supply/state.lua",    app = "supply" },
