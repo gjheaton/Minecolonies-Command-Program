@@ -1,12 +1,12 @@
 -- MineColonies Control Suite local manifest
--- Suite version: 3.0.16
+-- Suite version: 3.0.17
 return {
-    suiteVersion = "3.0.16",
+    suiteVersion = "3.0.17",
     repositoryLayout = "cc-mirror",
 
     components = {
         startup = "1.0.0",
-        installer = "3.0.16",
+        installer = "3.0.17",
         util = "1.1.0",
         ui = "1.1.0",
         version = "1.0.0",
@@ -19,7 +19,7 @@ return {
             program = "/colony_command.lua",
         },
         supply = {
-            version = "3.0.11",
+            version = "3.0.12",
             program = "/colony_supply.lua",
         },
     },
