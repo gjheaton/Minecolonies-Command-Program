@@ -325,6 +325,56 @@ function M.new(config, store, matcher)
         return true, "transfer chest rebound to " .. tostring(name)
     end
 
+    function self.findAlternateChestContainingName(itemName)
+        itemName = tostring(itemName or "")
+        if itemName == "" then return nil, "pending item name unavailable" end
+
+        local matches = {}
+        for _, name in ipairs(peripheral.getNames()) do
+            if name ~= self.transferChestName
+                and hasType(name, "inventory")
+                and looksLikeBarrel(name) then
+
+                local inv = peripheral.wrap(name)
+                local okList, list = pcall(inv.list)
+                if okList and type(list) == "table" then
+                    local count = 0
+                    for _, item in pairs(list) do
+                        if type(item) == "table"
+                            and tostring(item.name or "") == itemName then
+                            count = count + floor(item.count)
+                        end
+                    end
+                    if count > 0 then
+                        matches[#matches + 1] = {
+                            name = name,
+                            count = count,
+                        }
+                    end
+                end
+            end
+        end
+
+        table.sort(matches, function(a,b)
+            return tostring(a.name) < tostring(b.name)
+        end)
+
+        if #matches == 0 then return nil, nil end
+        if #matches > 1 then
+            local names = {}
+            for _, entry in ipairs(matches) do
+                names[#names + 1] =
+                    tostring(entry.name) .. "(" ..
+                    tostring(entry.count) .. ")"
+            end
+            return nil,
+                "multiple alternate chests contain pending item " ..
+                itemName .. ": " .. table.concat(names, ", ")
+        end
+
+        return matches[1], nil
+    end
+
     function self.findAlternateRequestedChest(activeRequests)
         activeRequests =
             type(activeRequests) == "table" and activeRequests or {}
@@ -1076,6 +1126,42 @@ function M.new(config, store, matcher)
         local list, err = self.chestContents()
         if not list then return false, "cannot inspect pending transfer chest: " .. tostring(err) end
         if next(list) == nil then
+            -- Before treating a later-stage empty chest as ambiguous, check
+            -- whether a stale saved chest binding caused us to read the wrong
+            -- inventory. Rebind only when exactly one alternate barrel-like
+            -- inventory contains the pending registry item.
+            if tostring(p.stage or "") ~= "exporting"
+                and p.item ~= nil then
+                local alternate, alternateErr =
+                    self.findAlternateChestContainingName(p.item)
+
+                if alternate then
+                    local okRebind, rebindDetail =
+                        self.rebindTransferChest(
+                            alternate.name,
+                            "pending " .. tostring(p.direction or "?") ..
+                            " item found in alternate chest"
+                        )
+                    if not okRebind then
+                        return false,
+                            "pending alternate chest found but rebind failed: " ..
+                            tostring(rebindDetail)
+                    end
+                    store.addHistory("RECOVERY", {
+                        direction = "CHEST_REBIND",
+                        item = p.item,
+                        amount = alternate.count,
+                        requestId = p.requestId,
+                        detail = tostring(rebindDetail),
+                    })
+                    return self.recoverPending()
+                elseif alternateErr then
+                    return false,
+                        "pending transfer chest identity ambiguous: " ..
+                        tostring(alternateErr)
+                end
+            end
+
             -- If the persisted transaction never advanced beyond the exporting
             -- stage, no item was ever positively observed in the transfer chest.
             -- This is exactly the state left by a bridge export that returned 0.
