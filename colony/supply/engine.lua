@@ -1203,7 +1203,85 @@ function M.new(config, store, cluster, matcher, transfer)
         return candidate
     end
 
+    -- Delivery acknowledgement must never outrun delivery proof.  A request may
+    -- enter WAITING_ACK / CRS_RECEIVED / ACK_STALLED only after Supply has
+    -- physically observed the exact item leave the isolated transfer chest and
+    -- confirmed the corresponding exact CRS increase.
+    local function deliveryProofComplete(ledger, requested)
+        local proof = type(ledger) == "table" and ledger.deliveryProof or nil
+        if type(proof) ~= "table" or proof.verified ~= true then return false end
+        local proven = floor(proof.sentTotal or ledger.sentTotal or ledger.lastSent)
+        return proven >= math.max(1, floor(requested))
+    end
+
+    local function migrateVerifiedDeliveryProof(ledger, requested)
+        if type(ledger) ~= "table" then return end
+        local sent = floor(ledger.sentTotal or ledger.lastSent)
+        if sent <= 0 or type(ledger.deliveryProof) == "table" then return end
+
+        -- v3.0.19 only incremented sentTotal after transfer.playerToColony()
+        -- returned a destination-confirmed success, so existing ledgers can be
+        -- migrated without guessing.  Conservatively restart a previously
+        -- stalled ACK window instead of resending an already verified delivery.
+        ledger.deliveryProof = {
+            verified = true,
+            migratedFrom = "3.0.19",
+            item = ledger.item,
+            identity = ledger.identity,
+            sentTotal = sent,
+            baselineCRS = floor(ledger.baselineCRS),
+            peakCRS = floor(ledger.peakCRS),
+            lastObservedCRS = floor(ledger.lastObservedCRS),
+            confirmedAt = tonumber(ledger.lastSentAt or ledger.sentAt) or nowSeconds(),
+        }
+
+        if sent >= math.max(1, floor(requested))
+            and tostring(ledger.phase or "") == "ACK_STALLED" then
+            ledger.phase = "WAITING_ACK"
+            ledger.ackStartedAt = nowSeconds()
+            ledger.stalledAt = nil
+            ledger.stallDetail = nil
+            ledger.stallRecorded = nil
+            ledger.deliveryMissingSince = nil
+        end
+        store.save()
+    end
+
     local function recordAckStalled(request, ledger, detail, context)
+        if not deliveryProofComplete(ledger, requestCount(request)) then
+            ledger.phase = "FAILED"
+            ledger.stalledAt = ledger.stalledAt or nowSeconds()
+            ledger.stallDetail =
+                "Acknowledgement reconciliation stopped because verified delivery proof is incomplete"
+            if ledger.stallRecorded ~= true then
+                ledger.stallRecorded = true
+                store.addError(
+                    "DELIVERY_PROOF_MISSING",
+                    "Request reached acknowledgement reconciliation without complete verified delivery proof",
+                    {
+                        requestId = request.id,
+                        requestName = request.name,
+                        item = ledger.item,
+                        sentTotal = ledger.sentTotal,
+                        deliveryProof = ledger.deliveryProof,
+                        detail = detail,
+                        extra = context,
+                    },
+                    "ERROR"
+                )
+            else
+                store.save()
+            end
+            return {
+                id = tostring(request.id),
+                name = tostring(request.name or "Request"),
+                requested = requestCount(request),
+                item = tostring(ledger.item or "?"),
+                status = "FAILED",
+                detail = ledger.stallDetail,
+                usedPRSTurn = false,
+            }
+        end
         ledger.phase = "ACK_STALLED"
         ledger.stalledAt = ledger.stalledAt or nowSeconds()
         ledger.stallDetail = tostring(detail or "MineColonies acknowledgement did not change")
@@ -1328,6 +1406,18 @@ function M.new(config, store, cluster, matcher, transfer)
             ledger.lastObservedCRS = floor(currentCRS)
             ledger.peakCRS = math.max(floor(ledger.peakCRS), floor(currentCRS))
         end
+
+        ledger.deliveryProof = ledger.deliveryProof or {}
+        ledger.deliveryProof.verified = true
+        ledger.deliveryProof.item = candidate.name
+        ledger.deliveryProof.identity = candidate.identity
+        ledger.deliveryProof.lastMoved = floor(moved)
+        ledger.deliveryProof.sentTotal = floor(ledger.sentTotal)
+        ledger.deliveryProof.baselineCRS = floor(ledger.baselineCRS)
+        ledger.deliveryProof.peakCRS = floor(ledger.peakCRS)
+        ledger.deliveryProof.lastObservedCRS = floor(ledger.lastObservedCRS)
+        ledger.deliveryProof.confirmedAt = stamp
+        ledger.deliveryMissingSince = nil
 
         if retry then
             ledger.retryCount = floor(ledger.retryCount) + 1
@@ -1577,13 +1667,36 @@ function M.new(config, store, cluster, matcher, transfer)
         local waitSeconds = math.max(1, floor(config.requestAckWaitSeconds or 60))
         local retrySeconds = math.max(waitSeconds, floor(config.requestAckRetrySeconds or 180))
         local postRetrySeconds = math.max(1, floor(config.requestAckPostRetrySeconds or 60))
+        local disappearanceGrace = math.max(
+            1, floor(config.requestAckConsumptionGraceSeconds or 60))
         local craftWaitSeconds = math.max(
             postRetrySeconds, floor(config.requestAckRetryCraftWaitSeconds or 180))
 
+        if not deliveryProofComplete(ledger, requestCount(request)) then
+            return recordAckStalled(
+                request, ledger,
+                "Verified delivery proof is incomplete before acknowledgement reconciliation")
+        end
+
         local currentCRS, crsErr = transfer.colonyAmount(candidate)
+        local baseline = floor(ledger.baselineCRS)
         if currentCRS ~= nil then
             ledger.lastObservedCRS = floor(currentCRS)
             ledger.peakCRS = math.max(floor(ledger.peakCRS), floor(currentCRS))
+
+            if floor(currentCRS) > baseline then
+                -- The verified delivery is still physically visible to CRS.
+                -- This is not an acknowledgement failure and must never trigger
+                -- a duplicate resend.  Keep waiting until MineColonies consumes
+                -- it or changes/removes the request.
+                ledger.deliveryMissingSince = nil
+                ledger.phase = "CRS_RECEIVED"
+            elseif not ledger.deliveryMissingSince then
+                -- A courier consuming the item can precede request API refresh.
+                -- Give MineColonies a separate grace window after the item first
+                -- disappears before considering any bounded retry.
+                ledger.deliveryMissingSince = stamp
+            end
         end
 
         if retryCount >= maxRetries and maxRetries > 0 then
@@ -1602,6 +1715,41 @@ function M.new(config, store, cluster, matcher, transfer)
                     usedPRSTurn=false,
                 }
             end
+
+            if currentCRS ~= nil and floor(currentCRS) > baseline then
+                store.save()
+                return {
+                    id=tostring(request.id),
+                    name=tostring(request.name or "Request"),
+                    requested=requestCount(request),
+                    item=tostring(ledger.item or "?"),
+                    status="CRS RECEIVED",
+                    detail="verified delivery remains visible in CRS (" ..
+                        tostring(floor(currentCRS)) .. " > baseline " ..
+                        tostring(baseline) ..
+                        "); duplicate resend suppressed while MineColonies processes it",
+                    usedPRSTurn=false,
+                }
+            end
+
+            local missingAge = ledger.deliveryMissingSince
+                and math.max(0, stamp - tonumber(ledger.deliveryMissingSince))
+                or 0
+            if currentCRS ~= nil and missingAge < disappearanceGrace then
+                store.save()
+                return {
+                    id=tostring(request.id),
+                    name=tostring(request.name or "Request"),
+                    requested=requestCount(request),
+                    item=tostring(ledger.item or "?"),
+                    status="WAITING ACK",
+                    detail="retry delivery was consumed from CRS; allowing MineColonies " ..
+                        tostring(missingAge) .. "/" .. tostring(disappearanceGrace) ..
+                        "s to refresh the request",
+                    usedPRSTurn=false,
+                }
+            end
+
             return recordAckStalled(
                 request, ledger,
                 "Request unchanged after " .. tostring(retryCount) ..
@@ -1624,6 +1772,20 @@ function M.new(config, store, cluster, matcher, transfer)
         end
 
         if age < retrySeconds then
+            if currentCRS ~= nil and floor(currentCRS) > baseline then
+                ledger.phase = "CRS_RECEIVED"
+                store.save()
+                return {
+                    id=tostring(request.id),
+                    name=tostring(request.name or "Request"),
+                    requested=requestCount(request),
+                    item=tostring(ledger.item or "?"),
+                    status="CRS RECEIVED",
+                    detail="verified delivery is present in CRS; waiting for MineColonies acknowledgement",
+                    usedPRSTurn=false,
+                }
+            end
+
             ledger.phase = "VERIFYING"
             store.save()
             return {
@@ -1647,12 +1809,37 @@ function M.new(config, store, cluster, matcher, transfer)
                 { crsError = crsErr })
         end
 
-        local baseline = floor(ledger.baselineCRS)
         if floor(currentCRS) > baseline then
-            return recordAckStalled(
-                request, ledger,
-                "Request unchanged, but delivered stock is still visible in CRS above baseline; duplicate retry suppressed",
-                { baselineCRS = baseline, currentCRS = floor(currentCRS) })
+            ledger.phase = "CRS_RECEIVED"
+            ledger.deliveryMissingSince = nil
+            store.save()
+            return {
+                id=tostring(request.id),
+                name=tostring(request.name or "Request"),
+                requested=requestCount(request),
+                item=tostring(ledger.item or "?"),
+                status="CRS RECEIVED",
+                detail="request unchanged, but verified delivery remains visible in CRS above baseline; waiting without resending",
+                usedPRSTurn=false,
+            }
+        end
+
+        local missingAge = ledger.deliveryMissingSince
+            and math.max(0, stamp - tonumber(ledger.deliveryMissingSince))
+            or 0
+        if missingAge < disappearanceGrace then
+            store.save()
+            return {
+                id=tostring(request.id),
+                name=tostring(request.name or "Request"),
+                requested=requestCount(request),
+                item=tostring(ledger.item or "?"),
+                status="WAITING ACK",
+                detail="verified delivery left CRS; allowing MineColonies " ..
+                    tostring(missingAge) .. "/" .. tostring(disappearanceGrace) ..
+                    "s to refresh before any bounded retry",
+                usedPRSTurn=false,
+            }
         end
 
         if maxRetries <= 0 then
@@ -1782,6 +1969,10 @@ function M.new(config, store, cluster, matcher, transfer)
         local count = requestCount(request)
         local signature = requestSignature(request, count, matcher.canonicalNBT)
         local ledger = ledgerFor(request.id)
+
+        if ledger.signature == signature then
+            migrateVerifiedDeliveryProof(ledger, count)
+        end
 
         if ledger.signature and ledger.signature ~= signature then
             store.addHistory("ACK", {
@@ -2194,7 +2385,7 @@ function M.new(config, store, cluster, matcher, transfer)
                 -- Sent/remaining are refreshed from the authoritative ledger.
                 local ledger = store.data.requestLedger[id] or {}
                 local sent = floor(ledger.sentTotal or ledger.lastSent)
-                requestRow.sent = math.max(requestRow.sent or 0, sent)
+                requestRow.sent = sent
                 requestRow.remaining = math.max(
                     0,
                     floor(requestRow.requested) - floor(requestRow.sent)
@@ -2477,13 +2668,15 @@ function M.new(config, store, cluster, matcher, transfer)
             end
 
             if row.status == "WAITING ACK"
-                or row.status == "VERIFYING DELIVERY" then
+                or row.status == "VERIFYING DELIVERY"
+                or row.status == "CRS RECEIVED" then
                 self.stats.waiting = self.stats.waiting + 1
             elseif row.status == "CRAFTING"
                 or row.status == "CRAFTING RETRY"
                 or row.status == "SUPPLYING" then
                 self.stats.crafting = self.stats.crafting + 1
-            elseif row.status == "ERROR" then
+            elseif row.status == "ERROR"
+                or row.status == "FAILED" then
                 self.stats.errors = self.stats.errors + 1
             elseif row.status == "BLOCKED"
                 or row.status == "MISSING"
