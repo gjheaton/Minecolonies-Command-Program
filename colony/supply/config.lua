@@ -1,8 +1,8 @@
 -- MineColonies Control Suite v3 - Supply Manager configuration
 local C = {}
 
-C.PROGRAM_VERSION = "3.0.19"
-C.SUITE_VERSION = "3.0.24"
+C.PROGRAM_VERSION = "3.0.20"
+C.SUITE_VERSION = "3.0.25"
 
 -- Peripheral overrides. Leave nil for auto-detection.
 C.playerBridgeName = nil
@@ -71,6 +71,10 @@ C.requestAckWaitSeconds = 60
 C.requestAckRetrySeconds = 180
 C.requestAckMaxRetries = 1
 C.requestAckPostRetrySeconds = 60
+-- When a verified delivery disappears from CRS, it may simply mean a courier
+-- consumed it before getRequests() refreshed.  Require this additional quiet
+-- period before a bounded resend/stall decision.
+C.requestAckConsumptionGraceSeconds = 60
 C.requestAckRetryCraftWaitSeconds = 180
 
 -- Craft submission safety. Once craftItem() is accepted, that request enters
