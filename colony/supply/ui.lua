@@ -56,6 +56,7 @@ function M.new(config, store, cluster, transfer, engine, updater)
         status = tostring(status or ""):upper()
         if status == "MISSING"
             or status == "ERROR"
+            or status == "FAILED"
             or status == "BLOCKED"
             or status == "ACK STALLED" then
             return C.danger
@@ -63,7 +64,8 @@ function M.new(config, store, cluster, transfer, engine, updater)
         if status == "IN PROGRESS" then
             return C.good
         end
-        if status:find("WAIT", 1, true)
+        if status == "CRS RECEIVED"
+            or status:find("WAIT", 1, true)
             or status:find("VERIFY", 1, true) then
             return colors.lightBlue
         end
@@ -562,7 +564,7 @@ function M.new(config, store, cluster, transfer, engine, updater)
         monitorUI.fillRow(5, C.panel)
         monitorUI.writeAt(itemX,5,Util.padRight("ITEM",itemW),C.dim,C.panel)
         monitorUI.writeAt(sep1X,5,"|",C.dim,C.panel)
-        monitorUI.writeAt(qtyX,5,Util.padRight("REM/QTY",qtyW),C.dim,C.panel)
+        monitorUI.writeAt(qtyX,5,Util.padRight("SENT/QTY",qtyW),C.dim,C.panel)
         monitorUI.writeAt(sep2X,5,"|",C.dim,C.panel)
         monitorUI.writeAt(statusX,5,Util.padRight("STATUS",statusW),C.dim,C.panel)
         monitorUI.writeAt(sep3X,5,"|",C.dim,C.panel)
@@ -579,7 +581,7 @@ function M.new(config, store, cluster, transfer, engine, updater)
 
             local itemText=tostring(
                 row.displayName or row.item or row.name or "Unknown")
-            local qtyText=tostring(row.remaining or row.requested or 0) ..
+            local qtyText=tostring(row.sent or 0) ..
                 "/" .. tostring(row.requested or 0)
             local status=tostring(row.status or "WAITING")
             local detail=tostring(row.detail or "")
