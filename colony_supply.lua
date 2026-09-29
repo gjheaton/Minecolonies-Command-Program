@@ -32,7 +32,7 @@ v3.0.21 PRS desync detection:
   * Item-stale requests are quarantined while unrelated requests continue.
   * Confirmed global desync holds the shared PRS turn and probes for recovery.
   * Health now reports PRS extraction state and quarantined stale-item count.
-  * Redstone-reset configuration is reserved but disabled pending field validation.
+  * A cooldown-protected redstone reset hook is included but disabled by default pending field validation.
 ]]
 
 local CONFIG = require("colony.supply.config")
