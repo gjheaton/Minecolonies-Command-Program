@@ -1965,6 +1965,371 @@ function M.new(config, store, cluster, matcher, transfer)
             "Retry deadline reached, delivered stock is no longer visible, and no exact replacement is available or craftable")
     end
 
+    ------------------------------------------------------------------
+    -- Runtime PRS desync guard.
+    --
+    -- A request that reads positive exact stock but cannot export is not
+    -- immediately called a global desync.  First confirm the exact stock over
+    -- several fresh listItems() reads, then probe extraction with a different
+    -- safe item.  A successful generic probe isolates the problem to the
+    -- original item/snapshot; a zero generic export confirms a global PRS
+    -- extraction fault.  Global faults hold the cluster PRS turn so another
+    -- colony cannot hammer the same desynced network.
+    ------------------------------------------------------------------
+    local PRSGuard = {}
+
+    function PRSGuard.data()
+        store.data.desync = type(store.data.desync) == "table"
+            and store.data.desync or {}
+        local d = store.data.desync
+        d.scope = tostring(d.scope or (d.suspected and "UNKNOWN" or "OK"))
+        d.staleItems = type(d.staleItems) == "table"
+            and d.staleItems or {}
+        return d
+    end
+
+    function PRSGuard.key(candidate)
+        return tostring(
+            candidate and (candidate.identity or candidate.name) or "?")
+    end
+
+    function PRSGuard.clearItem(candidate, detail)
+        local d = PRSGuard.data()
+        local key = PRSGuard.key(candidate)
+        if d.staleItems[key] ~= nil then
+            d.staleItems[key] = nil
+            store.log(
+                "PRS STALE CLEAR item=" ..
+                tostring(candidate and candidate.name or "?") ..
+                " reason=" .. tostring(detail or "stock changed/recovered")
+            )
+        end
+
+        if d.scope ~= "GLOBAL" then
+            local hasStale = next(d.staleItems) ~= nil
+            d.suspected = hasStale
+            d.scope = hasStale and "ITEM" or "OK"
+            d.extractionHealthy = true
+            d.detail = hasStale
+                and "one or more item-specific PRS stale states remain"
+                or tostring(detail or "PRS extraction healthy")
+            d.time = nowSeconds()
+        end
+        store.save()
+    end
+
+    function PRSGuard.stale(candidate, currentStock)
+        local d = PRSGuard.data()
+        local key = PRSGuard.key(candidate)
+        local entry = d.staleItems[key]
+        if type(entry) ~= "table" then return nil, 0 end
+
+        local stock = floor(currentStock)
+        local reported = floor(entry.reportedStock)
+        if stock <= 0 or stock ~= reported then
+            PRSGuard.clearItem(
+                candidate,
+                "reported exact stock changed " ..
+                    tostring(reported) .. "->" .. tostring(stock)
+            )
+            return nil, 0
+        end
+
+        local wait = math.max(
+            0,
+            math.ceil((tonumber(entry.retryAfter) or 0) - nowSeconds())
+        )
+        return entry, wait
+    end
+
+    function PRSGuard.markItem(candidate, stock, probeDetail, suspectOnly)
+        local d = PRSGuard.data()
+        local key = PRSGuard.key(candidate)
+        local existing = d.staleItems[key]
+        local now = nowSeconds()
+        local retrySeconds = math.max(
+            5,
+            floor(
+                suspectOnly
+                and (config.prsSuspectRetrySeconds or 20)
+                or (config.prsItemStaleRetrySeconds or 60)
+            )
+        )
+
+        d.staleItems[key] = {
+            item = tostring(candidate.name or "?"),
+            identity = tostring(candidate.identity or candidate.name or "?"),
+            reportedStock = floor(stock),
+            since = type(existing) == "table"
+                and tonumber(existing.since) or now,
+            lastSeen = now,
+            retryAfter = now + retrySeconds,
+            state = suspectOnly and "SUSPECT" or "STALE",
+            probeDetail = tostring(probeDetail or ""),
+        }
+        d.suspected = true
+        d.scope = suspectOnly and "SUSPECT" or "ITEM"
+        d.extractionHealthy = suspectOnly and nil or true
+        d.detail =
+            (suspectOnly and "PRS source failure is not yet classifiable: "
+                or "Item-specific PRS stale state confirmed: ") ..
+            tostring(candidate.name)
+        d.time = now
+        d.lastProbe = now
+        d.lastProbeDetail = tostring(probeDetail or "")
+        store.save()
+
+        if type(existing) ~= "table" then
+            store.addError(
+                suspectOnly and "PRS_ITEM_SUSPECT" or "PRS_ITEM_STALE",
+                suspectOnly
+                    and "PRS export failed and the generic extraction probe was inconclusive"
+                    or "PRS exact item remained visible but would not export; generic PRS extraction passed",
+                {
+                    item = candidate.name,
+                    identity = candidate.identity,
+                    reportedStock = floor(stock),
+                    probe = probeDetail,
+                    retrySeconds = retrySeconds,
+                },
+                "WARNING"
+            )
+        end
+    end
+
+    function PRSGuard.markGlobal(candidate, detail, probeDetail)
+        local d = PRSGuard.data()
+        local wasGlobal =
+            d.scope == "GLOBAL" and d.extractionHealthy == false
+        local now = nowSeconds()
+
+        d.suspected = true
+        d.scope = "GLOBAL"
+        d.extractionHealthy = false
+        d.failedItem = tostring(candidate and candidate.name or "?")
+        d.failedIdentity = tostring(
+            candidate and (candidate.identity or candidate.name) or "?")
+        d.detail = tostring(detail or "global PRS extraction failure confirmed")
+        d.time = now
+        d.lastProbe = now
+        d.lastProbeDetail = tostring(probeDetail or "")
+        store.save()
+
+        if not wasGlobal then
+            store.addError(
+                "PRS_GLOBAL_DESYNC",
+                "Global PRS extraction desync confirmed by independent one-item probe",
+                {
+                    item = d.failedItem,
+                    identity = d.failedIdentity,
+                    detail = detail,
+                    probe = probeDetail,
+                },
+                "ERROR"
+            )
+        end
+    end
+
+    function PRSGuard.exactRead(candidate)
+        local ok, items = safeCall(transfer.playerRS, "listItems")
+        if not ok or type(items) ~= "table" then return nil end
+        local total = 0
+        for _, item in pairs(items) do
+            if type(item) == "table"
+                and item.name == candidate.name
+                and matcher.exactlyMatches(candidate.raw, item) then
+                total = total + floor(item.amount)
+            end
+        end
+        return total
+    end
+
+    function PRSGuard.classifyZeroExport(
+        request, candidate, reportedStock, transferDetail)
+
+        local reads = math.max(
+            2, floor(config.prsDesyncConfirmReads or 3))
+        local delay = tonumber(config.prsDesyncConfirmDelay) or 0.15
+        local counts = {}
+        local complete = true
+
+        for i = 1, reads do
+            local value = PRSGuard.exactRead(candidate)
+            if value == nil then
+                complete = false
+                counts[#counts + 1] = "?"
+            else
+                counts[#counts + 1] = tostring(floor(value))
+            end
+            if i < reads and delay > 0 then sleep(delay) end
+        end
+
+        local first = tonumber(counts[1])
+        local stablePositive =
+            complete and first ~= nil and first > 0
+        if stablePositive then
+            for i = 2, #counts do
+                if tonumber(counts[i]) ~= first then
+                    stablePositive = false
+                    break
+                end
+            end
+        end
+
+        if not stablePositive then
+            PRSGuard.clearItem(
+                candidate,
+                "zero-export follow-up reads refreshed: " ..
+                    table.concat(counts, ",")
+            )
+            return {
+                id=tostring(request.id),
+                name=tostring(request.name or "Request"),
+                requested=requestCount(request),
+                item=candidate.name,
+                status="WAITING",
+                detail="PRS stock snapshot changed after export=0 (" ..
+                    table.concat(counts, ",") ..
+                    "); treating as cache refresh and retrying next turn",
+                usedPRSTurn=true,
+            }
+        end
+
+        local probeOK, probeDetail =
+            transfer.prsExtractionProbe(candidate.name)
+
+        if probeOK == true then
+            PRSGuard.markItem(
+                candidate,
+                first,
+                probeDetail,
+                false
+            )
+            return {
+                id=tostring(request.id),
+                name=tostring(request.name or "Request"),
+                requested=requestCount(request),
+                item=candidate.name,
+                status="RS STALE",
+                detail="Exact stock stayed at " .. tostring(first) ..
+                    " after export=0, but independent PRS extraction passed; " ..
+                    "item isolated and will retry later",
+                usedPRSTurn=true,
+            }
+        end
+
+        if probeOK == false then
+            PRSGuard.markGlobal(
+                candidate,
+                "Exact stock remained stable at " .. tostring(first) ..
+                    " and both requested-item export and independent PRS " ..
+                    "extraction probe returned 0",
+                probeDetail
+            )
+            cluster.holdTurn("global PRS desync confirmed")
+            return {
+                id=tostring(request.id),
+                name=tostring(request.name or "Request"),
+                requested=requestCount(request),
+                item=candidate.name,
+                status="PRS DESYNC",
+                detail="Global PRS extraction failure confirmed; cluster PRS turn held for recovery probing",
+                usedPRSTurn=true,
+            }
+        end
+
+        PRSGuard.markItem(
+            candidate,
+            first,
+            probeDetail,
+            true
+        )
+        return {
+            id=tostring(request.id),
+            name=tostring(request.name or "Request"),
+            requested=requestCount(request),
+            item=candidate.name,
+            status="PRS SUSPECT",
+            detail="Exact stock stayed at " .. tostring(first) ..
+                " after export=0, but independent probe was inconclusive; " ..
+                "item isolated pending retry",
+            usedPRSTurn=true,
+        }
+    end
+
+    function PRSGuard.handleGlobal()
+        local d = PRSGuard.data()
+        if d.scope ~= "GLOBAL" or d.extractionHealthy ~= false then
+            return false, false
+        end
+
+        cluster.holdTurn("PRS desync recovery")
+        local now = nowSeconds()
+        local retrySeconds = math.max(
+            5, floor(config.prsGlobalProbeSeconds or 30))
+        local last = tonumber(d.lastProbe) or 0
+
+        if now - last < retrySeconds then
+            self.statusMessage =
+                "PRS DESYNC: recovery probe in " ..
+                tostring(math.max(0, math.ceil(retrySeconds - (now - last)))) ..
+                "s"
+            return true, false
+        end
+
+        d.lastProbe = now
+        store.save()
+
+        local okProbe, probeDetail =
+            transfer.prsExtractionProbe(d.failedItem)
+
+        d.lastProbeDetail = tostring(probeDetail or "")
+        d.time = nowSeconds()
+
+        if okProbe == true then
+            d.extractionHealthy = true
+            d.failedItem = nil
+            d.failedIdentity = nil
+            local hasStale = next(d.staleItems) ~= nil
+            d.suspected = hasStale
+            d.scope = hasStale and "ITEM" or "OK"
+            d.detail =
+                "Global PRS extraction recovered: " ..
+                tostring(probeDetail or "probe passed")
+            for _, entry in pairs(d.staleItems) do
+                if type(entry) == "table" then
+                    entry.retryAfter = nowSeconds()
+                end
+            end
+            store.save()
+            store.addHistory("HEALTH", {
+                direction = "PRS",
+                detail = d.detail,
+            })
+            self.statusMessage = "PRS extraction recovered; yielding turn"
+            return false, true
+        end
+
+        if okProbe == false then
+            d.extractionHealthy = false
+            d.suspected = true
+            d.scope = "GLOBAL"
+            d.detail =
+                "Global PRS desync still present: " ..
+                tostring(probeDetail or "probe failed")
+            store.save()
+            self.statusMessage = "PRS DESYNC: recovery probe failed"
+            return true, false
+        end
+
+        d.detail =
+            "Global PRS desync recovery probe inconclusive: " ..
+            tostring(probeDetail or "unavailable")
+        store.save()
+        self.statusMessage = "PRS DESYNC: recovery probe inconclusive"
+        return true, false
+    end
+
     local function processRequest(request)
         local count = requestCount(request)
         local signature = requestSignature(request, count, matcher.canonicalNBT)
@@ -2023,6 +2388,23 @@ function M.new(config, store, cluster, matcher, transfer)
         end
 
         if candidate.stock > 0 then
+            local staleEntry, staleWait =
+                PRSGuard.stale(candidate, candidate.stock)
+            if staleEntry and staleWait > 0 then
+                return {
+                    id=tostring(request.id),
+                    name=tostring(request.name or "Request"),
+                    requested=count,
+                    item=candidate.name,
+                    status=tostring(staleEntry.state or "STALE") == "SUSPECT"
+                        and "PRS SUSPECT" or "RS STALE",
+                    detail="PRS reports " .. tostring(candidate.stock) ..
+                        " exact item(s), but prior export=0 is quarantined; retry in " ..
+                        tostring(staleWait) .. "s",
+                    usedPRSTurn=false,
+                }
+            end
+
             local amount = math.min(
                 count, candidate.stock, floor(config.maxTransferChunk or 64))
             local baselineCRS = transfer.colonyAmount(candidate)
@@ -2039,13 +2421,18 @@ function M.new(config, store, cluster, matcher, transfer)
                 }
             end
 
-            local ok, movedOrErr = transfer.playerToColony(candidate, amount, {
-                requestId=request.id,
-                detail="MineColonies request " ..
-                    tostring(request.name or request.id)
-            })
+            local ok, movedOrErr, transferCode =
+                transfer.playerToColony(candidate, amount, {
+                    requestId=request.id,
+                    detail="MineColonies request " ..
+                        tostring(request.name or request.id)
+                })
 
             if ok then
+                PRSGuard.clearItem(
+                    candidate,
+                    "verified request export/transfer succeeded"
+                )
                 noteVerifiedSend(
                     ledger, signature, candidate, movedOrErr, baselineCRS, false)
                 -- Keep the craft lock through visibility/desync windows. A
@@ -2081,6 +2468,15 @@ function M.new(config, store, cluster, matcher, transfer)
                         tostring(math.max(0, count - floor(ledger.sentTotal))),
                     usedPRSTurn=true,
                 }
+            end
+
+            if transferCode == "SOURCE_EXPORT_ZERO" then
+                return PRSGuard.classifyZeroExport(
+                    request,
+                    candidate,
+                    candidate.stock,
+                    movedOrErr
+                )
             end
 
             store.addError(
@@ -2604,6 +3000,16 @@ function M.new(config, store, cluster, matcher, transfer)
             end
         end
 
+        local desyncBlocked, desyncRecovered =
+            PRSGuard.handleGlobal()
+        if desyncBlocked then
+            return false
+        end
+        if desyncRecovered then
+            cluster.releaseTurn("PRS extraction recovery probe passed")
+            return true
+        end
+
         local okReq, requests = safeCall(transfer.colony, "getRequests")
         if not okReq or type(requests) ~= "table" then
             store.addError("REQUEST_API", "MineColonies getRequests failed", {detail=requests}, "ERROR")
@@ -2676,11 +3082,14 @@ function M.new(config, store, cluster, matcher, transfer)
                 or row.status == "SUPPLYING" then
                 self.stats.crafting = self.stats.crafting + 1
             elseif row.status == "ERROR"
-                or row.status == "FAILED" then
+                or row.status == "FAILED"
+                or row.status == "PRS DESYNC" then
                 self.stats.errors = self.stats.errors + 1
             elseif row.status == "BLOCKED"
                 or row.status == "MISSING"
-                or row.status == "ACK STALLED" then
+                or row.status == "ACK STALLED"
+                or row.status == "RS STALE"
+                or row.status == "PRS SUSPECT" then
                 self.stats.blocked = self.stats.blocked + 1
             else
                 self.stats.ready = self.stats.ready + 1
@@ -2714,6 +3123,15 @@ function M.new(config, store, cluster, matcher, transfer)
         end
 
         store.save()
+
+        local runtimeDesync = PRSGuard.data()
+        if runtimeDesync.scope == "GLOBAL"
+            and runtimeDesync.extractionHealthy == false then
+            self.statusMessage = "PRS DESYNC"
+            cluster.holdTurn("global PRS desync confirmed")
+            return false
+        end
+
         self.statusMessage =
             self.stats.errors > 0 and "DEGRADED" or "ONLINE"
 
@@ -2724,9 +3142,16 @@ function M.new(config, store, cluster, matcher, transfer)
     function self.healthSnapshot()
         local cs = cluster.status()
         local checks = store.data.startup and store.data.startup.checks or {}
+        local runtimeDesync =
+            type(store.data.desync) == "table"
+            and store.data.desync or {}
+        local prsRuntimeOK =
+            not (runtimeDesync.scope == "GLOBAL"
+                and runtimeDesync.extractionHealthy == false)
         return {
             overall = self.startupReady and cs.ok and transfer.health.playerRS and transfer.health.colonyRS
-                and transfer.health.colony and transfer.health.transferChest,
+                and transfer.health.colony and transfer.health.transferChest
+                and prsRuntimeOK,
             colony = transfer.health.colony,
             playerRS = transfer.health.playerRS,
             colonyRS = transfer.health.colonyRS,
