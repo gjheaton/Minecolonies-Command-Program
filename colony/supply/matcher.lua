@@ -100,30 +100,48 @@ local function identityFrom(item)
     return tostring(item.name or "") .. "|NBT|" .. canonical(item.nbt)
 end
 
+local function textHasToolToken(text, token)
+    local normalized = cleanText(text or ""):lower():gsub("[^%w]+", " ")
+    local wanted = cleanText(token or ""):lower():gsub("[^%w]+", " ")
+    normalized =
+        (" " .. normalized:gsub("^%s+", ""):gsub("%s+$", "") .. " ")
+    wanted = wanted:gsub("^%s+", ""):gsub("%s+$", "")
+    return wanted ~= ""
+        and normalized:find(" " .. wanted .. " ", 1, true) ~= nil
+end
+
 local function requestToolClass(request)
-    local text = cleanText(
+    local text =
         tostring(request and request.name or "") .. " " ..
         tostring(request and request.displayName or "") .. " " ..
-        tostring(request and request.description or "")
-    ):lower()
+        tostring(request and request.description or "") .. " " ..
+        tostring(request and request.desc or "") .. " " ..
+        tostring(request and request.type or "") .. " " ..
+        tostring(request and request.toolType or "") .. " " ..
+        tostring(request and request.toolClass or "")
 
-    if text:find("flint and steel", 1, true) then return "lighter" end
-    if text:find("fishing rod", 1, true) then return "fishing_rod" end
-    if text:find("crossbow", 1, true) then return "crossbow" end
-    if text:find("pickaxe", 1, true) then return "pickaxe" end
-    if text:find("chestplate", 1, true) then return "chestplate" end
-    if text:find("leggings", 1, true) then return "leggings" end
-    if text:find("helmet", 1, true) then return "helmet" end
-    if text:find("boots", 1, true) then return "boots" end
-    if text:find("shears", 1, true) then return "shears" end
-    if text:find("shield", 1, true) then return "shield" end
-    if text:find("sword", 1, true) then return "sword" end
-    if text:find("shovel", 1, true) then return "shovel" end
-    if text:find("spear", 1, true) then return "spear" end
-    if text:find(" lead", 1, true) or text == "lead" then return "lead" end
-    if text:find(" bow", 1, true) or text == "bow" then return "bow" end
-    if text:find(" axe", 1, true) or text == "axe" then return "axe" end
-    if text:find(" hoe", 1, true) or text == "hoe" then return "hoe" end
+    -- Match complete normalized tokens, never arbitrary substrings.  In
+    -- particular, "Bowl" must not be interpreted as a "Bow" equipment request.
+    if textHasToolToken(text, "flint and steel")
+        or textHasToolToken(text, "flint_and_steel") then
+        return "lighter"
+    end
+    if textHasToolToken(text, "fishing rod") then return "fishing_rod" end
+    if textHasToolToken(text, "crossbow") then return "crossbow" end
+    if textHasToolToken(text, "pickaxe") then return "pickaxe" end
+    if textHasToolToken(text, "chestplate") then return "chestplate" end
+    if textHasToolToken(text, "leggings") then return "leggings" end
+    if textHasToolToken(text, "helmet") then return "helmet" end
+    if textHasToolToken(text, "boots") then return "boots" end
+    if textHasToolToken(text, "shears") then return "shears" end
+    if textHasToolToken(text, "shield") then return "shield" end
+    if textHasToolToken(text, "sword") then return "sword" end
+    if textHasToolToken(text, "shovel") then return "shovel" end
+    if textHasToolToken(text, "spear") then return "spear" end
+    if textHasToolToken(text, "lead") then return "lead" end
+    if textHasToolToken(text, "bow") then return "bow" end
+    if textHasToolToken(text, "axe") then return "axe" end
+    if textHasToolToken(text, "hoe") then return "hoe" end
     return nil
 end
 
