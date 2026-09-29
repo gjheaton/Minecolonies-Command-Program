@@ -1,5 +1,5 @@
 --[[
-MineColonies Supply Manager v3.0.21
+MineColonies Supply Manager v3.0.22
 Architectural rewrite for multi-colony serialized access to shared Player Refined Storage (PRS).
 
 Terms:
@@ -33,6 +33,11 @@ v3.0.21 PRS desync detection:
   * Confirmed global desync holds the shared PRS turn and probes for recovery.
   * Health now reports PRS extraction state and quarantined stale-item count.
   * A cooldown-protected redstone reset hook is included but disabled by default pending field validation.
+
+v3.0.22 matcher correction:
+  * Tool-class matching now uses complete normalized tokens.
+  * "Bowl" is no longer misclassified as "Bow", so minecraft:bowl remains a
+    normal supply candidate and can be fulfilled from PRS stock.
 ]]
 
 local CONFIG = require("colony.supply.config")
@@ -158,7 +163,7 @@ local function terminalLoop()
     end
 end
 
-store.log("Supply Manager v3.0.21 starting computer=" ..
+store.log("Supply Manager v3.0.22 starting computer=" ..
     tostring(os.getComputerID and os.getComputerID() or "?"))
 
 parallel.waitForAll(
