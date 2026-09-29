@@ -1,8 +1,8 @@
 -- MineColonies Control Suite v3 - Supply Manager configuration
 local C = {}
 
-C.PROGRAM_VERSION = "3.0.20"
-C.SUITE_VERSION = "3.0.25"
+C.PROGRAM_VERSION = "3.0.21"
+C.SUITE_VERSION = "3.0.26"
 
 -- Peripheral overrides. Leave nil for auto-detection.
 C.playerBridgeName = nil
@@ -61,6 +61,26 @@ C.orphanChestRecoverySeconds = 180
 -- These checks run only after a real transfer, not every scan.
 C.destinationConfirmReads = 5
 C.destinationConfirmDelay = 0.25
+
+-- Runtime PRS desync classification.
+-- A zero source export is followed by several fresh exact-stock reads.  If the
+-- stock remains stable and positive, Supply extracts one DIFFERENT safe plain
+-- item through the same PRS->transfer-chest path.  A successful independent
+-- extraction proves an item-specific stale condition; another zero export
+-- confirms a global PRS extraction fault.
+C.prsDesyncConfirmReads = 3
+C.prsDesyncConfirmDelay = 0.15
+C.prsItemStaleRetrySeconds = 60
+C.prsSuspectRetrySeconds = 20
+C.prsGlobalProbeSeconds = 30
+
+-- Future automatic reset hook.  Keep disabled until runtime desync detection
+-- has been observed in production and the physical PRS reset input is wired.
+C.prsAutoResetEnabled = false
+C.prsResetRedstoneSide = nil
+C.prsResetPulseSeconds = 0.5
+C.prsResetCooldownSeconds = 120
+
 -- MineColonies acknowledgement reconciliation.
 -- A verified transfer first waits normally, then enters a non-blocking
 -- verification window. At the retry deadline, one bounded retry is allowed
