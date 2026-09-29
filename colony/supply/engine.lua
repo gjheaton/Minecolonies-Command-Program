@@ -87,6 +87,7 @@ function M.new(config, store, cluster, matcher, transfer)
     }
 
     local recoverRequestedChestToCRS
+    local PRSGuard = {}
 
     local function safeCall(obj, method, ...)
         return transfer.safeCall(obj, method, ...)
@@ -1545,6 +1546,22 @@ function M.new(config, store, cluster, matcher, transfer)
             transfer.playerRS, candidate, safeCall)
 
         if exactStock > 0 and #variants > 0 then
+            local staleEntry, staleWait =
+                PRSGuard.stale(candidate, exactStock)
+            if staleEntry and staleWait > 0 then
+                return {
+                    id=tostring(request.id),
+                    name=tostring(request.name or "Request"),
+                    requested=requested,
+                    item=candidate.name,
+                    status=tostring(staleEntry.state or "STALE") == "SUSPECT"
+                        and "PRS SUSPECT" or "RS STALE",
+                    detail="Partial request exact stock is quarantined after export=0; retry in " ..
+                        tostring(staleWait) .. "s",
+                    usedPRSTurn=false,
+                }
+            end
+
             local amount = math.min(
                 remaining,
                 exactStock,
@@ -1563,13 +1580,22 @@ function M.new(config, store, cluster, matcher, transfer)
                 }
             end
 
-            local ok, movedOrErr = transfer.playerToColony(candidate, amount, {
-                requestId=request.id,
-                detail="continuing verified request delivery; local sent=" ..
-                    tostring(sentTotal) .. "/" .. tostring(requested)
-            })
+            local ok, movedOrErr, transferCode =
+                transfer.playerToColony(candidate, amount, {
+                    requestId=request.id,
+                    detail="continuing verified request delivery; local sent=" ..
+                        tostring(sentTotal) .. "/" .. tostring(requested)
+                })
 
             if not ok then
+                if transferCode == "SOURCE_EXPORT_ZERO" then
+                    return PRSGuard.classifyZeroExport(
+                        request,
+                        candidate,
+                        exactStock,
+                        movedOrErr
+                    )
+                end
                 store.addError(
                     "PARTIAL_DELIVERY_TRANSFER",
                     "Failed while continuing a verified multi-chunk request delivery",
@@ -1594,6 +1620,10 @@ function M.new(config, store, cluster, matcher, transfer)
                 }
             end
 
+            PRSGuard.clearItem(
+                candidate,
+                "verified continuation export/transfer succeeded"
+            )
             noteVerifiedSend(
                 ledger, signature, candidate, movedOrErr, baselineCRS, false)
             -- Crafted output becoming visible is not enough to release the
@@ -1868,6 +1898,22 @@ function M.new(config, store, cluster, matcher, transfer)
             transfer.playerRS, candidate, safeCall)
 
         if exactStock > 0 and #variants > 0 then
+            local staleEntry, staleWait =
+                PRSGuard.stale(candidate, exactStock)
+            if staleEntry and staleWait > 0 then
+                return {
+                    id=tostring(request.id),
+                    name=tostring(request.name or "Request"),
+                    requested=requestCount(request),
+                    item=candidate.name,
+                    status=tostring(staleEntry.state or "STALE") == "SUSPECT"
+                        and "PRS SUSPECT" or "RS STALE",
+                    detail="ACK retry exact stock is quarantined after export=0; retry in " ..
+                        tostring(staleWait) .. "s",
+                    usedPRSTurn=false,
+                }
+            end
+
             local retryAmount = math.min(
                 math.max(1, floor(ledger.lastSent or ledger.sentTotal or 1)),
                 requestCount(request),
@@ -1875,13 +1921,18 @@ function M.new(config, store, cluster, matcher, transfer)
                 floor(config.maxTransferChunk or 64)
             )
             local retryBaseline = floor(currentCRS)
-            local ok, movedOrErr = transfer.playerToColony(candidate, retryAmount, {
-                requestId=request.id,
-                detail="bounded ACK reconciliation retry " ..
-                    tostring(retryCount + 1) .. "/" .. tostring(maxRetries)
-            })
+            local ok, movedOrErr, transferCode =
+                transfer.playerToColony(candidate, retryAmount, {
+                    requestId=request.id,
+                    detail="bounded ACK reconciliation retry " ..
+                        tostring(retryCount + 1) .. "/" .. tostring(maxRetries)
+                })
 
             if ok then
+                PRSGuard.clearItem(
+                    candidate,
+                    "verified ACK-retry export/transfer succeeded"
+                )
                 noteVerifiedSend(
                     ledger, signature, candidate, movedOrErr, retryBaseline, true)
                 return {
@@ -1895,6 +1946,15 @@ function M.new(config, store, cluster, matcher, transfer)
                         " verified; awaiting acknowledgement",
                     usedPRSTurn=true,
                 }
+            end
+
+            if transferCode == "SOURCE_EXPORT_ZERO" then
+                return PRSGuard.classifyZeroExport(
+                    request,
+                    candidate,
+                    exactStock,
+                    movedOrErr
+                )
             end
 
             store.addError(
@@ -1992,8 +2052,6 @@ function M.new(config, store, cluster, matcher, transfer)
     -- extraction fault.  Global faults hold the cluster PRS turn so another
     -- colony cannot hammer the same desynced network.
     ------------------------------------------------------------------
-    local PRSGuard = {}
-
     function PRSGuard.data()
         store.data.desync = type(store.data.desync) == "table"
             and store.data.desync or {}
