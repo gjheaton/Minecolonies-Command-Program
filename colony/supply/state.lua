@@ -73,8 +73,14 @@ local function defaultData(config)
         },
         desync = {
             suspected = false,
+            scope = "OK",
             detail = nil,
             time = nil,
+            extractionHealthy = true,
+            lastProbe = nil,
+            lastProbeItem = nil,
+            lastProbeDetail = nil,
+            staleItems = {},
         },
         migration = {},
     }
@@ -102,6 +108,12 @@ local function mergeDefaults(data, config)
     data.startup = type(data.startup) == "table" and data.startup or base.startup
     data.startup.checks = type(data.startup.checks) == "table" and data.startup.checks or {}
     data.desync = type(data.desync) == "table" and data.desync or base.desync
+    data.desync.scope = tostring(data.desync.scope or (data.desync.suspected and "UNKNOWN" or "OK"))
+    if data.desync.extractionHealthy == nil and not data.desync.suspected then
+        data.desync.extractionHealthy = true
+    end
+    data.desync.staleItems = type(data.desync.staleItems) == "table"
+        and data.desync.staleItems or {}
     data.migration = type(data.migration) == "table" and data.migration or {}
     return data
 end
@@ -287,12 +299,26 @@ function M.new(config)
         return self.save()
     end
 
-    function self.setDesync(suspected, detail)
-        self.data.desync = {
-            suspected = suspected == true,
-            detail = tostring(detail or ""),
-            time = nowSeconds(),
-        }
+    function self.setDesync(suspected, detail, fields)
+        local current = type(self.data.desync) == "table"
+            and self.data.desync or {}
+        current.suspected = suspected == true
+        current.detail = tostring(detail or "")
+        current.time = nowSeconds()
+        current.staleItems = type(current.staleItems) == "table"
+            and current.staleItems or {}
+
+        if type(fields) == "table" then
+            for k, v in pairs(fields) do
+                if k ~= "staleItems" then current[k] = safeValue(v) end
+            end
+        end
+
+        if not current.suspected and current.scope == nil then
+            current.scope = "OK"
+        end
+
+        self.data.desync = current
         return self.save()
     end
 
