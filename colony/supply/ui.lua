@@ -58,8 +58,13 @@ function M.new(config, store, cluster, transfer, engine, updater)
             or status == "ERROR"
             or status == "FAILED"
             or status == "BLOCKED"
-            or status == "ACK STALLED" then
+            or status == "ACK STALLED"
+            or status == "PRS DESYNC" then
             return C.danger
+        end
+        if status == "RS STALE"
+            or status == "PRS SUSPECT" then
+            return C.warn
         end
         if status == "IN PROGRESS" then
             return C.good
@@ -372,8 +377,12 @@ function M.new(config, store, cluster, transfer, engine, updater)
             if upper:find("ERROR", 1, true)
                 or upper:find("BLOCKED", 1, true)
                 or upper:find("MISSING", 1, true)
-                or upper:find("STALLED", 1, true) then
+                or upper:find("STALLED", 1, true)
+                or upper:find("DESYNC", 1, true) then
                 statusFg = C.danger
+            elseif upper:find("STALE", 1, true)
+                or upper:find("SUSPECT", 1, true) then
+                statusFg = C.warn
             elseif upper:find("CRAFT", 1, true) then
                 statusFg = C.warn
             elseif upper:find("SUPPLY", 1, true) then
@@ -458,6 +467,25 @@ function M.new(config, store, cluster, transfer, engine, updater)
             and type(movementCheck) == "table"
             and movementCheck.severity == "WAITING"
 
+        local desync = type(h.desync) == "table" and h.desync or {}
+        local staleCount = 0
+        for _ in pairs(
+            type(desync.staleItems) == "table"
+                and desync.staleItems or {}
+        ) do
+            staleCount = staleCount + 1
+        end
+        local extractionHealthy =
+            desync.extractionHealthy == true
+        local extractionFailed =
+            desync.extractionHealthy == false
+        local extractionWord =
+            extractionFailed and "FAIL"
+            or (extractionHealthy and "OK" or "WARN")
+        local extractionColor =
+            extractionFailed and C.danger
+            or (extractionHealthy and C.good or C.warn)
+
         local rows = {
             {"Colony integrator", h.colony, transfer.colonyName},
             {"Player RS (PRS)", h.playerRS, transfer.playerBridgeName or "?"},
@@ -481,7 +509,23 @@ function M.new(config, store, cluster, transfer, engine, updater)
                 startupWaiting and "WAIT" or nil,
                 startupWaiting and C.warn or nil,
             },
-            {"PRS desync", not (h.desync and h.desync.suspected), h.desync and h.desync.detail or "not checked"},
+            {
+                "PRS extraction",
+                not extractionFailed,
+                tostring(desync.detail or "not checked"),
+                extractionWord,
+                extractionColor,
+            },
+            {
+                "PRS stale items",
+                staleCount == 0,
+                staleCount == 0
+                    and "none"
+                    or (tostring(staleCount) ..
+                        " quarantined item(s); unrelated requests continue"),
+                staleCount > 0 and "WARN" or nil,
+                staleCount > 0 and C.warn or nil,
+            },
             {"Pending transfer", h.pending == nil, h.pending and ("PENDING " .. tostring(h.pending.direction) .. " " .. tostring(h.pending.item)) or "none"},
         }
         local y = 5
