@@ -395,7 +395,11 @@ function M.new(config, store, cluster, matcher, transfer)
         sleep(0.15)
         local ok2, second = safeCall(transfer.playerRS, "listItems")
         if not ok1 or not ok2 or type(first) ~= "table" or type(second) ~= "table" then
-            store.setDesync(true, "PRS listItems read failed during startup consistency check")
+            store.setDesync(
+                true,
+                "PRS listItems read failed during startup consistency check",
+                { scope = "READ_ERROR", extractionHealthy = nil }
+            )
             return false, "PRS listItems consistency check failed"
         end
 
@@ -415,17 +419,29 @@ function M.new(config, store, cluster, matcher, transfer)
         -- A live RS can legitimately change between reads. This is a warning-only
         -- heuristic; the real startup movement probe is authoritative.
         if aStacks == 0 and bStacks == 0 then
-            store.setDesync(false, "PRS consistency reads completed; network empty")
+            store.setDesync(
+                false,
+                "PRS consistency reads completed; network empty",
+                { scope = "OK", extractionHealthy = true }
+            )
             return true, "PRS consistency reads completed (empty network)"
         end
         if delta > 4096 then
             local detail = "PRS inventory changed unusually between startup reads: " ..
                 tostring(aTotal) .. " -> " .. tostring(bTotal)
-            store.setDesync(true, detail)
+            store.setDesync(
+                true,
+                detail,
+                { scope = "READ_VARIANCE", extractionHealthy = nil }
+            )
             return true, "WARNING: " .. detail
         end
-        store.setDesync(false, "no obvious PRS listItems inconsistency")
-        return true, "no obvious PRS desync signature"
+        store.setDesync(
+            false,
+            "startup PRS reads and movement probe are healthy",
+            { scope = "OK", extractionHealthy = true }
+        )
+        return true, "startup PRS reads and movement probe are healthy"
     end
 
     function self.runStartupChecks()
