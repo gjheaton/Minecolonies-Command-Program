@@ -1,5 +1,5 @@
 --[[
-MineColonies Supply Manager v3.0.20
+MineColonies Supply Manager v3.0.21
 Architectural rewrite for multi-colony serialized access to shared Player Refined Storage (PRS).
 
 Terms:
@@ -24,6 +24,15 @@ v3.0.20 acknowledgement hardening:
   * Stock still visible in CRS is reported as CRS RECEIVED, not ACK STALLED.
   * A courier-consumption grace window prevents immediate duplicate retries.
   * Requests now display SENT/QTY so a proven 1/1 delivery cannot look like 0/1.
+
+v3.0.21 PRS desync detection:
+  * A stock-positive/export-zero event is confirmed with repeated exact-stock reads.
+  * A separate safe one-item PRS->chest->PRS probe distinguishes item-stale from
+    global PRS extraction desync.
+  * Item-stale requests are quarantined while unrelated requests continue.
+  * Confirmed global desync holds the shared PRS turn and probes for recovery.
+  * Health now reports PRS extraction state and quarantined stale-item count.
+  * Redstone-reset configuration is reserved but disabled pending field validation.
 ]]
 
 local CONFIG = require("colony.supply.config")
@@ -149,7 +158,7 @@ local function terminalLoop()
     end
 end
 
-store.log("Supply Manager v3.0.20 starting computer=" ..
+store.log("Supply Manager v3.0.21 starting computer=" ..
     tostring(os.getComputerID and os.getComputerID() or "?"))
 
 parallel.waitForAll(
