@@ -857,7 +857,9 @@ function M.new(config, store, matcher)
         if not empty then return false, "transfer chest not empty: " .. tostring(emptyErr or "occupied") end
 
         local variants, stock = matcher.findStoredVariants(self.playerRS, candidate, function(...) return self.safeCall(...) end)
-        if stock <= 0 or #variants == 0 then return false, "exact PRS variant not stored" end
+        if stock <= 0 or #variants == 0 then
+            return false, "exact PRS variant not stored", "SOURCE_STOCK_GONE"
+        end
 
         local quantity = math.min(count, stock)
         local filter, filterMode = matcher.exportFilterForVariant(candidate, variants[1], quantity)
@@ -907,7 +909,8 @@ function M.new(config, store, matcher)
                     "PRS export acknowledged by bridge (" ..
                     tostring(exported) ..
                     ") but transfer chest visibility is delayed; " ..
-                    "pending retained"
+                    "pending retained",
+                    "SOURCE_VISIBILITY_DELAY"
             end
 
             clearPending()
@@ -925,7 +928,8 @@ function M.new(config, store, matcher)
                 " chestBefore=" .. tostring(chestBefore) ..
                 " chestAfter=" .. tostring(chestAfterExport) ..
                 " chestDelta=0" ..
-                (exportErr and (" error=" .. tostring(exportErr)) or "")
+                (exportErr and (" error=" .. tostring(exportErr)) or ""),
+                "SOURCE_EXPORT_ZERO"
         end
 
         pending.stage = "staged"
@@ -960,7 +964,8 @@ function M.new(config, store, matcher)
                 "CRS import moved 0; staged item retained for diagnosis/recovery"
             setPending(pending)
             return false,
-                "CRS import moved 0; requested item retained in transfer chest"
+                "CRS import moved 0; requested item retained in transfer chest",
+                "DESTINATION_IMPORT_ZERO"
         end
 
         pending.stage = "confirming"
@@ -985,7 +990,7 @@ function M.new(config, store, matcher)
                 tostring(physicalAccepted) ..
                 " confirmed=" .. tostring(confirmed)
             setPending(pending)
-            return false, pending.lastError
+            return false, pending.lastError, "DESTINATION_CONFIRMING"
         end
 
         clearPending()
@@ -1153,13 +1158,27 @@ function M.new(config, store, matcher)
                 (" error=" .. tostring(lastImportErr)) or "")
     end
 
-    function self.findSafeProbeCandidate()
+    function self.findSafeProbeCandidate(exclude)
         local ok, items = self.safeCall(self.playerRS, "listItems")
         if not ok or type(items) ~= "table" then return nil, "PRS listItems unavailable" end
+
+        local excluded = {}
+        if type(exclude) == "string" and exclude ~= "" then
+            excluded[exclude] = true
+        elseif type(exclude) == "table" then
+            for k, v in pairs(exclude) do
+                if type(k) == "number" then
+                    excluded[tostring(v)] = true
+                elseif v == true then
+                    excluded[tostring(k)] = true
+                end
+            end
+        end
 
         local preferred = tostring(config.startupProbePreferredItem or "")
         local function usable(item)
             if type(item) ~= "table" or floor(item.amount) < 1 then return false end
+            if excluded[tostring(item.name or "")] then return false end
             local ns = tostring(item.name or ""):match("^([^:]+):")
             if not ns or config.startupProbeNamespaces[ns] ~= true then return false end
             local nbt = item.nbt
@@ -1188,6 +1207,107 @@ function M.new(config, store, matcher)
             namespace = tostring(selected.name):match("^([^:]+):") or "",
             raw = { name = selected.name, nbt = nil },
         }
+    end
+
+    -- Runtime PRS source-extraction probe.  This deliberately avoids CRS:
+    -- one safe plain item is exported PRS -> isolated transfer chest and then
+    -- returned chest -> PRS.  A zero export with stable visible stock is strong
+    -- evidence of a global PRS/AP extraction desync.  A successful probe proves
+    -- the bridge/network can extract some other item, isolating the original
+    -- request failure to that exact item/snapshot.
+    function self.prsExtractionProbe(excludeName)
+        if type(store.data.pending) == "table" then
+            return nil, "probe unavailable while a transfer is pending"
+        end
+
+        local empty, emptyErr = self.chestEmpty()
+        if not empty then
+            return nil,
+                "probe unavailable because transfer chest is not empty: " ..
+                tostring(emptyErr or "occupied")
+        end
+
+        local candidate, candidateErr =
+            self.findSafeProbeCandidate(excludeName)
+        if not candidate then
+            return nil, tostring(candidateErr or "no safe PRS probe item")
+        end
+
+        local variants, stock = matcher.findStoredVariants(
+            self.playerRS,
+            candidate,
+            function(...) return self.safeCall(...) end
+        )
+        if stock <= 0 or #variants == 0 then
+            return nil,
+                "probe candidate disappeared before extraction: " ..
+                tostring(candidate.name)
+        end
+
+        local filter, filterMode =
+            matcher.exportFilterForVariant(candidate, variants[1], 1)
+        if not filter then
+            return nil,
+                "probe candidate cannot be exported safely: " ..
+                tostring(filterMode)
+        end
+
+        local beforePRS = self.playerAmount(candidate)
+        local chestBefore = self.chestCount(candidate) or 0
+        local exported, exportErr =
+            sourceExport(
+                self.playerRS,
+                filter,
+                config.playerToChestDirection
+            )
+
+        local staged, chestAfter =
+            waitForChestIncrease(candidate, chestBefore, 1)
+
+        if staged <= 0 then
+            if floor(exported) > 0 then
+                return nil,
+                    "probe inconclusive: bridge reported " ..
+                    tostring(exported) .. " export of " ..
+                    tostring(candidate.name) ..
+                    " but transfer chest did not expose it"
+            end
+            return false,
+                "probe export moved 0 for " .. tostring(candidate.name) ..
+                " while PRS reported stock=" .. tostring(stock) ..
+                " mode=" .. tostring(filterMode) ..
+                " chest=" .. tostring(chestBefore) ..
+                "->" .. tostring(chestAfter) ..
+                (exportErr and (" error=" .. tostring(exportErr)) or ""),
+                candidate
+        end
+
+        local cleanupOK, cleanupDetail =
+            self.rollbackChestToPlayer(candidate, staged)
+        local afterPRS = self.playerAmount(candidate)
+
+        if not cleanupOK then
+            return true,
+                "PRS extraction verified with " .. tostring(candidate.name) ..
+                ", but probe cleanup needs recovery: " ..
+                tostring(cleanupDetail),
+                candidate,
+                false
+        end
+
+        store.addHistory("HEALTH", {
+            direction = "PRS>CHEST>PRS",
+            item = candidate.name,
+            amount = staged,
+            detail = "runtime PRS extraction probe passed",
+        })
+
+        return true,
+            "PRS extraction verified with " .. tostring(candidate.name) ..
+            " (PRS " .. tostring(beforePRS) .. "->" ..
+            tostring(afterPRS) .. ")",
+            candidate,
+            true
     end
 
     function self.startupRoundTrip()
