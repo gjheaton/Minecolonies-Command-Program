@@ -1,5 +1,5 @@
 --[[
-MineColonies Supply Manager v3.0.25
+MineColonies Supply Manager v3.0.26
 Architectural rewrite for multi-colony serialized access to shared Player Refined Storage (PRS).
 
 Terms:
@@ -54,6 +54,11 @@ v3.0.25 monitor update control:
   * CHECK UPDATE is always visible in the upper-right header on every Supply tab.
   * The same control becomes UPDATE when a newer suite is available.
   * The old Home-only update row/button has been removed.
+
+v3.0.26 updater validation:
+  * Update checks compare the running app version and suite version independently.
+  * A newer Command/Supply app can no longer be hidden by an equal/stale suite value.
+  * Shared-file-only suite updates remain supported as UPDATE SUITE.
 ]]
 
 local CONFIG = require("colony.supply.config")
@@ -179,7 +184,7 @@ local function terminalLoop()
     end
 end
 
-store.log("Supply Manager v3.0.25 starting computer=" ..
+store.log("Supply Manager v3.0.26 starting computer=" ..
     tostring(os.getComputerID and os.getComputerID() or "?"))
 
 parallel.waitForAll(
