@@ -70,6 +70,7 @@ function M.new(config, store, cluster, transfer, engine, updater)
             return C.good
         end
         if status == "CRS RECEIVED"
+            or status == "CRS REFRESHED"
             or status:find("WAIT", 1, true)
             or status:find("VERIFY", 1, true) then
             return colors.lightBlue
