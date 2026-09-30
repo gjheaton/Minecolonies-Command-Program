@@ -11,12 +11,14 @@
 -- v3.0.2: Supply-style CHECK NOW / UPDATE button on the Home screen.
 -- v3.0.3: Citizen BEST FIT scores and wider STATE / compact STATUS columns.
 -- v3.0.4: Left-align BEST FIT job names and right-align fit scores.
+-- v3.0.5: Show current-job suitability score in JOB using the same
+--         left-job / right-score layout as BEST FIT.
 
 local REFRESH_SECONDS = 10
 local RAID_BLINK_SECONDS = 0.75
 local TEXT_SCALE = 0.5
-local PROGRAM_VERSION = "3.0.4"
-local SUITE_VERSION = "3.0.24"
+local PROGRAM_VERSION = "3.0.5"
+local SUITE_VERSION = "3.0.30"
 
 local Util = require("colony.lib.util")
 local SharedUI = require("colony.lib.ui")
@@ -276,6 +278,15 @@ local function citizenBestFit(citizen)
     end
 
     return label, score, fit.matches == true and C.good or C.warn
+end
+
+local function citizenCurrentJobScore(citizen)
+    local fit = type(citizen) == "table" and citizen._jobFit or nil
+    local current = type(fit) == "table" and fit.current or nil
+    if type(current) ~= "table" or current.score == nil then
+        return nil
+    end
+    return string.format("%.1f", tonumber(current.score) or 0)
 end
 
 -- Military citizens are kept in a separate section at the bottom of the
@@ -1591,15 +1602,15 @@ local function drawListPage(page)
         -- The remaining width is biased toward STATE so MineColonies AI state
         -- text is easier to read, while BEST FIT keeps enough room for a score.
         local statusW = 7
-        local nameW = math.max(10, math.floor(content * 0.21))
-        local jobW = math.max(9, math.floor(content * 0.16))
+        local nameW = math.max(10, math.floor(content * 0.20))
+        local jobW = math.max(13, math.floor(content * 0.20))
         local bestW = math.max(13, math.floor(content * 0.23))
         local stateW = content - nameW - jobW - bestW - statusW
 
         while stateW < 12
-            and (nameW > 10 or jobW > 9 or bestW > 13) do
+            and (nameW > 10 or jobW > 13 or bestW > 13) do
             if nameW > 10 then nameW = nameW - 1
-            elseif jobW > 9 then jobW = jobW - 1
+            elseif jobW > 13 then jobW = jobW - 1
             elseif bestW > 13 then bestW = bestW - 1 end
             stateW = content - nameW - jobW - bestW - statusW
         end
@@ -1867,7 +1878,31 @@ local function drawListPage(page)
                         citizenBestFit(item)
                     writeAt(columns.nameX, y, pad(item.name or "Unknown", columns.nameW), C.text, bg)
                     writeAt(columns.sep1X, y, "|", C.dim, bg)
-                    writeAt(columns.jobX, y, pad(citizenJob(item), columns.jobW), C.accent, bg)
+
+                    local currentJob = citizenJob(item)
+                    local currentScore = citizenCurrentJobScore(item)
+                    local currentScoreWidth =
+                        currentScore and #currentScore or 0
+                    local currentJobWidth = math.max(
+                        1,
+                        columns.jobW - currentScoreWidth -
+                            (currentScore and 1 or 0)
+                    )
+                    writeAt(
+                        columns.jobX, y,
+                        clip(currentJob, currentJobWidth),
+                        C.accent, bg
+                    )
+                    if currentScore then
+                        local currentScoreX =
+                            columns.jobX + columns.jobW - currentScoreWidth
+                        writeAt(
+                            currentScoreX, y,
+                            currentScore,
+                            C.accent, bg
+                        )
+                    end
+
                     writeAt(columns.sep2X, y, "|", C.dim, bg)
 
                     local scoreWidth = bestFitScore and #bestFitScore or 0
@@ -2099,6 +2134,10 @@ local function detailLines(page, item)
         addDetailLine(lines, "Needs better food", yesno(item.betterFood), item.betterFood and C.danger or C.good)
         if type(item.work) == "table" then
             addDetailLine(lines, "Job", cleanJobName(item.work.job or "Worker"))
+            local currentScore = citizenCurrentJobScore(item)
+            if currentScore then
+                addDetailLine(lines, "Job score", currentScore, C.accent)
+            end
             addDetailLine(lines, "Workplace", item.work.name or item.work.type)
             addDetailLine(lines, "Work level", item.work.level)
             addDetailLine(lines, "Work location", posText(item.work.location))
