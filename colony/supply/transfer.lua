@@ -1140,6 +1140,13 @@ function M.new(config, store, matcher)
             return false, pending.lastError
         end
 
+        -- Persist a completed physical round trip before clearing it so an
+        -- unexpected reboot between these two writes cannot strand an
+        -- ambiguous empty-chest transaction.
+        pending.stage = "confirming"
+        pending.physicalAccepted = physicalReturned
+        setPending(pending)
+
         -- For this operation the physical chest round trip is the proof.  The
         -- whole point of the touch is that CRS listItems may itself be stale.
         clearPending()
@@ -1547,6 +1554,24 @@ function M.new(config, store, matcher)
                 and floor(p.physicalAccepted) > 0 then
 
                 local direction = tostring(p.direction or "")
+
+                if direction == "CRS>CRS_TOUCH"
+                    and p.warehouseTouch == true then
+                    local detail =
+                        "recovered completed CRS warehouse-refresh touch: " ..
+                        tostring(floor(p.physicalAccepted)) .. "x " ..
+                        tostring(p.item or "?")
+                    clearPending()
+                    store.addHistory("RECOVERY", {
+                        direction = direction,
+                        item = tostring(p.item or "?"),
+                        amount = floor(p.physicalAccepted),
+                        requestId = p.requestId,
+                        detail = detail,
+                    })
+                    return true, detail
+                end
+
                 local destination
                 local destinationLabel
 
