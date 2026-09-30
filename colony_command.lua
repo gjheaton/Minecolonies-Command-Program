@@ -13,12 +13,14 @@
 -- v3.0.4: Left-align BEST FIT job names and right-align fit scores.
 -- v3.0.5: Show current-job suitability score in JOB using the same
 --         left-job / right-score layout as BEST FIT.
+-- v3.0.6: Help Wanted shows the best-suited current citizen for each open
+--         building, and CHECK UPDATE / UPDATE is persistent in the header.
 
 local REFRESH_SECONDS = 10
 local RAID_BLINK_SECONDS = 0.75
 local TEXT_SCALE = 0.5
-local PROGRAM_VERSION = "3.0.5"
-local SUITE_VERSION = "3.0.30"
+local PROGRAM_VERSION = "3.0.6"
+local SUITE_VERSION = "3.0.31"
 
 local Util = require("colony.lib.util")
 local SharedUI = require("colony.lib.ui")
@@ -709,6 +711,60 @@ local function staffingWorkers(building)
     return workers
 end
 
+local function bestCitizenForHelpWanted(building, buildingKey, workers)
+    local workerIds = {}
+    for _, worker in ipairs(workers or {}) do
+        workerIds[tostring(worker.id or worker.name or "")] = true
+    end
+
+    local bestCitizen = nil
+    local bestFit = nil
+
+    for _, citizen in ipairs(D.citizens or {}) do
+        local citizenKey = tostring(citizen.id or citizen.name or "")
+        if citizen.age ~= "child"
+            and not workerIds[citizenKey] then
+
+            local fit =
+                VisitorJobs.bestJobForBuilding(
+                    citizen,
+                    buildingKey
+                )
+
+            if fit then
+                local better =
+                    not bestFit
+                    or fit.score > bestFit.score
+                    or (
+                        fit.score == bestFit.score
+                        and fit.primaryLevel > bestFit.primaryLevel
+                    )
+                    or (
+                        fit.score == bestFit.score
+                        and fit.primaryLevel == bestFit.primaryLevel
+                        and fit.secondaryLevel > bestFit.secondaryLevel
+                    )
+                    or (
+                        fit.score == bestFit.score
+                        and fit.primaryLevel == bestFit.primaryLevel
+                        and fit.secondaryLevel == bestFit.secondaryLevel
+                        and tostring(citizen.name or ""):lower()
+                            < tostring(
+                                bestCitizen and bestCitizen.name or ""
+                            ):lower()
+                    )
+
+                if better then
+                    bestCitizen = citizen
+                    bestFit = fit
+                end
+            end
+        end
+    end
+
+    return bestCitizen, bestFit
+end
+
 local function buildHelpWantedList()
     local rows = {}
     local totalOpen = 0
@@ -722,13 +778,24 @@ local function buildHelpWantedList()
                 local openings = math.max(0, capacity - filled)
 
                 if openings > 0 then
+                    local buildingKey =
+                        staffingBuildingKey(building)
+                    local bestCitizen, bestFit =
+                        bestCitizenForHelpWanted(
+                            building,
+                            buildingKey,
+                            workers
+                        )
+
                     rows[#rows + 1] = {
                         building = building,
-                        buildingKey = staffingBuildingKey(building),
+                        buildingKey = buildingKey,
                         capacity = capacity,
                         filled = filled,
                         openings = openings,
                         workers = workers,
+                        bestCitizen = bestCitizen,
+                        bestFit = bestFit,
                     }
                     totalOpen = totalOpen + openings
                 end
@@ -1252,7 +1319,6 @@ local function drawHeader()
     local status
     local statusBg = C.panel
     local statusFg = D.active and C.good or C.warn
-    local button = nil
 
     if D.underAttack then
         status = "!!! COLONY UNDER ATTACK !!!"
@@ -1262,16 +1328,64 @@ local function drawHeader()
         status = (D.active and "ACTIVE" or "INACTIVE")
             .. "  |  " .. pageTitle()
             .. "  |  Refresh: " .. lastRefreshLabel
-        if errorCount() > 0 then status = status .. "  |  API ERRORS: " .. errorCount() end
-        if UPDATE.availableVersion then
-            button = {
-                id = "program_update",
-                label = UPDATE.buttonLabel(),
-                bg = C.navActive, fg = C.navText,
-                action = installAvailableUpdate,
-            }
+        if errorCount() > 0 then
+            status =
+                status .. "  |  API ERRORS: " .. errorCount()
         end
     end
+
+    local updateLabel
+    local updateBg
+    if checkingUpdate then
+        updateLabel = "CHECKING..."
+        updateBg = C.nav
+    elseif UPDATE.availableVersion then
+        updateLabel =
+            UPDATE.buttonLabel()
+            or ("UPDATE v" .. tostring(UPDATE.availableVersion))
+        updateBg = C.warn
+    else
+        updateLabel = "CHECK UPDATE"
+        updateBg = C.navActive
+    end
+
+    local button = {
+        id = "program_update",
+        label = updateLabel,
+        bg = updateBg,
+        fg = C.navText,
+        action = function()
+            if checkingUpdate then return end
+
+            if UPDATE.availableVersion then
+                installAvailableUpdate()
+                return
+            end
+
+            checkingUpdate = true
+
+            -- Give immediate visible feedback in the persistent header while
+            -- the synchronous HTTP metadata request is running.
+            local w = size()
+            local bw = math.min(
+                w,
+                math.max(14, #"CHECKING..." + 2)
+            )
+            local bx = math.max(1, w - bw + 1)
+            fill(bx, 3, w, 3, C.nav, C.navText)
+            center(
+                3,
+                "CHECKING...",
+                C.navText,
+                C.nav,
+                bx,
+                w
+            )
+
+            pcall(checkForUpdate)
+            checkingUpdate = false
+        end,
+    }
 
     monitorUI.drawHeader({
         title = "MINECOLONIES COMMAND CENTER",
@@ -1402,57 +1516,10 @@ local function drawHome()
     local refreshWidth = 10
     local refreshStart = math.max(1, w - refreshWidth + 1)
 
-    local updateLabel
-    local updateBg
-    if checkingUpdate then
-        updateLabel = "CHECKING..."
-        updateBg = C.nav
-    elseif UPDATE.availableVersion then
-        updateLabel = UPDATE.buttonLabel()
-            or ("UPDATE v" .. tostring(UPDATE.availableVersion))
-        updateBg = C.warn
-    else
-        updateLabel = "CHECK NOW"
-        updateBg = C.navActive
-    end
-
-    local updateWidth = math.min(
-        math.max(12, #tostring(updateLabel) + 2),
-        math.max(12, math.floor(w / 4))
-    )
-    local updateEnd = math.max(12, refreshStart - 2)
-    local updateStart = math.max(22, updateEnd - updateWidth + 1)
-
     writeAt(
         2, h - 1,
         "Auto-refresh: " .. REFRESH_SECONDS .. "s",
         C.dim, C.panel
-    )
-
-    addButton(
-        "home_update",
-        updateStart, h - 1, updateEnd, h - 1,
-        updateLabel,
-        updateBg, C.navText,
-        function()
-            if checkingUpdate then return end
-
-            if UPDATE.availableVersion then
-                installAvailableUpdate()
-                return
-            end
-
-            checkingUpdate = true
-            -- Show immediate feedback while the HTTP metadata request runs.
-            fill(updateStart, h - 1, updateEnd, h - 1, C.nav)
-            center(
-                h - 1, "CHECKING...", C.navText, C.nav,
-                updateStart, updateEnd
-            )
-
-            pcall(checkForUpdate)
-            checkingUpdate = false
-        end
     )
 
     addButton(
@@ -1688,15 +1755,24 @@ local function drawListPage(page)
         writeAt(columns.statusX, 5, pad("STATUS", columns.statusW), colors.black, C.panel2)
 
     elseif helpTable then
-        -- Help Wanted: BUILDING | LEVEL | FILLED | OPEN
+        -- Help Wanted: BUILDING | LEVEL | FILLED | OPEN | BEST FIT
         local usable = w - 2
-        local separatorCount = 3
-        local content = math.max(24, usable - separatorCount)
+        local separatorCount = 4
+        local content = math.max(32, usable - separatorCount)
 
         local levelW = 7
-        local filledW = 9
-        local openW = 7
-        local buildingW = math.max(16, content - levelW - filledW - openW)
+        local filledW = 8
+        local openW = 5
+        local bestW = math.max(15, math.floor(content * 0.28))
+        local buildingW =
+            content - levelW - filledW - openW - bestW
+
+        while buildingW < 14 and bestW > 15 do
+            bestW = bestW - 1
+            buildingW =
+                content - levelW - filledW - openW - bestW
+        end
+        buildingW = math.max(1, buildingW)
 
         local buildingX = 2
         local sep1X = buildingX + buildingW
@@ -1705,12 +1781,15 @@ local function drawListPage(page)
         local filledX = sep2X + 1
         local sep3X = filledX + filledW
         local openX = sep3X + 1
+        local sep4X = openX + openW
+        local bestX = sep4X + 1
 
         columns = {
             buildingX = buildingX, buildingW = buildingW, sep1X = sep1X,
             levelX = levelX, levelW = levelW, sep2X = sep2X,
             filledX = filledX, filledW = filledW, sep3X = sep3X,
-            openX = openX, openW = math.max(1, w - openX + 1),
+            openX = openX, openW = openW, sep4X = sep4X,
+            bestX = bestX, bestW = math.max(1, w - bestX + 1),
         }
 
         fill(1, 5, w, 5, C.panel2)
@@ -1721,6 +1800,8 @@ local function drawListPage(page)
         writeAt(columns.filledX, 5, pad("FILLED", columns.filledW), colors.black, C.panel2)
         writeAt(columns.sep3X, 5, "|", colors.gray, C.panel2)
         writeAt(columns.openX, 5, pad("OPEN", columns.openW), colors.black, C.panel2)
+        writeAt(columns.sep4X, 5, "|", colors.gray, C.panel2)
+        writeAt(columns.bestX, 5, pad("BEST FIT", columns.bestW), colors.black, C.panel2)
 
     elseif visitorTable then
         -- Visitor evaluation: NAME | BEST FIT | OPEN FIT | RECRUIT COST
@@ -1961,6 +2042,21 @@ local function drawListPage(page)
                 local levelText = tostring(building.level or "?") .. "/" .. tostring(building.maxLevel or "?")
                 local filledText = tostring(item.filled or 0) .. "/" .. tostring(item.capacity or "?")
                 local openText = tostring(item.openings or 0)
+                local bestCitizen = item.bestCitizen
+                local bestFit = item.bestFit
+                local bestName =
+                    bestCitizen
+                    and tostring(bestCitizen.name or "Unknown")
+                    or "None"
+                local bestScore =
+                    bestFit
+                    and string.format(
+                        "%.1f",
+                        tonumber(bestFit.score) or 0
+                    )
+                    or nil
+                local bestColor =
+                    bestFit and visitorFitColor(bestFit) or C.dim
 
                 writeAt(columns.buildingX, y, pad(displayName, columns.buildingW), C.text, bg)
                 writeAt(columns.sep1X, y, "|", C.dim, bg)
@@ -1969,6 +2065,29 @@ local function drawListPage(page)
                 writeAt(columns.filledX, y, pad(filledText, columns.filledW), C.info, bg)
                 writeAt(columns.sep3X, y, "|", C.dim, bg)
                 writeAt(columns.openX, y, pad(openText, columns.openW), C.warn, bg)
+                writeAt(columns.sep4X, y, "|", C.dim, bg)
+
+                local scoreWidth =
+                    bestScore and #bestScore or 0
+                local nameWidth = math.max(
+                    1,
+                    columns.bestW - scoreWidth -
+                        (bestScore and 1 or 0)
+                )
+                writeAt(
+                    columns.bestX, y,
+                    clip(bestName, nameWidth),
+                    bestColor, bg
+                )
+                if bestScore then
+                    local scoreX =
+                        columns.bestX + columns.bestW - scoreWidth
+                    writeAt(
+                        scoreX, y,
+                        bestScore,
+                        bestColor, bg
+                    )
+                end
 
             elseif visitorTable then
                 local visitor = item.visitor or {}
@@ -2199,6 +2318,39 @@ local function detailLines(page, item)
         addDetailLine(lines, "Filled positions", item.filled or #workers, C.info)
         addDetailLine(lines, "Staffing capacity", item.capacity, C.text)
         addDetailLine(lines, "Open positions", item.openings, C.warn)
+        if item.bestCitizen and item.bestFit then
+            addDetailLine(
+                lines,
+                "Best suited",
+                tostring(item.bestCitizen.name or "Unknown") ..
+                    " (" ..
+                    string.format(
+                        "%.1f",
+                        tonumber(item.bestFit.score) or 0
+                    ) ..
+                    ")",
+                visitorFitColor(item.bestFit)
+            )
+            addDetailLine(
+                lines,
+                "Fit job",
+                tostring(item.bestFit.label or "Unknown"),
+                visitorFitColor(item.bestFit)
+            )
+            addDetailLine(
+                lines,
+                "Current job",
+                citizenJob(item.bestCitizen),
+                C.accent
+            )
+        else
+            addDetailLine(
+                lines,
+                "Best suited",
+                "No adult citizen candidate",
+                C.dim
+            )
+        end
         if staffingBuildingKey(building) == "guardtower" then
             addDetailLine(lines, "Guard Tower rule", "1 fillable guard position", C.accent)
         end
