@@ -1,5 +1,5 @@
 --[[
-MineColonies Supply Manager v3.0.22
+MineColonies Supply Manager v3.0.23
 Architectural rewrite for multi-colony serialized access to shared Player Refined Storage (PRS).
 
 Terms:
@@ -38,6 +38,15 @@ v3.0.22 matcher correction:
   * Tool-class matching now uses complete normalized tokens.
   * "Bowl" is no longer misclassified as "Bow", so minecraft:bowl remains a
     normal supply candidate and can be fulfilled from PRS stock.
+
+v3.0.23 MineColonies warehouse visibility refresh:
+  * CRS visibility is no longer assumed to mean MineColonies has refreshed its
+    warehouse/request cache.
+  * If a verified delivery remains in CRS while the request stays unchanged,
+    Supply performs a bounded exact CRS->transfer-chest->CRS touch.
+  * The touch does not involve PRS and does not increment SENT/QTY or resend
+    additional stock; it only recreates the inventory change that manual
+    remove/reinsert testing proved wakes MineColonies.
 ]]
 
 local CONFIG = require("colony.supply.config")
@@ -163,7 +172,7 @@ local function terminalLoop()
     end
 end
 
-store.log("Supply Manager v3.0.22 starting computer=" ..
+store.log("Supply Manager v3.0.23 starting computer=" ..
     tostring(os.getComputerID and os.getComputerID() or "?"))
 
 parallel.waitForAll(
