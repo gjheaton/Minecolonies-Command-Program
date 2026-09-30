@@ -1,5 +1,5 @@
 --[[
-MineColonies Supply Manager v3.0.24
+MineColonies Supply Manager v3.0.25
 Architectural rewrite for multi-colony serialized access to shared Player Refined Storage (PRS).
 
 Terms:
@@ -49,6 +49,11 @@ v3.0.23 MineColonies warehouse visibility refresh:
     remove/reinsert testing proved wakes MineColonies.
   * v3.0.24 makes the touch transaction crash-safe so a reboot between the
     reinsert and state-clear cannot leave an ambiguous pending transfer.
+
+v3.0.25 monitor update control:
+  * CHECK UPDATE is always visible in the upper-right header on every Supply tab.
+  * The same control becomes UPDATE when a newer suite is available.
+  * The old Home-only update row/button has been removed.
 ]]
 
 local CONFIG = require("colony.supply.config")
@@ -174,7 +179,7 @@ local function terminalLoop()
     end
 end
 
-store.log("Supply Manager v3.0.24 starting computer=" ..
+store.log("Supply Manager v3.0.25 starting computer=" ..
     tostring(os.getComputerID and os.getComputerID() or "?"))
 
 parallel.waitForAll(
