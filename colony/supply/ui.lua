@@ -82,14 +82,45 @@ function M.new(config, store, cluster, transfer, engine, updater)
         monitorUI.resetButtons()
         monitorUI.clear()
         local w = monitorUI.size()
+        local updateLabel
+        local updateBg
+        if self.checkingUpdate then
+            updateLabel = "CHECKING..."
+            updateBg = C.nav
+        elseif updater.availableVersion then
+            updateLabel =
+                updater.buttonLabel()
+                or ("UPDATE v" .. tostring(updater.availableVersion))
+            updateBg = C.warn
+        else
+            updateLabel = "CHECK UPDATE"
+            updateBg = C.navActive
+        end
+
         monitorUI.drawHeader({
             title="MINECOLONIES SUPPLY MANAGER",
             subtitle=(transfer.colonyName or "Unknown Colony") .. "  [SUPPLY-v" .. config.PROGRAM_VERSION .. "]",
             status=status or title, statusFg=statusFg or C.dim, statusBg=C.panel,
-            button=updater.availableVersion and {
-                id="program_update", label=updater.buttonLabel(), bg=C.navActive, fg=C.navText,
-                action=function() updater.install() end,
-            } or nil,
+            button={
+                id="program_update",
+                label=updateLabel,
+                bg=updateBg,
+                fg=C.navText,
+                action=function()
+                    if self.checkingUpdate then return end
+
+                    if updater.availableVersion then
+                        updater.install()
+                        return
+                    end
+
+                    self.checkingUpdate = true
+                    self.draw()
+                    pcall(updater.check)
+                    self.checkingUpdate = false
+                    self.draw()
+                end,
+            },
         })
         monitorUI.center(4, title, C.title, C.bg)
         local navView = (self.view == "overrides" or self.view == "override_edit")
@@ -238,73 +269,6 @@ function M.new(config, store, cluster, transfer, engine, updater)
             h.overstockEnabled and C.good or C.dim
         )
         line("Last Scan", tostring(h.lastScanText), C.dim)
-
-        if y <= mh - 2 then
-            local updateText
-            local updateColor
-            if self.checkingUpdate then
-                updateText = "CHECKING..."
-                updateColor = C.info
-            elseif updater.checkError then
-                updateText = "ERROR: " .. tostring(updater.checkError)
-                updateColor = C.danger
-            elseif updater.availableVersion then
-                updateText =
-                    "AVAILABLE v" .. tostring(updater.availableVersion)
-                updateColor = C.warn
-            elseif updater.remoteSuiteVersion then
-                updateText =
-                    "CURRENT v" .. tostring(updater.remoteSuiteVersion)
-                updateColor = C.good
-            else
-                updateText = "NOT CHECKED"
-                updateColor = C.dim
-            end
-
-            local updateButtonLabel =
-                updater.availableVersion
-                and (
-                    updater.buttonLabel()
-                    or ("UPDATE v" .. tostring(updater.availableVersion))
-                )
-                or "CHECK NOW"
-            local updateButtonBg =
-                updater.availableVersion and C.warn or C.navActive
-            local buttonWidth = math.min(
-                math.max(12, #updateButtonLabel + 2),
-                math.max(12, math.floor(w / 4))
-            )
-            local bx = math.max(32, w - buttonWidth + 1)
-
-            monitorUI.fillRow(y, C.bg)
-            monitorUI.writeAt(
-                2, y, Util.padRight("Update", 18), C.dim, C.bg
-            )
-            monitorUI.writeAt(
-                21, y,
-                Util.clip(updateText, math.max(1, bx - 22)),
-                updateColor, C.bg
-            )
-            monitorUI.addButton(
-                "home_update", bx, y, w, y, updateButtonLabel,
-                updateButtonBg, C.navText,
-                function()
-                    if self.checkingUpdate then return end
-
-                    if updater.availableVersion then
-                        updater.install()
-                        return
-                    end
-
-                    self.checkingUpdate = true
-                    self.draw()
-                    pcall(updater.check)
-                    self.checkingUpdate = false
-                    self.draw()
-                end
-            )
-            y = y + 1
-        end
 
         if y <= mh - 2 then
             monitorUI.fillRow(y, C.panel)
