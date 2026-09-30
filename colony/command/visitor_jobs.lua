@@ -274,6 +274,25 @@ function M.currentJobMatches(currentJob, recommendation)
     return current == norm(recommendation.label)
 end
 
+function M.currentJobRecommendation(person, currentJob)
+    for _, job in ipairs(JOBS) do
+        if M.currentJobMatches(currentJob, job) then
+            local score, primaryLevel, secondaryLevel = M.score(person, job)
+            return {
+                id = job.id,
+                label = job.label,
+                primary = job.primary,
+                secondary = job.secondary,
+                primaryLevel = primaryLevel,
+                secondaryLevel = secondaryLevel,
+                score = score,
+                band = M.fitBand(score),
+            }
+        end
+    end
+    return nil
+end
+
 local TRAINING_JOBS = {
     pupil = true,
     student = true,
@@ -294,6 +313,7 @@ function M.jobFitForCitizen(citizen, currentJob)
     local age = norm(citizen.age)
     local job = norm(currentJob)
     local best = M.bestJob(citizen)
+    local current = M.currentJobRecommendation(citizen, currentJob)
 
     -- Training assignments are temporary developmental positions. Still show
     -- the citizen's productive best-fit job, but do not call the training
@@ -304,6 +324,7 @@ function M.jobFitForCitizen(citizen, currentJob)
             reason = "training",
             training = true,
             best = best,
+            current = current,
             matches = nil,
         }
     end
@@ -316,6 +337,7 @@ function M.jobFitForCitizen(citizen, currentJob)
             reason = "child",
             training = false,
             best = nil,
+            current = nil,
             matches = nil,
         }
     end
@@ -323,6 +345,7 @@ function M.jobFitForCitizen(citizen, currentJob)
     return {
         applicable = best ~= nil,
         best = best,
+        current = current,
         training = false,
         matches = best and M.currentJobMatches(currentJob, best) or false,
     }
