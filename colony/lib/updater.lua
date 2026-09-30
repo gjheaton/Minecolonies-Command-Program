@@ -1,10 +1,10 @@
 -- MineColonies Control Suite - shared suite updater
--- Component version: 1.1.1
+-- Component version: 1.1.2
 local Version = require("colony.lib.version")
 local Util = require("colony.lib.util")
 
 local M = {}
-M.COMPONENT_VERSION = "1.1.1"
+M.COMPONENT_VERSION = "1.1.2"
 
 
 local function cacheBust(url)
@@ -77,6 +77,10 @@ function M.new(opts)
         availableVersion = nil,
         remoteVersion = nil,
         remoteSuiteVersion = nil,
+        configuredSuiteVersion = nil,
+        suiteUpdateAvailable = false,
+        appUpdateAvailable = false,
+        updateReason = nil,
         checkError = nil,
         lastCheckedText = nil,
     }
@@ -99,11 +103,85 @@ function M.new(opts)
         return packageMetadata(source)
     end
 
+    local function evaluateMetadata(meta)
+        if type(meta) ~= "table" then
+            return nil, "Suite metadata is unavailable"
+        end
+
+        local appMeta =
+            type(meta.apps) == "table" and meta.apps[self.appId] or nil
+        if type(appMeta) ~= "table" or appMeta.version == nil then
+            return nil,
+                "Suite metadata has no version for app '" ..
+                tostring(self.appId) .. "'"
+        end
+
+        self.remoteSuiteVersion = tostring(meta.suiteVersion)
+        self.remoteVersion = tostring(appMeta.version)
+
+        local cfg = Util.readSerializedTable(self.configPath) or {}
+        self.configuredSuiteVersion =
+            cfg.suiteVersion and tostring(cfg.suiteVersion) or nil
+
+        self.suiteUpdateAvailable =
+            Version.isNewer(
+                self.remoteSuiteVersion,
+                self.suiteVersion
+            )
+        self.appUpdateAvailable =
+            Version.isNewer(
+                self.remoteVersion,
+                self.appVersion
+            )
+
+        -- If app.cfg disagrees with the running program, do not let the
+        -- config file hide an actual update.  It is diagnostic only; the
+        -- running program's embedded versions are authoritative.
+        local reasons = {}
+        if self.appUpdateAvailable then
+            reasons[#reasons + 1] =
+                "app " .. tostring(self.appVersion) ..
+                "->" .. tostring(self.remoteVersion)
+        end
+        if self.suiteUpdateAvailable then
+            reasons[#reasons + 1] =
+                "suite " .. tostring(self.suiteVersion) ..
+                "->" .. tostring(self.remoteSuiteVersion)
+        end
+
+        if self.configuredSuiteVersion
+            and Version.compare(
+                self.configuredSuiteVersion,
+                self.suiteVersion
+            ) ~= 0 then
+            reasons[#reasons + 1] =
+                "local metadata mismatch cfg=" ..
+                tostring(self.configuredSuiteVersion) ..
+                " running=" .. tostring(self.suiteVersion)
+        end
+
+        self.updateReason =
+            #reasons > 0 and table.concat(reasons, "; ") or nil
+
+        if self.appUpdateAvailable
+            or self.suiteUpdateAvailable then
+            self.availableVersion = self.remoteVersion
+            return true
+        end
+
+        self.availableVersion = nil
+        return false
+    end
+
     function self.check()
         self.lastCheckedText = Util.timeString()
         self.availableVersion = nil
         self.remoteVersion = nil
         self.remoteSuiteVersion = nil
+        self.configuredSuiteVersion = nil
+        self.suiteUpdateAvailable = false
+        self.appUpdateAvailable = false
+        self.updateReason = nil
         self.checkError = nil
 
         local source, fetchError = self.fetchSource()
@@ -117,23 +195,26 @@ function M.new(opts)
             return false, metaError
         end
 
-        self.remoteSuiteVersion = tostring(meta.suiteVersion)
-        local appMeta = meta.apps[self.appId] or {}
-        self.remoteVersion = tostring(appMeta.version or self.appVersion)
-
-        if Version.isNewer(self.remoteSuiteVersion, self.suiteVersion) then
-            self.availableVersion = self.remoteVersion
-            return true, self.remoteVersion
+        local newer, evalError = evaluateMetadata(meta)
+        if evalError then
+            self.checkError = evalError
+            return false, evalError
         end
-        return false, self.remoteVersion
+
+        return newer, self.remoteVersion
     end
 
     function self.statusText(checking)
         if checking then return "CHECKING..." end
         if self.availableVersion then
-            local suffix = ""
-            if tostring(self.availableVersion) == tostring(self.appVersion) then suffix = " (shared files)" end
-            return "UPDATE AVAILABLE: v" .. tostring(self.availableVersion) .. suffix
+            local suffix =
+                self.appUpdateAvailable
+                and ""
+                or " (shared files)"
+            return "UPDATE AVAILABLE: v" ..
+                tostring(self.availableVersion) .. suffix ..
+                " / suite v" ..
+                tostring(self.remoteSuiteVersion or "?")
         end
         if self.checkError then return "ERROR: " .. tostring(self.checkError) end
         if self.remoteSuiteVersion then
@@ -146,7 +227,11 @@ function M.new(opts)
         local checked = self.lastCheckedText and (" @ " .. self.lastCheckedText) or ""
         if self.checkError then return "ERROR" .. checked .. " - " .. tostring(self.checkError), colors.red end
         if self.availableVersion then
-            return "UPDATE AVAILABLE v" .. tostring(self.availableVersion) .. checked, colors.yellow
+            return "UPDATE AVAILABLE app v" ..
+                tostring(self.remoteVersion or "?") ..
+                " / suite v" ..
+                tostring(self.remoteSuiteVersion or "?") ..
+                checked, colors.yellow
         end
         if self.remoteSuiteVersion then
             return "CURRENT (suite v" .. tostring(self.remoteSuiteVersion) .. ")" .. checked, colors.lime
@@ -156,8 +241,10 @@ function M.new(opts)
 
     function self.buttonLabel()
         if not self.availableVersion then return nil end
-        if tostring(self.availableVersion) == tostring(self.appVersion) then return "UPDATE SUITE" end
-        return "UPDATE v" .. tostring(self.availableVersion)
+        if self.appUpdateAvailable then
+            return "UPDATE v" .. tostring(self.remoteVersion)
+        end
+        return "UPDATE SUITE"
     end
 
     function self.buttonGeometry(w)
@@ -189,10 +276,29 @@ function M.new(opts)
         local source, fetchError = self.fetchSource()
         if not source then message("UPDATE FAILED", fetchError, colors.red); sleep(2); return false end
         local meta, metaError = self.readMetadata(source)
-        if not meta then message("UPDATE FAILED", metaError, colors.red); sleep(2); return false end
-        if not Version.isNewer(meta.suiteVersion, self.suiteVersion) then
+        if not meta then
+            message("UPDATE FAILED", metaError, colors.red)
+            sleep(2)
+            return false
+        end
+
+        local newer, evalError = evaluateMetadata(meta)
+        if evalError then
+            self.checkError = evalError
+            message("UPDATE FAILED", evalError, colors.red)
+            sleep(2)
+            return false
+        end
+
+        if not newer then
             self.availableVersion = nil
-            message("NO UPDATE", "Installed suite is already current.", colors.lime)
+            message(
+                "NO UPDATE",
+                "Installed app v" .. tostring(self.appVersion) ..
+                    " / suite v" .. tostring(self.suiteVersion) ..
+                    " is current.",
+                colors.lime
+            )
             sleep(1)
             return false
         end
