@@ -1715,8 +1715,17 @@ function M.new(config, store, cluster, matcher, transfer)
         local postRetrySeconds = math.max(1, floor(config.requestAckPostRetrySeconds or 60))
         local disappearanceGrace = math.max(
             1, floor(config.requestAckConsumptionGraceSeconds or 60))
+        local touchAfter = math.max(
+            1, floor(config.requestWarehouseTouchSeconds or 30))
+        local touchRetry = math.max(
+            5, floor(config.requestWarehouseTouchRetrySeconds or 60))
+        local touchMax = math.max(
+            0, floor(config.requestWarehouseTouchMax or 2))
+        local touchCount = math.max(
+            1, floor(config.requestWarehouseTouchCount or 1))
         local craftWaitSeconds = math.max(
             postRetrySeconds, floor(config.requestAckRetryCraftWaitSeconds or 180))
+        local ackAge = stamp - ackStartedAt
 
         if not deliveryProofComplete(ledger, requestCount(request)) then
             return recordAckStalled(
@@ -1731,12 +1740,87 @@ function M.new(config, store, cluster, matcher, transfer)
             ledger.peakCRS = math.max(floor(ledger.peakCRS), floor(currentCRS))
 
             if floor(currentCRS) > baseline then
-                -- The verified delivery is still physically visible to CRS.
-                -- This is not an acknowledgement failure and must never trigger
-                -- a duplicate resend.  Keep waiting until MineColonies consumes
-                -- it or changes/removes the request.
+                -- CRS visibility alone does not prove MineColonies refreshed
+                -- its warehouse/request cache. If the request stays unchanged,
+                -- perform a bounded exact CRS->chest->CRS touch which mirrors
+                -- the manual remove/reinsert action known to wake the colony.
                 ledger.deliveryMissingSince = nil
                 ledger.phase = "CRS_RECEIVED"
+
+                local touched = floor(ledger.warehouseTouchCount)
+                local lastAttempt =
+                    tonumber(ledger.warehouseTouchLastAttemptAt) or 0
+                local due =
+                    touchMax > 0
+                    and touched < touchMax
+                    and ackAge >= touchAfter
+                    and (
+                        lastAttempt <= 0
+                        or stamp - lastAttempt >= touchRetry
+                    )
+
+                if due then
+                    ledger.warehouseTouchLastAttemptAt = stamp
+                    store.save()
+
+                    local okTouch, touchResult =
+                        transfer.touchColonyItem(
+                            candidate,
+                            math.min(touchCount, floor(currentCRS)),
+                            {
+                                requestId = request.id,
+                                detail =
+                                    "request unchanged after verified delivery; " ..
+                                    "refresh MineColonies warehouse visibility",
+                            }
+                        )
+
+                    if okTouch then
+                        ledger.warehouseTouchCount = touched + 1
+                        ledger.warehouseTouchAt = stamp
+                        ledger.warehouseTouchLastError = nil
+                        ledger.phase = "WAREHOUSE_REFRESH"
+                        store.save()
+                        return {
+                            id=tostring(request.id),
+                            name=tostring(request.name or "Request"),
+                            requested=requestCount(request),
+                            item=tostring(ledger.item or candidate.name),
+                            status="CRS REFRESHED",
+                            detail="MineColonies request stayed unchanged while " ..
+                                "delivery remained in CRS; touched " ..
+                                tostring(touchResult) ..
+                                " exact item(s) CRS->barrel->CRS to refresh warehouse visibility",
+                            usedPRSTurn=true,
+                        }
+                    end
+
+                    ledger.warehouseTouchLastError =
+                        tostring(touchResult or "unknown touch failure")
+                    store.save()
+                    store.addError(
+                        "WAREHOUSE_REFRESH",
+                        "CRS warehouse refresh touch failed",
+                        {
+                            requestId = request.id,
+                            requestName = request.name,
+                            item = candidate.name,
+                            touchAttempt = touched + 1,
+                            detail = touchResult,
+                        },
+                        "WARNING"
+                    )
+                    return {
+                        id=tostring(request.id),
+                        name=tostring(request.name or "Request"),
+                        requested=requestCount(request),
+                        item=tostring(ledger.item or candidate.name),
+                        status="CRS RECEIVED",
+                        detail="delivery remains in CRS, but warehouse refresh touch failed: " ..
+                            tostring(touchResult),
+                        usedPRSTurn=true,
+                    }
+                end
             elseif not ledger.deliveryMissingSince then
                 -- A courier consuming the item can precede request API refresh.
                 -- Give MineColonies a separate grace window after the item first
@@ -1802,7 +1886,7 @@ function M.new(config, store, cluster, matcher, transfer)
                     " verified retry; automatic resends stopped")
         end
 
-        local age = stamp - ackStartedAt
+        local age = ackAge
         if age < waitSeconds then
             store.save()
             return {
@@ -2698,6 +2782,9 @@ function M.new(config, store, cluster, matcher, transfer)
         if status == "VERIFYING DELIVERY" or status == "VERIFYING" then
             return "WAITING"
         end
+        if status == "WAREHOUSE_REFRESH" then
+            return "CRS REFRESHED"
+        end
         return status
     end
 
@@ -3218,7 +3305,8 @@ function M.new(config, store, cluster, matcher, transfer)
 
             if row.status == "WAITING ACK"
                 or row.status == "VERIFYING DELIVERY"
-                or row.status == "CRS RECEIVED" then
+                or row.status == "CRS RECEIVED"
+                or row.status == "CRS REFRESHED" then
                 self.stats.waiting = self.stats.waiting + 1
             elseif row.status == "CRAFTING"
                 or row.status == "CRAFTING RETRY"
