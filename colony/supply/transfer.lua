@@ -1004,6 +1004,156 @@ function M.new(config, store, matcher)
         return true, confirmed
     end
 
+    -- Force a MineColonies-visible inventory change without involving PRS.
+    -- The exact item is removed from CRS into the isolated transfer chest and
+    -- immediately inserted back into CRS.  This mirrors the manual
+    -- remove/reinsert action that causes MineColonies to refresh stale
+    -- warehouse/request visibility.
+    function self.touchColonyItem(candidate, count, meta)
+        meta = meta or {}
+        count = math.max(1, floor(count or 1))
+
+        if type(store.data.pending) == "table" then
+            return false, "pending transaction exists; CRS touch refused"
+        end
+
+        local empty, emptyErr = self.chestEmpty()
+        if not empty then
+            return false,
+                "transfer chest not empty; CRS touch refused: " ..
+                tostring(emptyErr or "occupied")
+        end
+
+        local variants, stock = matcher.findStoredVariants(
+            self.colonyRS,
+            candidate,
+            function(...) return self.safeCall(...) end
+        )
+        if stock <= 0 or #variants == 0 then
+            return false, "exact CRS variant not stored for warehouse refresh"
+        end
+
+        local quantity = math.min(
+            count,
+            stock,
+            floor(config.maxTransferChunk or 64)
+        )
+        local filter, mode =
+            matcher.exportFilterForVariant(candidate, variants[1], quantity)
+        if not filter then return false, tostring(mode) end
+
+        local pending = {
+            schema = 3,
+            direction = "CRS>CRS_TOUCH",
+            stage = "exporting",
+            item = candidate.name,
+            identity = candidate.identity,
+            nbt = candidate.nbt,
+            hasNBT = candidate.hasNBT == true,
+            amount = quantity,
+            requestId = meta.requestId,
+            started = nowSeconds(),
+            filterMode = mode,
+            warehouseTouch = true,
+        }
+        setPending(pending)
+
+        local chestBefore = self.chestCount(candidate) or 0
+        local exported, exportErr =
+            sourceExport(
+                self.colonyRS,
+                filter,
+                config.colonyToChestDirection
+            )
+
+        local staged, chestAfterExport =
+            waitForChestIncrease(candidate, chestBefore, quantity)
+
+        if staged <= 0 then
+            if floor(exported) > 0 then
+                pending.stage = "export_wait"
+                pending.bridgeMoved = floor(exported)
+                pending.lastError =
+                    "CRS warehouse-refresh export acknowledged but transfer chest is not visible yet"
+                setPending(pending)
+                return false, pending.lastError
+            end
+
+            clearPending()
+            return false,
+                "CRS warehouse-refresh export moved 0: item=" ..
+                tostring(candidate.name) ..
+                " requested=" .. tostring(quantity) ..
+                " bridge=" .. tostring(exported) ..
+                " chestBefore=" .. tostring(chestBefore) ..
+                " chestAfter=" .. tostring(chestAfterExport) ..
+                (exportErr and (" error=" .. tostring(exportErr)) or "")
+        end
+
+        pending.stage = "staged"
+        pending.amount = staged
+        setPending(pending)
+
+        local importFilter = {
+            name = candidate.name,
+            count = staged,
+        }
+
+        local imported = 0
+        local lastImportErr
+        for _ = 1, math.max(
+            1, floor(config.transferImportRetries or 3)) do
+            local n, importErr =
+                destinationImport(
+                    self.colonyRS,
+                    importFilter,
+                    config.chestToColonyDirection
+                )
+            imported = imported + floor(n)
+            if importErr then lastImportErr = importErr end
+            sleep(tonumber(config.transferRetryDelay) or 0.25)
+
+            local left = self.chestCount(candidate)
+            if left ~= nil and left <= 0 then break end
+        end
+
+        local chestAfter = self.chestCount(candidate)
+        if chestAfter == nil then
+            return false,
+                "cannot verify transfer chest after CRS warehouse refresh"
+        end
+
+        local physicalReturned =
+            math.max(0, staged - floor(chestAfter))
+        if physicalReturned < staged then
+            pending.stage = "staged"
+            pending.amount = staged
+            pending.lastError =
+                "CRS warehouse-refresh reinsert incomplete: staged=" ..
+                tostring(staged) ..
+                " returned=" .. tostring(physicalReturned) ..
+                " chest=" .. tostring(chestAfter) ..
+                " bridgeImported=" .. tostring(imported) ..
+                (lastImportErr and
+                    (" error=" .. tostring(lastImportErr)) or "")
+            setPending(pending)
+            return false, pending.lastError
+        end
+
+        -- For this operation the physical chest round trip is the proof.  The
+        -- whole point of the touch is that CRS listItems may itself be stale.
+        clearPending()
+        store.addHistory("HEALTH", {
+            direction = "CRS>CHEST>CRS",
+            item = candidate.name,
+            amount = staged,
+            requestId = meta.requestId,
+            detail = tostring(
+                meta.detail or "MineColonies warehouse refresh touch"),
+        })
+        return true, staged
+    end
+
     function self.colonyToPlayer(candidate, count, meta)
         count = math.min(math.max(1, floor(count)), floor(config.maxOverstockChunk or 64))
         meta = meta or {}
@@ -1401,7 +1551,8 @@ function M.new(config, store, matcher)
                 local destinationLabel
 
                 if direction == "PRS>CRS"
-                    or direction == "CHEST>CRS" then
+                    or direction == "CHEST>CRS"
+                    or direction == "CRS>CRS_TOUCH" then
                     destination = self.colonyRS
                     destinationLabel = "CRS"
                 elseif direction == "CRS>PRS"
@@ -1603,7 +1754,9 @@ function M.new(config, store, matcher)
         local destinationDirection
         local destinationLabel
 
-        if direction == "PRS>CRS" or direction == "CHEST>CRS" then
+        if direction == "PRS>CRS"
+            or direction == "CHEST>CRS"
+            or direction == "CRS>CRS_TOUCH" then
             destination = self.colonyRS
             destinationDirection = config.chestToColonyDirection
             destinationLabel = "CRS"
