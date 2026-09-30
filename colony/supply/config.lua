@@ -1,8 +1,8 @@
 -- MineColonies Control Suite v3 - Supply Manager configuration
 local C = {}
 
-C.PROGRAM_VERSION = "3.0.22"
-C.SUITE_VERSION = "3.0.27"
+C.PROGRAM_VERSION = "3.0.23"
+C.SUITE_VERSION = "3.0.28"
 
 -- Peripheral overrides. Leave nil for auto-detection.
 C.playerBridgeName = nil
@@ -95,6 +95,16 @@ C.requestAckPostRetrySeconds = 60
 -- consumed it before getRequests() refreshed.  Require this additional quiet
 -- period before a bounded resend/stall decision.
 C.requestAckConsumptionGraceSeconds = 60
+
+-- MineColonies can occasionally leave a request open even though the exact
+-- delivery is visible through CRS.  After this grace period, perform a bounded
+-- exact CRS -> transfer chest -> CRS round trip to trigger a real warehouse
+-- inventory change, matching the manual remove/reinsert recovery behavior.
+C.requestWarehouseTouchSeconds = 30
+C.requestWarehouseTouchRetrySeconds = 60
+C.requestWarehouseTouchMax = 2
+C.requestWarehouseTouchCount = 1
+
 C.requestAckRetryCraftWaitSeconds = 180
 
 -- Craft submission safety. Once craftItem() is accepted, that request enters
