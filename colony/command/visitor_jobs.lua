@@ -180,6 +180,50 @@ local function jobMatchesBuilding(job, buildingKey)
     return false
 end
 
+function M.bestJobForBuilding(person, buildingKey)
+    local best = nil
+
+    for _, job in ipairs(JOBS) do
+        if jobMatchesBuilding(job, buildingKey) then
+            local score, primaryLevel, secondaryLevel =
+                M.score(person, job)
+            local rec = {
+                id = job.id,
+                label = job.label,
+                primary = job.primary,
+                secondary = job.secondary,
+                primaryLevel = primaryLevel,
+                secondaryLevel = secondaryLevel,
+                score = score,
+                band = M.fitBand(score),
+            }
+
+            if not best
+                or rec.score > best.score
+                or (
+                    rec.score == best.score
+                    and rec.primaryLevel > best.primaryLevel
+                )
+                or (
+                    rec.score == best.score
+                    and rec.primaryLevel == best.primaryLevel
+                    and rec.secondaryLevel > best.secondaryLevel
+                )
+                or (
+                    rec.score == best.score
+                    and rec.primaryLevel == best.primaryLevel
+                    and rec.secondaryLevel == best.secondaryLevel
+                    and tostring(rec.label):lower()
+                        < tostring(best.label):lower()
+                ) then
+                best = rec
+            end
+        end
+    end
+
+    return best
+end
+
 local function collectOpenJobs(helpWanted)
     local result = {}
 
