@@ -81,6 +81,7 @@ function M.new(opts)
         suiteUpdateAvailable = false,
         appUpdateAvailable = false,
         updateReason = nil,
+        localMetadataMismatch = false,
         checkError = nil,
         lastCheckedText = nil,
     }
@@ -149,11 +150,14 @@ function M.new(opts)
                 "->" .. tostring(self.remoteSuiteVersion)
         end
 
-        if self.configuredSuiteVersion
+        self.localMetadataMismatch =
+            self.configuredSuiteVersion ~= nil
             and Version.compare(
                 self.configuredSuiteVersion,
                 self.suiteVersion
-            ) ~= 0 then
+            ) ~= 0
+
+        if self.localMetadataMismatch then
             reasons[#reasons + 1] =
                 "local metadata mismatch cfg=" ..
                 tostring(self.configuredSuiteVersion) ..
@@ -164,7 +168,8 @@ function M.new(opts)
             #reasons > 0 and table.concat(reasons, "; ") or nil
 
         if self.appUpdateAvailable
-            or self.suiteUpdateAvailable then
+            or self.suiteUpdateAvailable
+            or self.localMetadataMismatch then
             self.availableVersion = self.remoteVersion
             return true
         end
@@ -182,6 +187,7 @@ function M.new(opts)
         self.suiteUpdateAvailable = false
         self.appUpdateAvailable = false
         self.updateReason = nil
+        self.localMetadataMismatch = false
         self.checkError = nil
 
         local source, fetchError = self.fetchSource()
@@ -243,6 +249,10 @@ function M.new(opts)
         if not self.availableVersion then return nil end
         if self.appUpdateAvailable then
             return "UPDATE v" .. tostring(self.remoteVersion)
+        end
+        if self.localMetadataMismatch
+            and not self.suiteUpdateAvailable then
+            return "REPAIR SUITE"
         end
         return "UPDATE SUITE"
     end
