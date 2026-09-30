@@ -1,5 +1,5 @@
 -- MineColonies Control Suite Installer
--- Suite package version 3.0.32
+-- Suite package version 3.0.33
 --
 -- Modular GitHub installer.
 -- The repository layout mirrors the CC:Tweaked filesystem.
@@ -9,15 +9,15 @@
 local mode, arg2, arg3 = ...
 
 local SUITE_INFO = {
-    suiteVersion = "3.0.32",
-    installerVersion = "3.0.32",
+    suiteVersion = "3.0.33",
+    installerVersion = "3.0.33",
     apps = {
         command = { version = "3.0.7", program = "/colony_command.lua", displayName = "MineColonies Command Center" },
         supply = { version = "3.0.26", program = "/colony_supply.lua", displayName = "MineColonies Supply Manager" },
     },
     components = {
         startup = "1.0.0", util = "1.1.0", ui = "1.1.0",
-        version = "1.0.0", updater = "1.1.2", installer = "3.0.32",
+        version = "1.0.0", updater = "1.1.2", installer = "3.0.33",
     },
 }
 
@@ -332,7 +332,13 @@ local function fetchRemoteInstaller(sourceUrl)
     local loader, err = load(body, "@remote_colony_installer", "t", {})
     if not loader then return nil, "remote installer syntax error: " .. tostring(err) end
     local okMeta, meta = pcall(loader, "--metadata")
-    if not okMeta or type(meta) ~= "table" or not meta.suiteVersion then return nil, "remote metadata invalid" end
+    if not okMeta
+        or type(meta) ~= "table"
+        or not meta.suiteVersion
+        or not meta.installerVersion
+        or type(meta.apps) ~= "table" then
+        return nil, "remote metadata invalid"
+    end
     return body, meta, sourceUrl
 end
 
@@ -525,9 +531,26 @@ local function maybeSelfRefresh()
         return false
     end
     local meta = metaOrErr
-    if not versionNewer(meta.suiteVersion, SUITE_INFO.suiteVersion) then return false end
+    local newerSuite =
+        versionNewer(
+            meta.suiteVersion,
+            SUITE_INFO.suiteVersion
+        )
+    local newerInstaller =
+        versionNewer(
+            meta.installerVersion,
+            SUITE_INFO.installerVersion
+        )
+    if not newerSuite and not newerInstaller then
+        return false
+    end
+
     setColor(colors.yellow)
-    print("Newer suite installer found: v" .. tostring(meta.suiteVersion))
+    print(
+        "Newer suite installer found: installer v" ..
+        tostring(meta.installerVersion) ..
+        " / suite v" .. tostring(meta.suiteVersion)
+    )
     local ok, err = writeTransactional(INSTALLER_PATH, source)
     if not ok then
         setColor(colors.red); print("Could not update installer: " .. tostring(err)); setColor(colors.white)
