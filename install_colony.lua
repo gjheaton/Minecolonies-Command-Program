@@ -13,7 +13,7 @@ local SUITE_INFO = {
     installerVersion = "3.0.33",
     apps = {
         command = { version = "3.0.7", program = "/colony_command.lua", displayName = "MineColonies Command Center" },
-        supply = { version = "3.0.28", program = "/colony_supply.lua", displayName = "MineColonies Supply Manager" },
+        supply = { version = "3.0.29", program = "/colony_supply.lua", displayName = "MineColonies Supply Manager" },
     },
     components = {
         startup = "1.0.0", util = "1.1.0", ui = "1.1.0",
