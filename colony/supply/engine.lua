@@ -2267,6 +2267,14 @@ function M.new(config, store, cluster, matcher, transfer)
         d.lastProbeDetail = tostring(probeDetail or "")
         store.save()
 
+        if not suspectOnly then
+            cluster.broadcastPRSFault(
+                "SELECTIVE",
+                candidate.name,
+                d.detail
+            )
+        end
+
         if type(existing) ~= "table" then
             store.addError(
                 suspectOnly and "PRS_ITEM_SUSPECT" or "PRS_SELECTIVE_DESYNC",
@@ -2364,6 +2372,12 @@ function M.new(config, store, cluster, matcher, transfer)
         d.lastProbe = now
         d.lastProbeDetail = tostring(probeDetail or "")
         store.save()
+
+        cluster.broadcastPRSFault(
+            "GLOBAL",
+            d.failedItem,
+            d.detail
+        )
 
         if not wasGlobal then
             store.addError(
@@ -2616,6 +2630,9 @@ function M.new(config, store, cluster, matcher, transfer)
                     return true, false
                 end
 
+                cluster.clearPRSFault(
+                    "selective PRS extraction recovered"
+                )
                 self.statusMessage =
                     "PRS extraction recovered; yielding turn"
                 return false, true
@@ -2633,6 +2650,11 @@ function M.new(config, store, cluster, matcher, transfer)
                     tostring(selected.item) .. ": " ..
                     tostring(probeDetail or "exact probe failed")
                 store.save()
+                cluster.broadcastPRSFault(
+                    "SELECTIVE",
+                    selected.item,
+                    d.detail
+                )
 
                 local resetAfter = math.max(
                     1,
@@ -2657,6 +2679,11 @@ function M.new(config, store, cluster, matcher, transfer)
                 tostring(selected.item) .. ": " ..
                 tostring(probeDetail or "unavailable")
             store.save()
+            cluster.broadcastPRSFault(
+                "SELECTIVE",
+                selected.item,
+                d.detail
+            )
             self.statusMessage =
                 "PRS DESYNC: exact-item recovery probe inconclusive"
             return true, false
@@ -2717,6 +2744,9 @@ function M.new(config, store, cluster, matcher, transfer)
                 return true, false
             end
 
+            cluster.clearPRSFault(
+                "global PRS extraction recovered"
+            )
             self.statusMessage = "PRS extraction recovered; yielding turn"
             return false, true
         end
@@ -2729,6 +2759,11 @@ function M.new(config, store, cluster, matcher, transfer)
                 "Global PRS desync still present: " ..
                 tostring(probeDetail or "probe failed")
             store.save()
+            cluster.broadcastPRSFault(
+                "GLOBAL",
+                d.failedItem,
+                d.detail
+            )
             PRSGuard.maybePulseReset(
                 "global PRS extraction desync still present"
             )
@@ -2740,6 +2775,11 @@ function M.new(config, store, cluster, matcher, transfer)
             "Global PRS desync recovery probe inconclusive: " ..
             tostring(probeDetail or "unavailable")
         store.save()
+        cluster.broadcastPRSFault(
+            "GLOBAL",
+            d.failedItem,
+            d.detail
+        )
         self.statusMessage = "PRS DESYNC: recovery probe inconclusive"
         return true, false
     end
@@ -3384,6 +3424,17 @@ function M.new(config, store, cluster, matcher, transfer)
             return false
         end
         if not clusterOK then
+            local sharedFault = clusterStatus.prsFault
+            if type(sharedFault) == "table" then
+                self.statusMessage =
+                    "PRS DESYNC: " ..
+                    tostring(sharedFault.name or ("Computer " ..
+                        tostring(sharedFault.id or "?"))) ..
+                    " reported " ..
+                    tostring(sharedFault.item or "?")
+                return true
+            end
+
             local settle = math.ceil(
                 tonumber(clusterStatus.turnSettleRemaining) or 0
             )
@@ -3565,10 +3616,12 @@ function M.new(config, store, cluster, matcher, transfer)
             and store.data.desync or {}
         local prsRuntimeOK =
             runtimeDesync.extractionHealthy ~= false
+        local sharedPrsOK =
+            type(cs.prsFault) ~= "table"
         return {
             overall = self.startupReady and cs.ok and transfer.health.playerRS and transfer.health.colonyRS
                 and transfer.health.colony and transfer.health.transferChest
-                and prsRuntimeOK,
+                and prsRuntimeOK and sharedPrsOK,
             colony = transfer.health.colony,
             playerRS = transfer.health.playerRS,
             colonyRS = transfer.health.colonyRS,
