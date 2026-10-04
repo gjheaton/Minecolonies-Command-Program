@@ -504,14 +504,14 @@ function M.new(config, store, cluster, transfer, engine, updater)
                 extractionColor,
             },
             {
-                "PRS stale items",
+                "PRS desync items",
                 staleCount == 0,
                 staleCount == 0
                     and "none"
                     or (tostring(staleCount) ..
-                        " quarantined item(s); unrelated requests continue"),
-                staleCount > 0 and "WARN" or nil,
-                staleCount > 0 and C.warn or nil,
+                        " failed exact item(s); shared PRS held until recovery"),
+                staleCount > 0 and "FAIL" or nil,
+                staleCount > 0 and C.danger or nil,
             },
             {"Pending transfer", h.pending == nil, h.pending and ("PENDING " .. tostring(h.pending.direction) .. " " .. tostring(h.pending.item)) or "none"},
         }
