@@ -2690,15 +2690,16 @@ function M.new(config, store, cluster, matcher, transfer)
         d.time = nowSeconds()
 
         if okProbe == true then
-            d.extractionHealthy = true
             d.failedItem = nil
             d.failedIdentity = nil
             local hasStale = next(d.staleItems) ~= nil
             d.suspected = hasStale
-            d.scope = hasStale and "ITEM" or "OK"
-            d.detail =
-                "Global PRS extraction recovered: " ..
-                tostring(probeDetail or "probe passed")
+            d.scope = hasStale and "SELECTIVE" or "OK"
+            d.extractionHealthy = not hasStale
+            d.detail = hasStale
+                and "Global extraction recovered, but selective stale-item evidence remains"
+                or ("Global PRS extraction recovered: " ..
+                    tostring(probeDetail or "probe passed"))
             for _, entry in pairs(d.staleItems) do
                 if type(entry) == "table" then
                     entry.retryAfter = nowSeconds()
@@ -2709,6 +2710,13 @@ function M.new(config, store, cluster, matcher, transfer)
                 direction = "PRS",
                 detail = d.detail,
             })
+
+            if hasStale then
+                self.statusMessage =
+                    "PRS DESYNC: global path recovered; selective item remains"
+                return true, false
+            end
+
             self.statusMessage = "PRS extraction recovered; yielding turn"
             return false, true
         end
