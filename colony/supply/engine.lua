@@ -2166,11 +2166,15 @@ function M.new(config, store, cluster, matcher, transfer)
         if d.scope ~= "GLOBAL" then
             local hasStale = next(d.staleItems) ~= nil
             d.suspected = hasStale
-            d.scope = hasStale and "ITEM" or "OK"
-            d.extractionHealthy = true
+            d.scope = hasStale and "SELECTIVE" or "OK"
+            d.extractionHealthy = not hasStale
             d.detail = hasStale
-                and "one or more item-specific PRS stale states remain"
+                and "selective PRS extraction desync remains on one or more items"
                 or tostring(detail or "PRS extraction healthy")
+            if not hasStale then
+                d.failedItem = nil
+                d.failedIdentity = nil
+            end
             d.time = nowSeconds()
         end
         store.save()
@@ -2214,23 +2218,35 @@ function M.new(config, store, cluster, matcher, transfer)
             )
         )
 
+        local previousFailures =
+            type(existing) == "table"
+            and floor(existing.failures)
+            or 0
+
         d.staleItems[key] = {
             item = tostring(candidate.name or "?"),
             identity = tostring(candidate.identity or candidate.name or "?"),
+            nbt = candidate.nbt,
+            hasNBT = candidate.hasNBT == true,
             reportedStock = floor(stock),
             since = type(existing) == "table"
                 and tonumber(existing.since) or now,
             lastSeen = now,
             retryAfter = now + retrySeconds,
-            state = suspectOnly and "SUSPECT" or "STALE",
+            state = suspectOnly and "SUSPECT" or "DESYNC",
             probeDetail = tostring(probeDetail or ""),
+            failures = previousFailures + 1,
+            recoveryFailures = type(existing) == "table"
+                and floor(existing.recoveryFailures) or 0,
         }
         d.suspected = true
-        d.scope = suspectOnly and "SUSPECT" or "ITEM"
-        d.extractionHealthy = suspectOnly and nil or true
+        d.scope = suspectOnly and "SUSPECT" or "SELECTIVE"
+        d.extractionHealthy = suspectOnly and nil or false
+        d.failedItem = tostring(candidate.name or "?")
+        d.failedIdentity = tostring(candidate.identity or candidate.name or "?")
         d.detail =
             (suspectOnly and "PRS source failure is not yet classifiable: "
-                or "Item-specific PRS stale state confirmed: ") ..
+                or "Selective PRS extraction desync confirmed: ") ..
             tostring(candidate.name)
         d.time = now
         d.lastProbe = now
@@ -2239,10 +2255,10 @@ function M.new(config, store, cluster, matcher, transfer)
 
         if type(existing) ~= "table" then
             store.addError(
-                suspectOnly and "PRS_ITEM_SUSPECT" or "PRS_ITEM_STALE",
+                suspectOnly and "PRS_ITEM_SUSPECT" or "PRS_SELECTIVE_DESYNC",
                 suspectOnly
                     and "PRS export failed and the generic extraction probe was inconclusive"
-                    or "PRS exact item remained visible but would not export; generic PRS extraction passed",
+                    or "Exact PRS item remained visible but would not export while another item exported successfully",
                 {
                     item = candidate.name,
                     identity = candidate.identity,
@@ -2250,7 +2266,7 @@ function M.new(config, store, cluster, matcher, transfer)
                     probe = probeDetail,
                     retrySeconds = retrySeconds,
                 },
-                "WARNING"
+                suspectOnly and "WARNING" or "ERROR"
             )
         end
     end
@@ -2425,15 +2441,16 @@ function M.new(config, store, cluster, matcher, transfer)
                 probeDetail,
                 false
             )
+            cluster.holdTurn("selective PRS desync confirmed")
             return {
                 id=tostring(request.id),
                 name=tostring(request.name or "Request"),
                 requested=requestCount(request),
                 item=candidate.name,
-                status="RS STALE",
-                detail="Exact stock stayed at " .. tostring(first) ..
-                    " after export=0, but independent PRS extraction passed; " ..
-                    "item isolated and will retry later",
+                status="PRS DESYNC",
+                detail="Selective PRS desync confirmed: exact item remained visible " ..
+                    "but would not export while a different probe item succeeded; " ..
+                    "PRS turn held for exact-item recovery",
                 usedPRSTurn=true,
             }
         end
@@ -2481,8 +2498,156 @@ function M.new(config, store, cluster, matcher, transfer)
         }
     end
 
+    local function staleCandidate(entry)
+        if type(entry) ~= "table" or not entry.item then return nil end
+        local candidate = {
+            name = tostring(entry.item),
+            nbt = entry.nbt,
+            hasNBT = entry.hasNBT == true,
+        }
+        candidate.raw = {
+            name = candidate.name,
+            nbt = candidate.nbt,
+        }
+        candidate.identity =
+            tostring(entry.identity or candidate.name)
+        candidate.nbtCanonical =
+            matcher.canonicalNBT(candidate.nbt)
+        return candidate
+    end
+
     function PRSGuard.handleGlobal()
         local d = PRSGuard.data()
+
+        if d.scope == "SELECTIVE"
+            and d.extractionHealthy == false then
+            cluster.holdTurn("selective PRS desync recovery")
+
+            local now = nowSeconds()
+            local retrySeconds = math.max(
+                5, floor(config.prsSelectiveProbeSeconds or 20))
+            local last = tonumber(d.lastSelectiveProbe or d.lastProbe) or 0
+
+            if now - last < retrySeconds then
+                self.statusMessage =
+                    "PRS DESYNC: exact-item recovery probe in " ..
+                    tostring(
+                        math.max(
+                            0,
+                            math.ceil(retrySeconds - (now - last))
+                        )
+                    ) .. "s"
+                return true, false
+            end
+
+            local selectedKey, selected
+            for key, entry in pairs(d.staleItems or {}) do
+                if type(entry) == "table"
+                    and tostring(entry.state or "") ~= "SUSPECT" then
+                    if not selected
+                        or (tonumber(entry.since) or now)
+                            < (tonumber(selected.since) or now) then
+                        selectedKey = key
+                        selected = entry
+                    end
+                end
+            end
+
+            if not selected then
+                d.suspected = false
+                d.scope = "OK"
+                d.extractionHealthy = true
+                d.failedItem = nil
+                d.failedIdentity = nil
+                d.detail = "Selective PRS desync cleared; no stale items remain"
+                d.time = now
+                store.save()
+                self.statusMessage = "PRS extraction recovered; yielding turn"
+                return false, true
+            end
+
+            d.lastSelectiveProbe = now
+            d.lastProbe = now
+            store.save()
+
+            local candidate = staleCandidate(selected)
+            local okProbe, probeDetail =
+                transfer.prsExactExtractionProbe(candidate)
+
+            d.lastProbeDetail = tostring(probeDetail or "")
+            d.time = nowSeconds()
+
+            if okProbe == true then
+                d.staleItems[selectedKey] = nil
+                local hasMore = next(d.staleItems) ~= nil
+                d.suspected = hasMore
+                d.scope = hasMore and "SELECTIVE" or "OK"
+                d.extractionHealthy = not hasMore
+                d.failedItem = hasMore and d.failedItem or nil
+                d.failedIdentity = hasMore and d.failedIdentity or nil
+                d.detail = hasMore
+                    and "One selective PRS stale item recovered; additional stale items remain"
+                    or ("Selective PRS extraction recovered: " ..
+                        tostring(probeDetail or "exact probe passed"))
+                store.save()
+                store.addHistory("HEALTH", {
+                    direction = "PRS",
+                    item = selected.item,
+                    detail = d.detail,
+                })
+
+                if hasMore then
+                    self.statusMessage =
+                        "PRS DESYNC: another stale item remains"
+                    return true, false
+                end
+
+                self.statusMessage =
+                    "PRS extraction recovered; yielding turn"
+                return false, true
+            end
+
+            if okProbe == false then
+                selected.recoveryFailures =
+                    floor(selected.recoveryFailures) + 1
+                selected.lastSeen = nowSeconds()
+                selected.retryAfter =
+                    nowSeconds() + retrySeconds
+                d.staleItems[selectedKey] = selected
+                d.detail =
+                    "Selective PRS desync still present on " ..
+                    tostring(selected.item) .. ": " ..
+                    tostring(probeDetail or "exact probe failed")
+                store.save()
+
+                local resetAfter = math.max(
+                    1,
+                    floor(
+                        config.prsSelectiveResetAfterFailures or 1
+                    )
+                )
+                if floor(selected.recoveryFailures) >= resetAfter then
+                    PRSGuard.maybePulseReset(
+                        "persistent selective PRS desync on " ..
+                        tostring(selected.item)
+                    )
+                end
+
+                self.statusMessage =
+                    "PRS DESYNC: exact-item recovery probe failed"
+                return true, false
+            end
+
+            d.detail =
+                "Selective PRS recovery probe inconclusive on " ..
+                tostring(selected.item) .. ": " ..
+                tostring(probeDetail or "unavailable")
+            store.save()
+            self.statusMessage =
+                "PRS DESYNC: exact-item recovery probe inconclusive"
+            return true, false
+        end
+
         if d.scope ~= "GLOBAL" or d.extractionHealthy ~= false then
             return false, false
         end
@@ -3377,8 +3542,7 @@ function M.new(config, store, cluster, matcher, transfer)
             type(store.data.desync) == "table"
             and store.data.desync or {}
         local prsRuntimeOK =
-            not (runtimeDesync.scope == "GLOBAL"
-                and runtimeDesync.extractionHealthy == false)
+            runtimeDesync.extractionHealthy ~= false
         return {
             overall = self.startupReady and cs.ok and transfer.health.playerRS and transfer.health.colonyRS
                 and transfer.health.colony and transfer.health.transferChest
