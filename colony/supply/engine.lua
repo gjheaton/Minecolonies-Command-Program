@@ -2550,6 +2550,11 @@ function M.new(config, store, cluster, matcher, transfer)
         if d.scope == "SELECTIVE"
             and d.extractionHealthy == false then
             cluster.holdTurn("selective PRS desync recovery")
+            cluster.broadcastPRSFault(
+                "SELECTIVE",
+                d.failedItem or "?",
+                d.detail or "selective PRS desync"
+            )
 
             local now = nowSeconds()
             local retrySeconds = math.max(
@@ -2694,6 +2699,11 @@ function M.new(config, store, cluster, matcher, transfer)
         end
 
         cluster.holdTurn("PRS desync recovery")
+        cluster.broadcastPRSFault(
+            "GLOBAL",
+            d.failedItem or "?",
+            d.detail or "global PRS desync"
+        )
         local now = nowSeconds()
         local retrySeconds = math.max(
             5, floor(config.prsGlobalProbeSeconds or 30))
