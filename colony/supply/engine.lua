@@ -2298,15 +2298,6 @@ function M.new(config, store, cluster, matcher, transfer)
             return false, "automatic PRS reset disabled"
         end
 
-        local side = tostring(config.prsResetRedstoneSide or "")
-        if side == "" then
-            return false, "PRS reset redstone side is not configured"
-        end
-        if type(redstone) ~= "table"
-            or type(redstone.setOutput) ~= "function" then
-            return false, "redstone API unavailable"
-        end
-
         local d = PRSGuard.data()
         local now = nowSeconds()
         local cooldown = math.max(
@@ -2318,41 +2309,35 @@ function M.new(config, store, cluster, matcher, transfer)
                 tostring(math.ceil(cooldown - (now - last))) .. "s"
         end
 
-        d.lastResetPulse = now
-        d.lastResetReason = tostring(reason or "confirmed PRS desync")
-        store.save()
+        local okPulse, pulseDetail =
+            transfer.pulsePRSReset(
+                tostring(reason or "confirmed PRS desync")
+            )
 
-        local pulse = math.max(
-            0.05, tonumber(config.prsResetPulseSeconds) or 0.5)
-        local ok, err = pcall(function()
-            redstone.setOutput(side, true)
-            sleep(pulse)
-            redstone.setOutput(side, false)
-        end)
-
-        if not ok then
-            pcall(redstone.setOutput, side, false)
+        if not okPulse then
             store.addError(
                 "PRS_RESET_PULSE",
                 "Automatic PRS reset pulse failed",
                 {
-                    side = side,
-                    pulseSeconds = pulse,
+                    integrator = transfer.resetIntegratorName,
+                    side = config.prsResetIntegratorSide,
+                    signalStrength = config.prsResetSignalStrength,
+                    pulseSeconds = config.prsResetPulseSeconds,
                     reason = reason,
-                    error = err,
+                    error = pulseDetail,
                 },
                 "ERROR"
             )
-            return false, tostring(err)
+            return false, tostring(pulseDetail)
         end
 
-        store.addHistory("HEALTH", {
-            direction = "REDSTONE",
-            detail = "PRS reset pulse sent on " .. side ..
-                " for " .. tostring(pulse) .. "s: " ..
-                tostring(reason or "confirmed desync"),
-        })
-        return true, "PRS reset pulse sent on " .. side
+        d.lastResetPulse = nowSeconds()
+        d.lastResetReason =
+            tostring(reason or "confirmed PRS desync")
+        d.lastResetDetail = tostring(pulseDetail or "")
+        store.save()
+
+        return true, tostring(pulseDetail)
     end
 
     function PRSGuard.markGlobal(candidate, detail, probeDetail)
@@ -2468,6 +2453,10 @@ function M.new(config, store, cluster, matcher, transfer)
                 first,
                 probeDetail,
                 false
+            )
+            PRSGuard.maybePulseReset(
+                "confirmed selective PRS desync on " ..
+                tostring(candidate.name)
             )
             cluster.holdTurn("selective PRS desync confirmed")
             return {
@@ -3637,6 +3626,9 @@ function M.new(config, store, cluster, matcher, transfer)
             colonyRS = transfer.health.colonyRS,
             warehouse = transfer.health.warehouse,
             transferChest = transfer.health.transferChest,
+            resetIntegrator = transfer.health.resetIntegrator,
+            resetIntegratorName = transfer.resetIntegratorName,
+            resetIntegratorError = transfer.resetIntegratorError,
             transferChestItemCount =
                 transfer.health.transferChestItemCount,
             transferChestStackCount =
