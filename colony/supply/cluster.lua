@@ -60,6 +60,7 @@ function M.new(config, store)
         observedTurnId = nil,
         turnEligibleAt = 0,
         lastFault = nil,
+        sharedPrsFault = nil,
     }
 
     local function setTurn(id)
@@ -189,7 +190,24 @@ function M.new(config, store)
         return active
     end
 
+    local function prunePrsFault()
+        local fault = self.sharedPrsFault
+        if type(fault) ~= "table" then
+            self.sharedPrsFault = nil
+            return
+        end
+
+        local ttl = math.max(
+            30,
+            tonumber(config.clusterPrsFaultTimeoutSeconds) or 90
+        )
+        if now() - (tonumber(fault.time) or 0) > ttl then
+            self.sharedPrsFault = nil
+        end
+    end
+
     local function recomputeMembership()
+        prunePrsFault()
         loadExpected()
         local active = activeSet()
         local ids = copySortedIds(active)
@@ -317,6 +335,23 @@ function M.new(config, store)
                 detail = tostring(msg.detail or "peer fault"),
                 time = now(),
             }
+        elseif kind == "prs_fault" then
+            self.sharedPrsFault = {
+                id = sender,
+                name = incomingName
+                    or self.memberNames[sender]
+                    or ("Computer " .. tostring(sender)),
+                scope = tostring(msg.scope or "PRS"),
+                item = tostring(msg.item or "?"),
+                detail = tostring(msg.detail or "shared PRS desync"),
+                time = now(),
+            }
+        elseif kind == "prs_clear" then
+            local current = self.sharedPrsFault
+            if type(current) == "table"
+                and tonumber(current.id) == sender then
+                self.sharedPrsFault = nil
+            end
         end
     end
 
@@ -422,6 +457,7 @@ function M.new(config, store)
                 (self.turnId == self.id)
                 and math.max(0, self.turnEligibleAt - now())
                 or 0,
+            prsFault = self.sharedPrsFault,
         }
     end
 
@@ -473,6 +509,43 @@ function M.new(config, store)
 
     function self.broadcastFault(detail)
         broadcast({ kind = "fault", version = 3, id = self.id, detail = tostring(detail or "fault") })
+    end
+
+    function self.broadcastPRSFault(scope, item, detail)
+        self.sharedPrsFault = {
+            id = self.id,
+            name = self.localName or ("Computer " .. tostring(self.id)),
+            scope = tostring(scope or "PRS"),
+            item = tostring(item or "?"),
+            detail = tostring(detail or "shared PRS desync"),
+            time = now(),
+        }
+        broadcast({
+            kind = "prs_fault",
+            version = 3,
+            id = self.id,
+            colonyName = self.localName,
+            scope = self.sharedPrsFault.scope,
+            item = self.sharedPrsFault.item,
+            detail = self.sharedPrsFault.detail,
+        })
+        return true
+    end
+
+    function self.clearPRSFault(detail)
+        local prior = self.sharedPrsFault
+        if type(prior) == "table"
+            and tonumber(prior.id) == self.id then
+            self.sharedPrsFault = nil
+        end
+        broadcast({
+            kind = "prs_clear",
+            version = 3,
+            id = self.id,
+            colonyName = self.localName,
+            detail = tostring(detail or "PRS recovered"),
+        })
+        return true
     end
 
     function self.loop()
