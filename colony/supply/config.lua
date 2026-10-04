@@ -63,11 +63,12 @@ C.destinationConfirmReads = 5
 C.destinationConfirmDelay = 0.25
 
 -- Runtime PRS desync classification.
--- A zero source export is followed by several fresh exact-stock reads.  If the
+-- A zero source export is followed by several fresh exact-stock reads. If the
 -- stock remains stable and positive, Supply extracts one DIFFERENT safe plain
--- item through the same PRS->transfer-chest path.  A successful independent
--- extraction proves an item-specific stale condition; another zero export
--- confirms a global PRS extraction fault.
+-- item through the same PRS->transfer-chest path. If that different item works,
+-- the failure is a SELECTIVE PRS desync and the exact failed item is probed
+-- separately. If the different item also fails, it is a GLOBAL extraction
+-- desync. Both states block shared PRS use until recovery is verified.
 C.prsDesyncConfirmReads = 3
 C.prsDesyncConfirmDelay = 0.15
 C.prsItemStaleRetrySeconds = 60
