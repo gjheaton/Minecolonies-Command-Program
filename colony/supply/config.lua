@@ -1,7 +1,7 @@
 -- MineColonies Control Suite v3 - Supply Manager configuration
 local C = {}
 
-C.PROGRAM_VERSION = "3.0.27"
+C.PROGRAM_VERSION = "3.0.28"
 C.SUITE_VERSION = "3.0.33"
 
 -- Peripheral overrides. Leave nil for auto-detection.
@@ -149,6 +149,9 @@ C.clusterMembershipSettleSeconds = 3
 C.clusterTurnHandoffDelaySeconds = 5
 C.clusterTurnTimeoutSeconds = 45
 C.clusterStateBroadcastSeconds = 0.75
+-- Shared PRS desync announcements expire if the reporting colony disappears
+-- without sending a recovery/clear event.
+C.clusterPrsFaultTimeoutSeconds = 90
 
 -- Request matching.
 -- Equipment/tool/weapon/armor alternatives are restricted to these namespaces.
