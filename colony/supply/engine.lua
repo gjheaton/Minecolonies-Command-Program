@@ -2143,6 +2143,20 @@ function M.new(config, store, cluster, matcher, transfer)
         d.scope = tostring(d.scope or (d.suspected and "UNKNOWN" or "OK"))
         d.staleItems = type(d.staleItems) == "table"
             and d.staleItems or {}
+
+        -- v3.0.26 called confirmed per-item failures ITEM/healthy because a
+        -- different generic extraction could still pass. Field testing proved
+        -- that Refined Storage can desync selectively by item, so migrate those
+        -- persisted entries into the blocking SELECTIVE state immediately.
+        if d.scope == "ITEM" and next(d.staleItems) ~= nil then
+            d.scope = "SELECTIVE"
+            d.suspected = true
+            d.extractionHealthy = false
+            d.detail =
+                "Migrated item-stale evidence to selective PRS desync"
+            store.save()
+        end
+
         return d
     end
 
