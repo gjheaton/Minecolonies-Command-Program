@@ -32,6 +32,9 @@ function M.new(config, store, matcher)
         transferChestName = nil,
         playerBridgeName = nil,
         colonyBridgeName = nil,
+        resetIntegrator = nil,
+        resetIntegratorName = nil,
+        resetIntegratorError = nil,
         colonyName = "Unknown Colony",
         health = {
             colony = false,
@@ -41,6 +44,7 @@ function M.new(config, store, matcher)
             transferChest = false,
             transferChestItemCount = nil,
             transferChestStackCount = nil,
+            resetIntegrator = false,
         },
     }
 
@@ -155,6 +159,49 @@ function M.new(config, store, matcher)
             or types:find("sophisticated",1,true) ~= nil
     end
 
+    local function isResetIntegrator(name)
+        return hasType(name, "redstoneIntegrator")
+            or hasType(name, "redstone_integrator")
+    end
+
+    local function resolveResetIntegrator()
+        self.resetIntegrator = nil
+        self.resetIntegratorName = nil
+        self.resetIntegratorError = nil
+
+        local preferred = config.prsResetIntegratorName
+        if preferred and peripheral.isPresent(preferred)
+            and isResetIntegrator(preferred) then
+            self.resetIntegrator = peripheral.wrap(preferred)
+            self.resetIntegratorName = preferred
+            return true
+        end
+
+        local candidates = {}
+        for _, name in ipairs(peripheral.getNames()) do
+            if isResetIntegrator(name) then
+                candidates[#candidates + 1] = name
+            end
+        end
+        table.sort(candidates)
+
+        if #candidates == 1 then
+            self.resetIntegratorName = candidates[1]
+            self.resetIntegrator =
+                peripheral.wrap(self.resetIntegratorName)
+            return self.resetIntegrator ~= nil
+        end
+
+        if #candidates == 0 then
+            self.resetIntegratorError =
+                "no Advanced Peripherals redstone integrator found"
+        else
+            self.resetIntegratorError =
+                "multiple redstone integrators found; set prsResetIntegratorName"
+        end
+        return false
+    end
+
     local function resolveChest()
         local candidates = {}
         local saved = store.data.settings and store.data.settings.transferChestName or nil
@@ -188,11 +235,13 @@ function M.new(config, store, matcher)
         local colonyOK = resolveColony()
         local bridgesOK = resolveBridges()
         local chestOK = resolveChest()
+        local resetIntegratorOK = resolveResetIntegrator()
         self.health.colony = colonyOK
         self.health.playerRS = false
         self.health.colonyRS = false
         self.health.warehouse = false
         self.health.transferChest = chestOK
+        self.health.resetIntegrator = resetIntegratorOK
         self.health.transferChestItemCount = nil
         self.health.transferChestStackCount = nil
 
@@ -244,6 +293,134 @@ function M.new(config, store, matcher)
             and self.health.playerRS
             and self.health.colonyRS
             and chestOK
+    end
+
+    function self.pulsePRSReset(reason)
+        if config.prsAutoResetEnabled ~= true then
+            return false, "automatic PRS reset disabled"
+        end
+
+        if not self.resetIntegrator
+            or not self.resetIntegratorName
+            or not peripheral.isPresent(self.resetIntegratorName) then
+            resolveResetIntegrator()
+        end
+
+        local integrator = self.resetIntegrator
+        if not integrator then
+            return false,
+                tostring(
+                    self.resetIntegratorError
+                    or "redstone integrator unavailable"
+                )
+        end
+
+        local side = tostring(config.prsResetIntegratorSide or "bottom")
+        local strength = math.max(
+            0,
+            math.min(
+                15,
+                floor(config.prsResetSignalStrength or 15)
+            )
+        )
+        local pulse =
+            math.max(0.05, tonumber(config.prsResetPulseSeconds) or 2)
+
+        local function setLevel(level)
+            if type(integrator.setAnalogOutput) == "function" then
+                local ok, _, err =
+                    self.safeCall(
+                        integrator,
+                        "setAnalogOutput",
+                        side,
+                        level
+                    )
+                if not ok then
+                    return false, err
+                end
+                return true
+            end
+
+            if type(integrator.setAnalogueOutput) == "function" then
+                local ok, _, err =
+                    self.safeCall(
+                        integrator,
+                        "setAnalogueOutput",
+                        side,
+                        level
+                    )
+                if not ok then
+                    return false, err
+                end
+                return true
+            end
+
+            if type(integrator.setOutput) == "function" then
+                local ok, _, err =
+                    self.safeCall(
+                        integrator,
+                        "setOutput",
+                        side,
+                        level > 0
+                    )
+                if not ok then
+                    return false, err
+                end
+                return true
+            end
+
+            return false,
+                "redstone integrator has no output method"
+        end
+
+        -- Always drive the configured output low first, then issue one clean
+        -- RS15 pulse and force it low again even when the sleep/pulse fails.
+        local okLow, lowErr = setLevel(0)
+        if not okLow then
+            return false,
+                "failed to clear PRS reset output before pulse: " ..
+                tostring(lowErr)
+        end
+
+        local okHigh, highErr = setLevel(strength)
+        if not okHigh then
+            pcall(setLevel, 0)
+            return false,
+                "failed to assert PRS reset output: " ..
+                tostring(highErr)
+        end
+
+        local okPulse, pulseErr =
+            pcall(sleep, pulse)
+
+        local okClear, clearErr = setLevel(0)
+        if not okPulse then
+            return false,
+                "PRS reset pulse interrupted: " ..
+                tostring(pulseErr)
+        end
+        if not okClear then
+            return false,
+                "failed to clear PRS reset output after pulse: " ..
+                tostring(clearErr)
+        end
+
+        store.addHistory("HEALTH", {
+            direction = "REDSTONE",
+            detail =
+                "PRS reset pulse RS" .. tostring(strength) ..
+                " on " .. tostring(self.resetIntegratorName) ..
+                " " .. side ..
+                " for " .. tostring(pulse) .. "s: " ..
+                tostring(reason or "confirmed PRS desync"),
+        })
+
+        return true,
+            "RS" .. tostring(strength) ..
+            " pulse sent to " ..
+            tostring(self.resetIntegratorName) ..
+            " " .. side ..
+            " for " .. tostring(pulse) .. "s"
     end
 
     function self.chestContents()
