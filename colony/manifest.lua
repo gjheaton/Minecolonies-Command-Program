@@ -19,7 +19,7 @@ return {
             program = "/colony_command.lua",
         },
         supply = {
-            version = "3.0.27",
+            version = "3.0.28",
             program = "/colony_supply.lua",
         },
     },
