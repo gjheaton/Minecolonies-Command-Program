@@ -1,5 +1,5 @@
 --[[
-MineColonies Supply Manager v3.0.28
+MineColonies Supply Manager v3.0.29
 Architectural rewrite for multi-colony serialized access to shared Player Refined Storage (PRS).
 
 Terms:
@@ -74,6 +74,14 @@ v3.0.28 cluster PRS fault visibility:
   * Peer colonies show the reporting colony and failed item without probing PRS.
   * Only the turn owner performs exact-item recovery or a future reset pulse.
   * Recovery clears the shared PRS fault across the cluster.
+
+v3.0.29 automatic PRS reset:
+  * Supply auto-discovers one Advanced Peripherals Redstone Integrator.
+  * Confirmed selective/global PRS desync immediately sends RS15 on the
+    integrator's bottom side for exactly 2 seconds, then forces it back to 0.
+  * Only the colony that actually confirmed the desync may send the pulse.
+  * A 120-second cooldown prevents repeated reset cycling.
+  * Health shows the discovered reset integrator and configured pulse.
 ]]
 
 local CONFIG = require("colony.supply.config")
@@ -199,7 +207,7 @@ local function terminalLoop()
     end
 end
 
-store.log("Supply Manager v3.0.28 starting computer=" ..
+store.log("Supply Manager v3.0.29 starting computer=" ..
     tostring(os.getComputerID and os.getComputerID() or "?"))
 
 parallel.waitForAll(
