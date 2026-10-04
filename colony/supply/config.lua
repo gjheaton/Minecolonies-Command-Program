@@ -1,7 +1,7 @@
 -- MineColonies Control Suite v3 - Supply Manager configuration
 local C = {}
 
-C.PROGRAM_VERSION = "3.0.26"
+C.PROGRAM_VERSION = "3.0.27"
 C.SUITE_VERSION = "3.0.33"
 
 -- Peripheral overrides. Leave nil for auto-detection.
@@ -72,10 +72,17 @@ C.prsDesyncConfirmReads = 3
 C.prsDesyncConfirmDelay = 0.15
 C.prsItemStaleRetrySeconds = 60
 C.prsSuspectRetrySeconds = 20
+C.prsSelectiveProbeSeconds = 20
+-- After the initial failed requested-item export, wait for this many failed
+-- exact-item recovery probes before invoking the reset hook.  1 means the
+-- reset requires two independent failures of the same exact item: the original
+-- failure plus one recovery probe failure.
+C.prsSelectiveResetAfterFailures = 1
 C.prsGlobalProbeSeconds = 30
 
--- Future automatic reset hook.  Keep disabled until runtime desync detection
--- has been observed in production and the physical PRS reset input is wired.
+-- Automatic reset hook. Keep disabled until the physical PRS reset input is
+-- wired. Both persistent selective desync and total extraction failure can
+-- invoke it once enabled.
 C.prsAutoResetEnabled = false
 C.prsResetRedstoneSide = nil
 C.prsResetPulseSeconds = 0.5
