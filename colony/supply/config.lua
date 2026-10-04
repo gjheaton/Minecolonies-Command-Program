@@ -1,7 +1,7 @@
 -- MineColonies Control Suite v3 - Supply Manager configuration
 local C = {}
 
-C.PROGRAM_VERSION = "3.0.28"
+C.PROGRAM_VERSION = "3.0.29"
 C.SUITE_VERSION = "3.0.33"
 
 -- Peripheral overrides. Leave nil for auto-detection.
@@ -10,6 +10,10 @@ C.colonyBridgeName = nil
 C.colonyIntegratorName = nil
 C.monitorName = nil
 C.transferChestName = nil
+-- Optional override when more than one Advanced Peripherals Redstone
+-- Integrator is visible on the wired modem network. Leave nil for automatic
+-- discovery when exactly one integrator is present.
+C.prsResetIntegratorName = nil
 
 -- Physical transfer layout. These directions are relative to the RS bridges.
 C.playerToChestDirection = "west"
@@ -81,12 +85,16 @@ C.prsSelectiveProbeSeconds = 20
 C.prsSelectiveResetAfterFailures = 1
 C.prsGlobalProbeSeconds = 30
 
--- Automatic reset hook. Keep disabled until the physical PRS reset input is
--- wired. Both persistent selective desync and total extraction failure can
--- invoke it once enabled.
-C.prsAutoResetEnabled = false
-C.prsResetRedstoneSide = nil
-C.prsResetPulseSeconds = 0.5
+-- Automatic PRS reset. On a CONFIRMED selective or global PRS desync, the
+-- detecting colony drives the Advanced Peripherals Redstone Integrator bottom
+-- output to RS15 for exactly two seconds, then forces it back to zero.
+-- Cluster peers only display the shared fault; they never pulse the reset.
+C.prsAutoResetEnabled = true
+C.prsResetIntegratorSide = "bottom"
+C.prsResetSignalStrength = 15
+C.prsResetPulseSeconds = 2
+-- Prevent a persistent fault from repeatedly cycling PRS while it is rebooting
+-- or while recovery probes are still settling.
 C.prsResetCooldownSeconds = 120
 
 -- MineColonies acknowledgement reconciliation.
