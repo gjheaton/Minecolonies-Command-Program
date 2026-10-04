@@ -464,6 +464,21 @@ function M.new(config, store, cluster, transfer, engine, updater)
             {"Warehouse external", h.warehouse, h.warehouse and "external storage online" or "not detected"},
             {"Transfer chest", h.transferChest, transfer.transferChestName or "?"},
             {
+                "PRS reset integrator",
+                h.resetIntegrator == true,
+                h.resetIntegrator == true
+                    and (
+                        tostring(h.resetIntegratorName or "?") ..
+                        " | bottom RS15 x 2s"
+                    )
+                    or tostring(
+                        h.resetIntegratorError
+                        or "redstone integrator not detected"
+                    ),
+                h.resetIntegrator == true and "OK" or "WARN",
+                h.resetIntegrator == true and C.good or C.warn,
+            },
+            {
                 "Transfer contents",
                 h.transferChestItemCount ~= nil,
                 h.transferChestItemCount ~= nil
