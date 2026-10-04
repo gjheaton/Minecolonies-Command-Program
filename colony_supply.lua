@@ -1,5 +1,5 @@
 --[[
-MineColonies Supply Manager v3.0.26
+MineColonies Supply Manager v3.0.27
 Architectural rewrite for multi-colony serialized access to shared Player Refined Storage (PRS).
 
 Terms:
@@ -59,6 +59,15 @@ v3.0.26 updater validation:
   * Update checks compare the running app version and suite version independently.
   * A newer Command/Supply app can no longer be hidden by an equal/stale suite value.
   * Shared-file-only suite updates remain supported as UPDATE SUITE.
+
+v3.0.27 selective PRS desync recovery:
+  * A requested item that remains visible but cannot export is now treated as
+    a real selective PRS desync even when a different generic item can export.
+  * The failing colony holds the shared PRS turn and probes the exact failed
+    item instead of allowing the other colony to continue using a broken PRS.
+  * One failed exact-item recovery probe after the original failure is enough
+    to trigger the gated redstone reset hook when automatic reset is enabled.
+  * Existing v3.0.26 PRS_ITEM_STALE state migrates directly to SELECTIVE.
 ]]
 
 local CONFIG = require("colony.supply.config")
@@ -184,7 +193,7 @@ local function terminalLoop()
     end
 end
 
-store.log("Supply Manager v3.0.26 starting computer=" ..
+store.log("Supply Manager v3.0.27 starting computer=" ..
     tostring(os.getComputerID and os.getComputerID() or "?"))
 
 parallel.waitForAll(
