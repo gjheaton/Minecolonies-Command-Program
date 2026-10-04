@@ -1372,6 +1372,99 @@ function M.new(config, store, matcher)
     -- evidence of a global PRS/AP extraction desync.  A successful probe proves
     -- the bridge/network can extract some other item, isolating the original
     -- request failure to that exact item/snapshot.
+    function self.prsExactExtractionProbe(candidate)
+        if type(candidate) ~= "table" or not candidate.name then
+            return nil, "exact probe candidate is invalid"
+        end
+        if type(store.data.pending) == "table" then
+            return nil, "exact probe unavailable while a transfer is pending"
+        end
+
+        local empty, emptyErr = self.chestEmpty()
+        if not empty then
+            return nil,
+                "exact probe unavailable because transfer chest is not empty: " ..
+                tostring(emptyErr or "occupied")
+        end
+
+        candidate.raw = type(candidate.raw) == "table"
+            and candidate.raw
+            or { name = candidate.name, nbt = candidate.nbt }
+
+        local variants, stock = matcher.findStoredVariants(
+            self.playerRS,
+            candidate,
+            function(...) return self.safeCall(...) end
+        )
+        if stock <= 0 or #variants == 0 then
+            return true,
+                "exact failed item is no longer reported in PRS",
+                candidate,
+                true
+        end
+
+        local filter, filterMode =
+            matcher.exportFilterForVariant(candidate, variants[1], 1)
+        if not filter then
+            return nil,
+                "exact probe candidate cannot be exported safely: " ..
+                tostring(filterMode)
+        end
+
+        local chestBefore = self.chestCount(candidate) or 0
+        local exported, exportErr =
+            sourceExport(
+                self.playerRS,
+                filter,
+                config.playerToChestDirection
+            )
+
+        local staged, chestAfter =
+            waitForChestIncrease(candidate, chestBefore, 1)
+
+        if staged <= 0 then
+            if floor(exported) > 0 then
+                return nil,
+                    "exact probe inconclusive: bridge reported " ..
+                    tostring(exported) .. " export of " ..
+                    tostring(candidate.name) ..
+                    " but transfer chest did not expose it"
+            end
+            return false,
+                "exact probe export moved 0 for " ..
+                tostring(candidate.name) ..
+                " while PRS still reported stock=" ..
+                tostring(stock) ..
+                " mode=" .. tostring(filterMode) ..
+                " chest=" .. tostring(chestBefore) ..
+                "->" .. tostring(chestAfter) ..
+                (exportErr and (" error=" .. tostring(exportErr)) or ""),
+                candidate
+        end
+
+        local cleanupOK, cleanupDetail =
+            self.rollbackChestToPlayer(candidate, staged)
+        if not cleanupOK then
+            return nil,
+                "exact extraction succeeded but probe cleanup needs recovery: " ..
+                tostring(cleanupDetail),
+                candidate
+        end
+
+        store.addHistory("HEALTH", {
+            direction = "PRS>CHEST>PRS",
+            item = candidate.name,
+            amount = staged,
+            detail = "exact stale-item extraction recovery probe passed",
+        })
+
+        return true,
+            "exact extraction recovered for " ..
+            tostring(candidate.name),
+            candidate,
+            true
+    end
+
     function self.prsExtractionProbe(excludeName)
         if type(store.data.pending) == "table" then
             return nil, "probe unavailable while a transfer is pending"
