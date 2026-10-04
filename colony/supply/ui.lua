@@ -451,6 +451,12 @@ function M.new(config, store, cluster, transfer, engine, updater)
             extractionFailed and C.danger
             or (extractionHealthy and C.good or C.warn)
 
+        local sharedPrsFault =
+            type(h.cluster) == "table"
+            and type(h.cluster.prsFault) == "table"
+            and h.cluster.prsFault
+            or nil
+
         local rows = {
             {"Colony integrator", h.colony, transfer.colonyName},
             {"Player RS (PRS)", h.playerRS, transfer.playerBridgeName or "?"},
@@ -466,6 +472,22 @@ function M.new(config, store, cluster, transfer, engine, updater)
                     or "unavailable"
             },
             {"Cluster link", h.cluster.ok, h.cluster.ok and table.concat(h.cluster.activeIds,",") or h.cluster.fault},
+            {
+                "Cluster PRS",
+                sharedPrsFault == nil,
+                sharedPrsFault
+                    and (
+                        tostring(sharedPrsFault.name or ("Computer " ..
+                            tostring(sharedPrsFault.id or "?"))) ..
+                        " | " ..
+                        tostring(sharedPrsFault.scope or "PRS") ..
+                        " | " ..
+                        tostring(sharedPrsFault.item or "?")
+                    )
+                    or "no shared PRS fault reported",
+                sharedPrsFault and "FAIL" or nil,
+                sharedPrsFault and C.danger or nil,
+            },
             {
                 "Startup suite",
                 h.startupReady,
