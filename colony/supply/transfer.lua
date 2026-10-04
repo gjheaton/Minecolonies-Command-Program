@@ -1445,10 +1445,15 @@ function M.new(config, store, matcher)
         local cleanupOK, cleanupDetail =
             self.rollbackChestToPlayer(candidate, staged)
         if not cleanupOK then
-            return nil,
-                "exact extraction succeeded but probe cleanup needs recovery: " ..
-                tostring(cleanupDetail),
-                candidate
+            local chestLeft = self.chestCount(candidate)
+            if chestLeft ~= 0 then
+                return nil,
+                    "exact extraction succeeded but probe cleanup needs recovery: " ..
+                    tostring(cleanupDetail),
+                    candidate
+            end
+            cleanupDetail =
+                "exact item exported and physically returned; PRS readback did not confirm immediately"
         end
 
         store.addHistory("HEALTH", {
@@ -1460,7 +1465,8 @@ function M.new(config, store, matcher)
 
         return true,
             "exact extraction recovered for " ..
-            tostring(candidate.name),
+            tostring(candidate.name) ..
+            (cleanupDetail and ("; " .. tostring(cleanupDetail)) or ""),
             candidate,
             true
     end
