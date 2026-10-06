@@ -10,8 +10,8 @@ is also available through the same installer.
 Download the **single installer** on every computer that will run a suite role:
 
 ```lua
-wget https://raw.githubusercontent.com/gjheaton/Minecolonies-Command-Program/supply-master-colony/install_colony.lua install_colony.lua
-install_colony
+wget https://raw.githubusercontent.com/gjheaton/Minecolonies-Command-Program/supply-master-colony/install_colony.lua install_colony_v4.lua
+install_colony_v4
 ```
 
 Choose **PRS Master**, **Colony Supply**, or **Command Center**. The first v4

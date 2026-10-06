@@ -49,8 +49,8 @@ item transport alone does not provide computer communications.
 On each computer:
 
 ```lua
-wget https://raw.githubusercontent.com/gjheaton/Minecolonies-Command-Program/supply-master-colony/install_colony.lua install_colony.lua
-install_colony
+wget https://raw.githubusercontent.com/gjheaton/Minecolonies-Command-Program/supply-master-colony/install_colony.lua install_colony_v4.lua
+install_colony_v4
 ```
 
 Select the role and type `CLEAN`. The installer downloads and compiles the complete
@@ -58,6 +58,10 @@ role package, checks its manifest, stages a recoverable transaction, and only th
 removes old suite data. `/colony` is suite-owned and is cleared, along with known
 legacy root state/log files and suite entry programs. Unrelated files are retained.
 An unrelated `/startup.lua` is refused rather than overwritten.
+
+The separate download filename avoids overwriting the previous installer before
+migration succeeds. The installed canonical `install_colony.lua` handles subsequent
+updates and repairs; you do not need to download or clean-install again.
 
 The installer can also select a role explicitly:
 
