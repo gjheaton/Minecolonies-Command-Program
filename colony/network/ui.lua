@@ -1,0 +1,682 @@
+-- MineColonies Control Suite - shared master / colony supply interface.
+-- Uses the suite's monitor framework, palette, navigation and update control.
+local SharedUI = require("colony.lib.ui")
+local Util = require("colony.lib.util")
+local Config = require("colony.network.config")
+local M = {}
+local C = SharedUI.theme()
+local hardwareKeys={masterId=true,playerBridgeName=true,colonyBridgeName=true,colonyIntegratorName=true,
+    deliveryChestName=true,returnChestName=true,deliveryChannel=true,returnChannel=true,
+    usePeripheralTransfer=true,colonyImportDirection=true,colonyExportDirection=true}
+
+local tabs = {
+    {id="home", label="HOME"}, {id="health", label="HEALTH"},
+    {id="requests", label="REQUESTS"}, {id="history", label="HISTORY"},
+    {id="errors", label="ERRORS"}, {id="settings", label="SETTINGS"},
+}
+
+local function copy(value)
+    if type(value) ~= "table" then return value end
+    local out = {}
+    for k, v in pairs(value) do out[k] = copy(v) end
+    return out
+end
+
+local function list(value)
+    if type(value) ~= "table" then return {} end
+    if #value > 0 then return value end
+    local out = {}
+    for key, row in pairs(value) do
+        if type(row) == "table" then
+            local entry = copy(row)
+            entry.id = entry.id or key
+            out[#out + 1] = entry
+        end
+    end
+    table.sort(out, function(a,b) return tostring(a.id) < tostring(b.id) end)
+    return out
+end
+
+local function statusColor(status)
+    status = tostring(status or ""):lower()
+    if status:find("error",1,true) or status == "missing" or status == "failed" then return C.danger end
+    if status:find("timed",1,true) or status:find("warn",1,true) or status == "blocked" then return C.warn end
+    if status == "crafting" then return C.title end
+    if status == "complete" or status == "delivered" or status == "in progress" or status == "online" then return C.good end
+    if status == "requested" or status == "verified" or status == "waiting" then return C.accent end
+    return C.text
+end
+
+local function textOf(value)
+    if type(value) == "table" then
+        return tostring(value.message or value.detail or value.reason or value.label or value.code or "")
+    end
+    return tostring(value or "")
+end
+
+local function newestFirst(value)
+    local rows=list(value)
+    local out={}
+    -- The network journal appends records; the suite shows newest events first.
+    for i=#rows,1,-1 do out[#out+1]=rows[i] end
+    return out
+end
+
+local function timeOf(value)
+    if type(value)=="number" and os.date then
+        local ok,time=pcall(os.date,"%H:%M:%S",math.floor(value))
+        if ok then return time end
+    end
+    return tostring(value or "--:--:--")
+end
+
+function M.new(config, store, engine, io, updater)
+    local self = {view="home", pages={}, edit=nil, route=nil, notice=nil, checkingUpdate=false}
+    local mon, monName, hasMonitor
+    local snapshot = {}
+    local lastTerminal = nil
+    local monitorFailure = nil
+    local draw
+
+    local function logError(code, message)
+        if store and type(store.error) == "function" then pcall(store.error, code, tostring(message))
+        elseif store and type(store.log) == "function" then pcall(store.log, code .. ": " .. tostring(message)) end
+    end
+
+    local function resolveMonitor()
+        local candidate, name
+        if io and type(io.monitor) == "function" then
+            local ok, result, n = pcall(io.monitor)
+            if ok then candidate, name = result, n end
+        end
+        if candidate then
+            local ok,w,h=pcall(candidate.getSize)
+            if not ok or type(w)~="number" or type(h)~="number" or w<1 or h<1 then
+                local reason="Monitor unavailable: "..tostring(w)
+                if monitorFailure~=reason then logError("MONITOR",reason); monitorFailure=reason end
+                self.notice="Monitor unavailable; controls moved to the computer terminal."
+                candidate,name=nil,nil
+            else monitorFailure=nil end
+        end
+        hasMonitor = candidate ~= nil
+        mon, monName = candidate or term.current(), name
+        if candidate and candidate.setTextScale then pcall(candidate.setTextScale, config.monitorTextScale or 0.5) end
+        return mon
+    end
+
+    local screen = SharedUI.newMonitor({
+        getMonitor=function() return mon or resolveMonitor() end,
+        onFailure=function(err) logError("MONITOR", err); mon=nil end,
+    })
+
+    local function data()
+        if store and type(store.data) == "table" then return store.data end
+        return {}
+    end
+
+    local function snap()
+        local ok, result = pcall(engine.snapshot)
+        if ok and type(result) == "table" then snapshot = result
+        else snapshot = {health={overall=false, error="Status unavailable: " .. tostring(result)}} end
+        return snapshot
+    end
+
+    local function role()
+        return tostring(config.role or snapshot.role or "colony"):lower()
+    end
+
+    local function fields()
+        if type(Config.fields) == "function" then return Config.fields(role()) or {} end
+        return {}
+    end
+
+    local function effective(key)
+        local policy=snapshot.effectivePolicy or (type(snapshot.turn)=="table" and snapshot.turn.policy)
+        if role()~="master" and type(policy)=="table" and policy[key]~=nil then return policy[key],true end
+        return config[key],false
+    end
+
+    local function errors()
+        return newestFirst(snapshot.errors or data().errors)
+    end
+
+    local function isBusy()
+        if type(engine.busy)=="function" then
+            local ok,busy=pcall(engine.busy)
+            if ok and busy then return true end
+        end
+        return snapshot.busy == true or (type(snapshot.session) == "table" and snapshot.session.busy == true)
+    end
+
+    local function setValue(key, value)
+        if hardwareKeys[key] and config[key]~=value then
+            if type(engine.canEditHardware)=="function" then
+                local allowed,result,reason=pcall(engine.canEditHardware,key,value)
+                if not allowed or result==false then return false,tostring(reason or result) end
+            else
+                if isBusy() then return false,"Finish the current turn before changing transfer hardware." end
+                for _,request in ipairs(list(snapshot.requests or snapshot.requestRows)) do
+                    local staged=request.staged or math.max(0,(request.shipped or request.verified or request.sent or 0)-(request.imported or 0))
+                    if staged>0 then return false,"Import staged deliveries before changing transfer hardware." end
+                end
+                if #list(snapshot.crafts)>0 then return false,"Finish pending crafts before changing PRS hardware." end
+            end
+        end
+        local old = copy(config[key])
+        local ok, accepted, err = pcall(Config.set, config, key, value)
+        if not ok or accepted == false then return false, tostring(err or accepted) end
+        local saved, result, reason = pcall(Config.save, config)
+        if not saved or result == false then
+            config[key] = old
+            return false, tostring(reason or result)
+        end
+        self.notice = "Saved. Hardware / network changes require restart."
+        return true
+    end
+
+    local function saveRoute(route)
+        if isBusy() then return false, "Wait until the current turn has finished before editing routes." end
+        if type(engine.canEditRoute)=="function" then
+            local ok,allowed,reason=pcall(engine.canEditRoute,route.id)
+            if not ok or allowed==false then return false,tostring(reason or allowed) end
+        else
+            for _,request in ipairs(list(snapshot.requests or snapshot.requestRows)) do
+                if tonumber(request.colonyId)==tonumber(route.id)
+                    and (request.shipped or request.verified or request.sent or 0)>(request.imported or 0) then
+                    return false,"This colony still has staged deliveries; import them before editing its route."
+                end
+            end
+        end
+        local routes = copy(config.colonies or {})
+        local found = false
+        for i, row in ipairs(routes) do
+            if tonumber(row.id) == tonumber(route.id) then routes[i] = copy(route); found=true; break end
+        end
+        if not found then routes[#routes + 1] = copy(route) end
+        return setValue("colonies", routes)
+    end
+
+    local function editField(field, value, onSave)
+        self.edit = {field=field, value=value == nil and "" or tostring(value), onSave=onSave, error=nil}
+        self.edit.replace = true
+        lastTerminal = nil
+        draw()
+    end
+
+    local function saveEdit()
+        local edit = self.edit
+        if not edit then return end
+        local value = Util.trim(edit.value)
+        local field = edit.field
+        if field.type == "number" or field.type == "integer" then
+            value = tonumber(value)
+            if not value or value ~= value or value == math.huge or value == -math.huge then
+                edit.error = "Enter a finite number."; return
+            end
+            if (field.type == "integer" or field.integer) and value % 1 ~= 0 then edit.error="Enter a whole number."; return end
+            if field.min and value < field.min then edit.error="Minimum: " .. tostring(field.min); return end
+            if field.max and value > field.max then edit.error="Maximum: " .. tostring(field.max); return end
+        elseif field.type == "boolean" then
+            if value == "true" or value == "on" then value = true
+            elseif value == "false" or value == "off" then value = false
+            else edit.error="Enter true or false."; return end
+        end
+        local ok, accepted, err = pcall(edit.onSave, value)
+        if not ok or accepted == false then edit.error=tostring(err or accepted); return end
+        self.edit = nil
+        lastTerminal = nil
+    end
+
+    local function pageRows(rows, name, count)
+        count = math.max(1, count)
+        local pages = math.max(1, math.ceil(#rows / count))
+        local page = Util.clamp(self.pages[name] or 1, 1, pages)
+        self.pages[name] = page
+        local out = {}
+        for i=(page-1)*count+1, math.min(#rows,page*count) do out[#out+1] = rows[i] end
+        return out, page, pages
+    end
+
+    local function footer(name, page, pages, middleLabel, middleAction)
+        local w,h = screen.size()
+        if not w or h < 8 then return end
+        local left, right = math.floor(w/3), math.floor(w*2/3)
+        screen.addButton(name.."_prev",1,h-1,left,h-1,"PREV",C.nav,C.text,function()
+            self.pages[name]=math.max(1,page-1); draw()
+        end)
+        screen.addButton(name.."_middle",left+1,h-1,right,h-1,middleLabel or "REFRESH",C.navActive,C.text,function()
+            if middleAction then middleAction() end
+            draw()
+        end)
+        screen.addButton(name.."_next",right+1,h-1,w,h-1,"NEXT",C.nav,C.text,function()
+            self.pages[name]=math.min(pages,page+1); draw()
+        end)
+    end
+
+    local function update()
+        if not updater or self.checkingUpdate or updater.checking or updater.installing then return end
+        if isBusy() then self.notice="Update waits until the active turn is safely closed."; draw(); return end
+        local method = updater.availableVersion and updater.install or updater.check
+        if type(method) ~= "function" then return end
+        self.checkingUpdate = true
+        draw()
+        local ok, result, reason = pcall(method)
+        self.checkingUpdate = false
+        if not ok or result == false then
+            self.notice = "Update: " .. tostring(reason or result)
+            logError("UPDATE", self.notice)
+        end
+        draw()
+    end
+
+    local function frame(title, status, color)
+        screen.clear()
+        screen.resetButtons()
+        local label = "CHECK UPDATE"
+        if updater and updater.installing then label="UPDATING..."
+        elseif self.checkingUpdate or (updater and updater.checking) then label="CHECKING..."
+        elseif updater and updater.availableVersion then
+            label = (type(updater.buttonLabel)=="function" and updater.buttonLabel()) or ("UPDATE v"..tostring(updater.availableVersion))
+        elseif updater and updater.checkError then label="RETRY UPDATE"
+        end
+        local titleName = role()=="master" and "MINECOLONIES SUPPLY MASTER" or "MINECOLONIES SUPPLY CLIENT"
+        local subtitle = tostring(snapshot.colonyName or config.label or config.colonyName or (role()=="master" and "PLAYER REFINED STORAGE" or "Colony"))
+            .. "  [v" .. tostring(config.PROGRAM_VERSION or config.programVersion or "4.0.0") .. "]"
+        screen.drawHeader({title=titleName,subtitle=subtitle,status=status or "",statusFg=color or C.dim,
+            pageTitle=title,button={id="program_update",label=label,bg=updater and (updater.availableVersion or updater.checkError) and C.warn or C.navActive,action=update}})
+        local active = (self.view=="routes" or self.view=="route" or self.view=="overrides") and "settings" or self.view
+        screen.drawNav(active,tabs,nil,function(id) self.view=id; self.notice=nil; draw() end)
+    end
+
+    local function row(y, text, color, action)
+        local w,h = screen.size()
+        if not w or y < 5 or y > h-2 then return end
+        local bg = y%2==0 and C.panel or C.bg
+        screen.fillRow(y,bg)
+        screen.writeAt(2,y,Util.clip(text,w-2),color or C.text,bg)
+        if action then screen.addTouchArea("row_"..y,1,y,w,y,action) end
+    end
+
+    local function healthRows()
+        local h = snapshot.health
+        if type(h) ~= "table" then h={overall=h~=false} end
+        local rows = {}
+        local checks = h.checks or h.startupChecks or snapshot.checks or (#h>0 and h) or {}
+        for key,check in pairs(checks) do
+            if type(check) == "table" then
+                local ok = check.ok == true
+                local warning = tostring(check.severity or ""):lower()=="warning" or check.waiting==true
+                rows[#rows+1] = {label=check.label or tostring(key),detail=textOf(check),ok=ok,
+                    severity=ok and "OK" or (warning and "WARNING" or "ERROR")}
+            elseif type(check) == "boolean" then
+                rows[#rows+1] = {label=tostring(key),detail="",ok=check,severity=check and "OK" or "ERROR"}
+            end
+        end
+        table.sort(rows,function(a,b) return a.label < b.label end)
+        for _,message in ipairs(list(h.warnings or snapshot.warnings)) do
+            rows[#rows+1]={label="Warning",detail=textOf(message),ok=false,severity="WARNING"}
+        end
+        for _,key in ipairs({"error","fault","reason"}) do
+            local message = h[key] or snapshot[key]
+            if message and tostring(message)~="" then rows[#rows+1]={label="Supply",detail=textOf(message),ok=false,severity="ERROR"} end
+        end
+        if h.ok==false and h.detail then rows[#rows+1]={label="Supply",detail=textOf(h.detail),ok=false,severity="ERROR"} end
+        if #rows==0 then
+            local ok=h.overall~=false and h.ok~=false
+            rows[1]={label="Supply",detail=h.detail or (ok and "Ready" or "Check configuration and peripheral connections."),ok=ok,severity=ok and "OK" or "ERROR"}
+        end
+        return rows
+    end
+
+    local function drawHome()
+        local healthy=true
+        for _,check in ipairs(healthRows()) do if not check.ok then healthy=false; break end end
+        frame("SUPPLY STATUS",snapshot.statusMessage or (healthy and "ONLINE" or "DEGRADED"),healthy and C.good or C.warn)
+        local requests = list(snapshot.requests or snapshot.requestRows)
+        local counts = {}
+        for _,r in ipairs(requests) do local s=tostring(r.status or "requested"):lower(); counts[s]=(counts[s] or 0)+1 end
+        local turn = snapshot.turn or snapshot.session
+        local turnName = type(turn)=="table" and (turn.label or turn.colonyId or turn.id or turn.phase) or turn
+        row(5,"Role: "..role():upper().."   Computer: "..tostring(os.getComputerID()),C.dim)
+        row(6,"Current turn: "..tostring(turnName or "Waiting").."   "..tostring(snapshot.phase or ""),C.accent)
+        local autoCraft,inherited=effective("autoCraftEnabled")
+        row(7,"Active requests: "..#requests.."   Auto craft: "..(autoCraft and "ON" or "OFF")..(inherited and " (MASTER)" or ""))
+        row(8,"Requested: "..(counts.requested or 0).."   In progress: "..(counts["in progress"] or 0).."   Crafting: "..(counts.crafting or 0))
+        row(9,"Missing: "..(counts.missing or 0).."   Timed out: "..(counts["timed out"] or 0).."   Errors: "..(counts.error or 0),
+            (counts.error or counts.missing or counts["timed out"]) and C.warn or C.good)
+        row(10,"VERIFIED = chest checked; COMPLETE = MineColonies request gone.",C.dim)
+        if self.notice then row(11,self.notice,C.warn)
+        elseif role()=="master" and config.automationEnabled==false then row(11,"AUTOMATION PAUSED - existing deliveries can drain; no new supply is sent.",C.warn)
+        elseif updater and updater.checkError then row(11,"Update check failed: "..tostring(updater.checkError),C.warn) end
+        if role()=="master" then
+            row(12,"COLONIES  (routes in SETTINGS)",C.title,function() self.view="routes"; draw() end)
+            local y=13
+            for _,colony in ipairs(list(snapshot.colonies or config.colonies)) do
+                row(y,tostring(colony.label or colony.name or "Colony").." ["..tostring(colony.id or colony.colonyId or "?").."] "
+                    .. tostring(colony.status or colony.phase or colony.state or (colony.online==false and "OFFLINE" or "")),
+                    colony.online==false and C.warn or C.text)
+                y=y+1
+            end
+        else
+            row(12,"Master computer: "..tostring(config.masterId or "Not configured"),C.dim)
+            row(13,"Delivery channel: "..tostring(config.deliveryChannel or "-"),C.accent)
+            row(14,"Returns channel: "..tostring(config.returnChannel or "-"),C.accent)
+        end
+    end
+
+    local function drawHealth()
+        local w,h=screen.size()
+        local rows,page,pages=pageRows(healthRows(),"health",h-7)
+        frame("SYSTEM HEALTH  "..page.."/"..pages,"Required peripherals / protocol / transfer safety",C.dim)
+        for i,check in ipairs(rows) do
+            row(4+i,Util.padRight(check.label,math.min(22,math.floor(w/3))).." "..check.severity.."  "..check.detail,
+                check.ok and C.good or (check.severity=="WARNING" and C.warn or C.danger))
+        end
+        if self.notice then row(h-2,self.notice,C.warn) end
+        local reconcile=type(engine.requestReconcile)=="function" and function()
+            local ok,result,err=pcall(engine.requestReconcile)
+            self.notice=(ok and result~=false) and "Reconciliation queued; uncertain transfers remain reserved." or tostring(err or result)
+        end or nil
+        footer("health",page,pages,reconcile and "RECONCILE" or nil,reconcile)
+    end
+
+    local function drawRequests()
+        local w,h=screen.size()
+        local requests=list(snapshot.requests or snapshot.requestRows)
+        local rows,page,pages=pageRows(requests,"requests",h-9)
+        frame("ACTIVE REQUESTS  "..page.."/"..pages,"VERIFIED is staged; completion requires MineColonies acknowledgement.",C.dim)
+        local wide=w>=70
+        local itemWidth=math.max(8,w-(wide and 49 or 27))
+        local quantityWidth=wide and 22 or 11
+        row(5,Util.padRight("ITEM",itemWidth).." "..Util.padRight(wide and "REQ / VERIFIED / IMPORT" or "VERIFY/REQ",quantityWidth).." STATUS",C.dim)
+        for i,r in ipairs(rows) do
+            local shipped=r.shipped or r.verified or r.sent or ((r.staged or 0)+(r.imported or 0))
+            local quantity=wide and (tostring(r.requested or r.count or 0).." / "..tostring(shipped).." / "..tostring(r.imported or 0))
+                or (tostring(shipped).."/"..tostring(r.requested or r.count or 0))
+            local item=tostring(r.displayName or r.item or r.name or r.id or "Unknown")
+            row(5+i,Util.padRight(item,itemWidth).." "..Util.padRight(quantity,quantityWidth).." "..tostring(r.status or "requested"):upper(),statusColor(r.status),function()
+                self.notice=item..": "..tostring(r.detail or r.message or "").."; imported "..tostring(r.imported or 0)
+                draw()
+            end)
+        end
+        if #requests==0 then row(7,"No active MineColonies requests.",C.good) end
+        row(h-2,self.notice or "Requests persist until removed by MineColonies; quantities prevent duplicate supply.",C.dim)
+        footer("requests",page,pages)
+    end
+
+    local function drawHistory()
+        local _,h=screen.size()
+        local rows,page,pages=pageRows(newestFirst(snapshot.history or data().history),"history",h-7)
+        frame("TRANSFER / EVENT HISTORY  "..page.."/"..pages,"VERIFIED shipments and acknowledged completions are separate events.",C.dim)
+        for i,e in ipairs(rows) do
+            local kind=tostring(e.kind or e.event or e.status or "")
+            local color=kind:lower():find("craft",1,true) and C.title or statusColor(kind)
+            if tostring(e.direction or ""):find("RETURN",1,true) then color=C.accent end
+            local context=type(e.context)=="table" and e.context or {}
+            local amount=e.amount or context.amount or context.count
+            row(4+i,timeOf(e.time or e.at).." "..kind.." "..tostring(e.item or context.item or "")
+                ..(amount and (" x"..tostring(amount)) or "").." "..textOf(e.detail or e.message),color)
+        end
+        footer("history",page,pages)
+    end
+
+    local function drawErrors()
+        local w,h=screen.size()
+        local records=errors()
+        local page=Util.clamp(self.pages.errors or 1,1,math.max(1,#records)); self.pages.errors=page
+        frame("ERROR / DEBUG DETAILS  "..page.."/"..math.max(1,#records),#records.." recorded; unresolved safety faults remain blocking.",#records>0 and C.warn or C.good)
+        if #records==0 then row(6,"No recorded errors.",C.good)
+        else
+            local e=records[page]
+            row(5,timeOf(e.time or e.at).." ["..tostring(e.severity or "ERROR").."] "..tostring(e.code or ""),
+                tostring(e.severity or ""):upper()=="WARNING" and C.warn or C.danger)
+            local text=textOf(e).."\n"..textOf(e.context)
+            if type(e.context)=="table" then
+                for _,key in ipairs({"item","colonyId","requestId","reason","expected","observed"}) do
+                    if e.context[key]~=nil then text=text.."\n"..key..": "..tostring(e.context[key]) end
+                end
+            end
+            for i,line in ipairs(Util.wrapText(text,math.max(1,w-4))) do row(5+i,line,C.text) end
+        end
+        footer("errors",page,math.max(1,#records))
+    end
+
+    local function drawSettings()
+        local _,h=screen.size()
+        local schemas=fields()
+        local rows,page,pages=pageRows(schemas,"settings",h-9)
+        frame("SETTINGS  "..page.."/"..pages,"Touch a setting; type its value on the computer keyboard.",C.dim)
+        for i,field in ipairs(rows) do
+            local value=config[field.key]
+            local current,inherited=effective(field.key)
+            local label=tostring(field.label or field.key)..": "..(current==nil and "AUTO / unset" or tostring(current))
+                ..(inherited and (" [MASTER; local "..tostring(value).."]") or "")
+            local function saveSetting(v)
+                local ok,err=setValue(field.key,v)
+                if ok and inherited then self.notice="Local default saved. Effective policy is set on the master / colony route." end
+                return ok,err
+            end
+            row(4+i,label,field.type=="boolean" and (current and C.good or C.warn) or C.text,function()
+                if field.type=="boolean" then
+                    local ok,err=saveSetting(not value)
+                    if not ok then self.notice=err end
+                    draw()
+                else
+                    local schema=copy(field)
+                    if inherited then
+                        schema.label=schema.label.." (local default)"
+                        schema.description="Effective master policy: "..tostring(current)..". To change active behavior, edit this colony's route override on the master."
+                    end
+                    editField(schema,value,saveSetting)
+                end
+            end)
+        end
+        row(h-3,self.notice or "Changes are saved. Leave optional peripheral names empty for discovery.",C.dim)
+        if role()=="master" then row(h-2,"COLONY ROUTES / OVERRIDES  >",C.accent,function() self.view="routes"; draw() end) end
+        footer("settings",page,pages)
+    end
+
+    local routeFields={
+        {key="id",label="Computer ID",type="integer",min=0},
+        {key="label",label="Colony name",type="string"},
+        {key="deliveryChest",label="Master delivery chest peripheral",type="string"},
+        {key="returnChest",label="Master return chest peripheral",type="string"},
+        {key="deliveryChannel",label="Delivery Ender color code",type="string"},
+        {key="returnChannel",label="Return Ender color code",type="string"},
+        {key="outputDirection",label="PRS export direction",type="string"},
+        {key="returnDirection",label="PRS import direction",type="string"},
+    }
+
+    local function drawRoutes()
+        local _,h=screen.size()
+        local rows,page,pages=pageRows(list(config.colonies),"routes",h-9)
+        frame("COLONY ROUTES  "..page.."/"..pages,"Each colony needs two exclusive, physically matching Ender color channels.",C.dim)
+        for i,r in ipairs(rows) do
+            row(4+i,"["..tostring(r.id).."] "..tostring(r.label).."  "..tostring(r.deliveryChannel).." / "..tostring(r.returnChannel),C.text,function()
+                self.route=copy(r); self.routeId=r.id; self.view="route"; draw()
+            end)
+        end
+        row(h-3,self.notice or "Route edits take effect after restart; existing delivery records are preserved.",C.dim)
+        row(h-2,"ADD COLONY ROUTE  >",C.accent,function()
+            self.route={label="",deliveryChest="",returnChest="",deliveryChannel="",returnChannel="",outputDirection="west",returnDirection="west",overrides={}}
+            self.routeId=nil
+            self.view="route"; draw()
+        end)
+        footer("routes",page,pages,"BACK",function() self.view="settings" end)
+    end
+
+    local function drawRoute()
+        local _,h=screen.size()
+        local rows,page,pages=pageRows(routeFields,"route",h-10)
+        frame("EDIT COLONY ROUTE  "..page.."/"..pages,"Editing draft. SAVE validates unique computer IDs and channels.",C.dim)
+        for i,f in ipairs(rows) do
+            row(4+i,f.label..": "..tostring(self.route[f.key] or ""),C.text,function()
+                editField(f,self.route[f.key],function(value)
+                    if f.key=="id" and self.routeId and value~=self.routeId then return false,"An existing route's ID is fixed; add a route for a different computer." end
+                    self.route[f.key]=value; return true
+                end)
+            end)
+        end
+        row(h-4,self.notice or "Map the color labels to your actual Ender Chests; colors cannot be discovered.",C.dim)
+        row(h-3,"PER COLONY POLICY OVERRIDES  >",C.accent,function() self.view="overrides"; draw() end)
+        row(h-2,"SAVE ROUTE  >",C.good,function()
+            local ok,err=saveRoute(self.route)
+            if ok then self.view="routes"; self.route=nil else self.notice=err end
+            draw()
+        end)
+        footer("route",page,pages,"CANCEL",function() self.route=nil; self.view="routes" end)
+    end
+
+    local function drawOverrides()
+        local _,h=screen.size()
+        local schemas,seen={},{}
+        local allFields={}
+        for _,r in ipairs({"master","supply"}) do
+            for _,f in ipairs(Config.fields(r) or {}) do allFields[#allFields+1]=f end
+        end
+        for _,f in ipairs(allFields) do
+            local policyKey=type(Config.isPolicyKey)=="function" and Config.isPolicyKey(f.key)
+                or (type(Config.isPolicyKey)~="function" and f.key~="masterId" and (f.type=="number" or f.type=="integer" or f.type=="boolean"))
+            if not seen[f.key] and policyKey then
+                schemas[#schemas+1]=f; seen[f.key]=true
+            end
+        end
+        local rows,page,pages=pageRows(schemas,"overrides",h-9)
+        frame("COLONY OVERRIDES  "..page.."/"..pages,"Draft values override master policy. Empty value restores the master default.",C.dim)
+        self.route.overrides=self.route.overrides or {}
+        for i,f in ipairs(rows) do
+            local value=self.route.overrides[f.key]
+            row(4+i,f.label..": "..(value==nil and ("MASTER ("..tostring(config[f.key])..")") or tostring(value)),C.text,function()
+                local editSchema=copy(f); editSchema.type="string"
+                editField(editSchema,value,function(v)
+                    if v=="" then self.route.overrides[f.key]=nil; return true end
+                    if f.type=="number" or f.type=="integer" then
+                        local n=tonumber(v)
+                        if not n or n~=n or n==math.huge or n==-math.huge then return false,"Enter a finite number, or leave empty." end
+                        if (f.type=="integer" or f.integer) and n%1~=0 then return false,"Enter a whole number." end
+                        if f.min and n<f.min then return false,"Minimum: "..f.min end
+                        if f.max and n>f.max then return false,"Maximum: "..f.max end
+                        v=n
+                    elseif f.type=="boolean" then
+                        if v=="true" or v=="on" then v=true elseif v=="false" or v=="off" then v=false else return false,"Enter true, false, or leave empty." end
+                    end
+                    self.route.overrides[f.key]=v; return true
+                end)
+            end)
+        end
+        if #schemas==0 then row(6,"Policy overrides are available with: colony_master.lua route",C.dim) end
+        row(h-2,"Save changes using SAVE ROUTE on the previous screen.",C.dim)
+        footer("overrides",page,pages,"BACK",function() self.view="route" end)
+    end
+
+    local function drawEdit()
+        local w,h=screen.size()
+        screen.clear(); screen.resetButtons()
+        screen.drawHeader({title="EDIT SETTING",subtitle=self.edit.field.label or self.edit.field.key,
+            status="Computer keyboard: Enter saves, Escape cancels.",pageTitle=""})
+        local text=self.edit.value.."_"
+        if #text>w-4 then text=text:sub(-(w-4)) end
+        screen.fill(2,5,w-1,5,C.panel)
+        screen.writeAt(3,5,text,C.text,C.panel)
+        local field=self.edit.field
+        local detail=field.description or ((field.min and ("Min "..field.min.."  ") or "")..(field.max and ("Max "..field.max) or ""))
+        for i,line in ipairs(Util.wrapText(detail,math.max(1,w-4))) do if 6+i<h-2 then screen.writeAt(3,6+i,line,C.dim) end end
+        if self.edit.error then screen.writeAt(2,h-3,self.edit.error,C.danger) end
+        screen.addButton("edit_save",1,h-1,math.floor(w/2),h,"SAVE",C.navActive,C.text,function() saveEdit(); draw() end)
+        screen.addButton("edit_cancel",math.floor(w/2)+1,h-1,w,h,"CANCEL",C.nav,C.text,function() self.edit=nil; lastTerminal=nil; draw() end)
+    end
+
+    draw=function()
+        resolveMonitor()
+        snap()
+        local w,h=screen.size()
+        if not w or not h then return end
+        if w<24 or h<10 then
+            screen.clear(); screen.resetButtons()
+            screen.writeAt(1,1,"SUPPLY "..role():upper(),C.title)
+            screen.writeAt(1,2,"Monitor too small.",C.warn)
+            screen.writeAt(1,3,"Resize to 24 x 10+.",C.dim)
+            screen.writeAt(1,4,"CLI: setup / config",C.dim)
+            return
+        end
+        if self.edit then drawEdit()
+        elseif self.view=="home" then drawHome()
+        elseif self.view=="health" then drawHealth()
+        elseif self.view=="requests" then drawRequests()
+        elseif self.view=="history" then drawHistory()
+        elseif self.view=="errors" then drawErrors()
+        elseif self.view=="settings" then drawSettings()
+        elseif self.view=="routes" then drawRoutes()
+        elseif self.view=="route" then drawRoute()
+        elseif self.view=="overrides" then drawOverrides() end
+    end
+    self.draw=draw
+
+    function self.renderTerminal()
+        if not hasMonitor then return end
+        local lines={}
+        for _,check in ipairs(healthRows()) do
+            if not check.ok then lines[#lines+1]={text=check.severity..": "..check.label.." - "..check.detail,color=check.severity=="WARNING" and C.warn or C.danger} end
+        end
+        local currentErrors=errors()
+        if #currentErrors>0 then
+            local e=currentErrors[1]
+            lines[#lines+1]={text=tostring(e.severity or "ERROR")..": "..tostring(e.code or "").." "..textOf(e),
+                color=tostring(e.severity or ""):upper()=="WARNING" and C.warn or C.danger}
+        end
+        if updater and updater.checkError then lines[#lines+1]={text="WARNING: Update check failed - "..tostring(updater.checkError),color=C.warn} end
+        if self.edit then
+            lines[#lines+1]={text="EDIT: "..tostring(self.edit.field.label or self.edit.field.key),color=C.title}
+            lines[#lines+1]={text=self.edit.value.."_",color=C.text}
+            lines[#lines+1]={text=self.edit.error or "Enter saves; Escape cancels.",color=self.edit.error and C.danger or C.dim}
+        end
+        local content={}
+        for _,line in ipairs(lines) do content[#content+1]=line.text..":"..tostring(line.color) end
+        local marker=table.concat(content,"\n")
+        if marker==lastTerminal then return end
+        lastTerminal=marker
+        SharedUI.resetTerminal(C.text,C.bg)
+        for _,line in ipairs(lines) do SharedUI.setTerminalColor(line.color); print(line.text) end
+        SharedUI.setTerminalColor(C.text)
+    end
+
+    function self.handleEvent(event, a,b,c)
+        if type(event)=="table" then return self.handleEvent(table.unpack(event)) end
+        if event=="monitor_resize" or event=="term_resize" or event=="peripheral" or event=="peripheral_detach" then
+            mon=nil; lastTerminal=nil; draw(); return false
+        end
+        if self.edit then
+            if event=="char" then
+                if self.edit.replace then self.edit.value=""; self.edit.replace=false end
+                self.edit.value=self.edit.value..tostring(a)
+            elseif event=="paste" then
+                if self.edit.replace then self.edit.value=""; self.edit.replace=false end
+                self.edit.value=self.edit.value..tostring(a):gsub("[\r\n]","")
+            elseif event=="key" then
+                if a==keys.enter or a==keys.numPadEnter then saveEdit()
+                elseif a==keys.escape then self.edit=nil; lastTerminal=nil
+                elseif a==keys.backspace then self.edit.value=self.edit.value:sub(1,-2); self.edit.replace=false
+                elseif a==keys.delete then self.edit.value=""; self.edit.replace=false
+                else return false end
+            elseif event~="monitor_touch" and event~="mouse_click" then return false end
+            if event=="char" or event=="paste" or event=="key" then draw(); self.renderTerminal(); return true end
+        end
+        local x,y
+        if event=="monitor_touch" and hasMonitor and (not monName or a==monName) then x,y=b,c
+        elseif event=="mouse_click" and not hasMonitor then x,y=b,c end
+        if x and y then
+            local button=screen.hitButton(x,y)
+            if button and type(button.action)=="function" then button.action(); self.renderTerminal(); return true end
+        end
+        if event=="char" and not self.edit then
+            local selected=tonumber(a)
+            if selected and tabs[selected] then self.view=tabs[selected].id; self.notice=nil; draw(); return true end
+        end
+        return false
+    end
+
+    function self.refresh() draw(); self.renderTerminal() end
+    return self
+end
+
+return M

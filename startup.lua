@@ -1,5 +1,5 @@
 -- MineColonies Control Suite generic startup launcher
--- Component version: 1.0.0
+-- Component version: 1.1.0
 local CONFIG_PATH = "/colony/app.cfg"
 local RESTART_DELAY = 5
 
@@ -24,6 +24,24 @@ local function loadConfig()
     if not ok or type(cfg) ~= "table" then return nil, "Invalid " .. CONFIG_PATH end
     if not cfg.program or cfg.program == "" then return nil, "No program configured in " .. CONFIG_PATH end
     return cfg
+end
+
+-- Recover an interrupted replacement before loading modules from a partially
+-- updated installation. The verified recovery installer lives outside /colony.
+local TRANSACTION = "/.colony_install_transaction"
+if fs.exists(TRANSACTION .. "/marker.txt") then
+    banner("RECOVERING SUITE INSTALLATION", colors.yellow)
+    local recovery = TRANSACTION .. "/new/install_colony.lua"
+    if not fs.exists(recovery) then recovery = "/install_colony.lua" end
+    local ok, err = pcall(function()
+        if not shell.run(recovery, "--recover") then error("Installer recovery failed.", 0) end
+    end)
+    if not ok then
+        banner("INSTALLATION RECOVERY REQUIRED", colors.red)
+        print(tostring(err))
+        print("Keep " .. TRANSACTION .. " and run its installer --recover.")
+        return
+    end
 end
 
 sleep(1)

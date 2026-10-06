@@ -1,10 +1,10 @@
 -- MineColonies Control Suite - shared suite updater
--- Component version: 1.1.2
+-- Component version: 1.2.0
 local Version = require("colony.lib.version")
 local Util = require("colony.lib.util")
 
 local M = {}
-M.COMPONENT_VERSION = "1.1.2"
+M.COMPONENT_VERSION = "1.2.0"
 
 
 local function cacheBust(url)
@@ -283,12 +283,25 @@ function M.new(opts)
             sleep(2)
             return false
         end
+
         local source, fetchError = self.fetchSource()
         if not source then message("UPDATE FAILED", fetchError, colors.red); sleep(2); return false end
         local meta, metaError = self.readMetadata(source)
         if not meta then
             message("UPDATE FAILED", metaError, colors.red)
             sleep(2)
+            return false
+        end
+
+        local existing = Util.readSerializedTable(self.configPath)
+        if meta.installationSchema ~= 4 then
+            message("UPDATE FAILED", "Remote package is not a supported v4 installation.", colors.red)
+            return false
+        end
+        if not existing or existing.installationSchema ~= 4 or
+            existing.app ~= self.appId or existing.role ~= self.appId then
+            message("CLEAN INSTALL REQUIRED",
+                "This role needs its first v4 clean installation. Download install_colony.lua and choose CLEAN install.", colors.yellow)
             return false
         end
 
@@ -313,65 +326,80 @@ function M.new(opts)
             return false
         end
 
-        -- Managed code is recoverable from the suite package, so do not keep a
-        -- second full-size on-disk backup. CC:Tweaked computers commonly have a
-        -- ~1 MB filesystem and the self-contained installer is large enough that
-        -- old + temp + backup can exhaust it.
+        -- Run the downloaded installer from a temporary file. Its transaction
+        -- replaces /install_colony.lua together with the application only after
+        -- every package file is downloaded and validated. The current installer
+        -- therefore remains usable if a download or replacement fails.
         local temp = self.installerPath .. ".update_tmp"
-        local stale = {
-            self.installerPath .. ".bak",
-            self.installerPath .. ".install_tmp",
-            temp,
-        }
-        for _, path in ipairs(stale) do
-            if fs.exists(path) then pcall(fs.delete, path) end
+        if fs.exists(temp) then
+            message("UPDATE FAILED", "Temporary path already exists: " .. temp .. ". Move it aside and retry.", colors.red)
+            return false
         end
-
-        local function writeDirect()
-            if fs.exists(self.installerPath) then fs.delete(self.installerPath) end
-            local h = fs.open(self.installerPath, "w")
-            if not h then return false, "cannot create installer file" end
-            h.write(source)
-            h.close()
-            if not fs.exists(self.installerPath) or fs.getSize(self.installerPath) <= 0 then
-                return false, "installer write produced an empty file"
-            end
-            return true
-        end
-
         local free = math.huge
         local dir = fs.getDir(self.installerPath)
         local okFree, freeValue = pcall(fs.getFreeSpace, (dir and dir ~= "") and dir or "/")
         if okFree and type(freeValue) == "number" then free = freeValue end
-        local needed = #source + 4096
-
-        local okReplace, replaceErr
-        if free >= needed then
-            okReplace, replaceErr = pcall(function()
-                local h = fs.open(temp, "w")
-                if not h then error("cannot create installer temporary file", 0) end
-                h.write(source)
-                h.close()
-                if fs.getSize(temp) <= 0 then error("installer temporary file is empty", 0) end
-                if fs.exists(self.installerPath) then fs.delete(self.installerPath) end
-                fs.move(temp, self.installerPath)
-            end)
-        else
-            okReplace, replaceErr = pcall(function()
-                local okDirect, directErr = writeDirect()
-                if not okDirect then error(directErr, 0) end
-            end)
-        end
-        if not okReplace then
-            if fs.exists(temp) then pcall(fs.delete, temp) end
-            message("UPDATE FAILED", "Could not update installer: " .. tostring(replaceErr), colors.red)
+        if free < #source + 4096 then
+            message("UPDATE FAILED", "Not enough free space for a safe installer download. Existing installer was preserved.", colors.red)
             return false
         end
 
-        message("INSTALLER UPDATED", "Updating application and shared files...", colors.cyan)
-        local okRun = shell.run(self.installerPath, "--update", self.appId, sourceUrl)
-        if not okRun then
-            message("UPDATE FAILED", "Installer could not complete suite update.", colors.red)
+        local ownedTemp = false
+        local function cleanup()
+            if ownedTemp and fs.exists(temp) then pcall(fs.delete, temp) end
+        end
+        local okWrite, writeError = pcall(function()
+            local h = fs.open(temp, "w")
+            if not h then error("Cannot create installer temporary file.", 0) end
+            ownedTemp = true
+            local wrote, err = pcall(h.write, source)
+            pcall(h.close)
+            if not wrote then error(tostring(err), 0) end
+            local verify = fs.open(temp, "r")
+            if not verify then error("Cannot verify installer temporary file.", 0) end
+            local readOK, written = pcall(verify.readAll)
+            pcall(verify.close)
+            if not readOK or written ~= source then error("Installer write verification failed.", 0) end
+        end)
+        if not okWrite then
+            cleanup()
+            message("UPDATE FAILED", tostring(writeError), colors.red)
+            return false
+        end
+        message("INSTALLING PACKAGE", "Updating application and shared files; preserving request records...", colors.cyan)
+        local called, ran = pcall(shell.run, temp, "--update", self.appId, sourceUrl)
+        cleanup()
+        if not called or ran ~= true then
+            message("UPDATE FAILED", "Installer could not complete suite update: " .. tostring(ran), colors.red)
+            return false
+        end
+
+        -- CC shell.run reports whether execution raised an error, rather than
+        -- the chunk's returned boolean. A legacy installer can return false
+        -- while shell.run returns true. Verify the installed result explicitly.
+        local installed = Util.readSerializedTable(self.configPath)
+        local target = meta.apps[self.appId]
+        local valid = installed and installed.installationSchema == 4 and installed.app == self.appId and
+            installed.role == self.appId and type(installed.appVersion) == "string" and
+            type(installed.suiteVersion) == "string" and installed.program == target.program and
+            Version.compare(installed.appVersion, target.version) >= 0 and
+            Version.compare(installed.suiteVersion, meta.suiteVersion) >= 0
+        -- The branch may advance between the initial update check and immutable
+        -- commit resolution. Accept the newer verified package in that case.
+        local installedMetadata
+        if valid and fs.exists(self.installerPath) then
+            local h = fs.open(self.installerPath, "r")
+            if h then
+                local readOK, installedSource = pcall(h.readAll)
+                pcall(h.close)
+                if readOK then installedMetadata = packageMetadata(installedSource) end
+            end
+        end
+        local installedApp = installedMetadata and installedMetadata.apps[self.appId]
+        if not valid or not installedMetadata or installedMetadata.installationSchema ~= 4 or
+            installedMetadata.suiteVersion ~= installed.suiteVersion or not installedApp or
+            installedApp.version ~= installed.appVersion or installedApp.program ~= installed.program then
+            message("UPDATE FAILED", "Installer completion could not be verified. Review the installation before restarting.", colors.red)
             return false
         end
         message("UPDATE COMPLETE", "Rebooting into updated suite...", colors.lime)
