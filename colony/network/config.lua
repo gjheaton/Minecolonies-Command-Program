@@ -1,5 +1,5 @@
 -- Persisted settings for the dedicated PRS master and colony clients.
-local M = { VERSION = "4.1.0", PATH = "/colony/network.cfg",
+local M = { VERSION = "4.0.0", PATH = "/colony/network.cfg",
     DISPLAY = {blocksWide=5,blocksHigh=3,textScale=.5,columns=100,rows=38} }
 local fields = {
     {key="automationEnabled",label="Run supply automation",type="boolean",default=true,roles={master=true}},
@@ -161,7 +161,7 @@ function M.load(role)
         local saved=textutils.unserialize(h.readAll()); h.close()
         if type(saved)~="table" or saved.schema~=4 then error("Invalid network configuration; run installer clean installation",0) end
         for key,value in pairs(saved) do config[key]=value end
-        -- v4.1 standardises all supply displays without touching transfer state.
+        -- Standardise all supply displays without touching transfer state.
         config.monitorTextScale=M.DISPLAY.textScale
         if config.role~=role then error("Installed role differs from saved network role",0) end
     end

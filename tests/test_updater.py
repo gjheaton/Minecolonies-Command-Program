@@ -166,14 +166,19 @@ class UpdaterTests(unittest.TestCase):
         self.assertIsNone(self.g.SHELL_PATH)
         self.assert_no_reboot()
 
-    def test_updater_previous_4_0_installation_updates_without_cleaning_persistent_data(self):
+    def test_updater_equal_version_prototype_reports_current_and_direct_repair_preserves_data(self):
         for role in ("master", "supply"):
             with self.subTest(role=role):
                 self.setUp()
                 self.seed_previous_v4(role)
                 before = self.snapshot()
                 self.g.CONFIRM = "do not clean"
-                self.assertTrue(self.g.makeUpdater("4.0.0", role).install())
+                # Equal release versions do not advertise an automatic update.
+                # An explicit same-version repair still refreshes package files.
+                self.assertFalse(self.g.makeUpdater("4.0.0", role).install())
+                self.assertEqual(self.snapshot(), before)
+                self.assertFalse(bool(self.g.REBOOTED))
+                self.assertTrue(self.g.runInstaller("--repair", SOURCE))
                 for path in ("/colony/network.cfg", f"/colony/{role}_v4_state.a", f"/colony/{role}_v4_state.b"):
                     self.assertEqual(self.g.FILES[path], before[path], path)
                 cfg = self.g.textutils.unserialize(self.g.FILES["/colony/app.cfg"])
@@ -183,7 +188,7 @@ class UpdaterTests(unittest.TestCase):
                 self.assertEqual(cfg.role, role)
                 self.assertIsNotNone(self.g.FILES["/colony/network/telemetry.lua"])
                 self.assertIsNotNone(self.g.FILES["/colony/network/displays.lua"])
-                self.assertTrue(self.g.REBOOTED)
+                self.assertFalse(bool(self.g.REBOOTED))
                 self.assertFalse(self.g.fs.exists("/install_colony.lua.update_tmp"))
 
     def test_updater_does_not_delete_a_preexisting_temporary_file(self):

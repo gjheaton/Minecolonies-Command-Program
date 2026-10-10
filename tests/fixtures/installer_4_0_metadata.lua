@@ -1,5 +1,5 @@
 -- MineColonies Control Suite Installer
--- Authentic 4.0.0 metadata from published commit dc3b689.
+-- Authentic 4.0.0 prototype metadata from commit dc3b689.
 -- Test fixture: provides metadata only, never installs files.
 local mode = ...
 local SUITE_INFO = {

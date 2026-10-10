@@ -249,7 +249,7 @@ health warnings/errors rather than mirroring request rows.
 
 Build every Supply screen from Advanced Monitor blocks in a **5-wide × 3-high**
 rectangle, with all blocks facing the same way. Leave a gap between separate
-panels so they do not join into one larger multiblock monitor. Supply 4.1 fixes
+panels so they do not join into one larger multiblock monitor. Supply 4.0.0 fixes
 the text scale at **0.5**. The overview, remote colony dashboards, and colony-local
 screens share the same layout.
 
@@ -433,10 +433,10 @@ on one computer. `--repair` restores code while keeping the same role/configurat
 and ledger. A legacy installation must use the first clean v4 installation rather
 than an in-place update. Update both roles for protocol-changing releases.
 
-An existing **4.0 master/client installation upgrades to 4.1 with `--update`**,
-keeping its configuration and journals. Update both roles to enable the new
-colony dashboards, then set the primary monitor and optional route monitor
-assignments. Do not use `--install` or type `CLEAN` for this upgrade.
+After the first clean Supply 4.0.0 installation, future **Update** and **Repair**
+operations preserve the schema 4 configuration, monitor assignments, and request
+journals. Do not use `--install` or type `CLEAN` when preserving an existing
+installation.
 
 The installer resolves `supply-master-colony` to a Git SHA through GitHub's API and
 downloads all modules from that immutable revision. If GitHub API access is disabled,

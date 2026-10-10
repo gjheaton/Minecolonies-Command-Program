@@ -200,7 +200,7 @@ class InstallerTests(unittest.TestCase):
         ''')
 
     def seed_previous_v4(self, role="master"):
-        """Seed published 4.0.0 file metadata and persisted schema-4 data."""
+        """Seed prior 4.0.0 prototype metadata and persisted schema-4 data."""
         loader = self.lua.eval('function(body) local c,e=load(body,"old installer","t",{}); assert(c,e); return c("--metadata") end')
         previous = loader(PREVIOUS_INSTALLER)
         self.assertEqual(previous.suiteVersion, "4.0.0")
@@ -366,7 +366,7 @@ class InstallerTests(unittest.TestCase):
             self.g.runInstaller("--update", "master", SOURCE)
         self.assertEqual(self.snapshot(), before)
 
-    def test_previous_4_0_update_adds_new_modules_and_preserves_configuration_and_journal(self):
+    def test_same_version_prototype_update_adds_new_modules_and_preserves_configuration_and_journal(self):
         for role in ("master", "supply"):
             with self.subTest(role=role):
                 self.setUp()
@@ -386,7 +386,7 @@ class InstallerTests(unittest.TestCase):
                 self.assertIsNotNone(self.g.FILES["/colony/network/displays.lua"])
                 self.assertEqual(self.g.FILES["/my_other_program.lua"], "unrelated")
 
-    def test_failed_previous_4_0_update_restores_old_package_and_journal(self):
+    def test_failed_same_version_prototype_update_restores_old_package_and_journal(self):
         self.seed_previous_v4()
         before = self.snapshot()
         self.g.FAIL_COPY = "/colony/network/master.lua"

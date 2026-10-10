@@ -7,7 +7,7 @@ local Protocol=require("colony.network.protocol")
 local function fixture()
     local w=S.world();local master=S.computer(w,1,"master");local source=S.computer(w,2,"supply")
     master.config.colonies={D.route(2),D.route(3)}
-    local view={role="supply",programVersion="4.1.0",colonyName="Alpha",masterId=1,status="waiting",requests={},history={},errors={},
+    local view={role="supply",programVersion="4.0.0",colonyName="Alpha",masterId=1,status="waiting",requests={},history={},errors={},
         settings=Config.defaults("supply"),health={ok=true,connected=true,detail="Waiting for master",checks={}}}
     view.settings.masterId=1
     local count={sourceSnapshots=0}
@@ -45,7 +45,7 @@ Test.case("telemetry reports compact bounded rows, explicit totals, latest event
     f.view.settings.secret="private-setting-secret";f.view.intent={secret="private-intent-secret"}
     local message=f.publish();assert(Protocol.valid(message))
     local snapshot=message.snapshot
-    Test.equal(snapshot.programVersion,"4.1.0")
+    Test.equal(snapshot.programVersion,"4.0.0")
     Test.equal(#snapshot.requests,3);Test.equal(snapshot.totals.requests,8);Test.equal(snapshot.shown.requests,3);Test.equal(snapshot.truncated.requests,5)
     Test.equal(#snapshot.history,2);Test.equal(snapshot.history[1].message,"event-4");Test.equal(snapshot.history[2].message,"event-5")
     Test.equal(snapshot.errors[1].code,"FAULT3");Test.equal(snapshot.truncated.history,3);Test.equal(snapshot.truncated.errors,2)

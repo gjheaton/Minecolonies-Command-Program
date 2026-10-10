@@ -1,6 +1,6 @@
 # MineColonies Control Suite
 
-The `supply-master-colony` branch provides Supply 4.1: one dedicated computer owns
+The `supply-master-colony` branch provides Supply 4.0.0: one dedicated computer owns
 Player Refined Storage (PRS), and colony supply computers communicate with it over
 rednet. Each colony has a delivery and a return Ender Chest channel. Command Center
 is also available through the same installer.
@@ -45,10 +45,9 @@ Use `supply` or `command` instead of `master` on those computers. The stored upd
 source remains this development branch until explicitly changed. Update the master
 and all colony clients together when a release changes the protocol.
 
-For an existing **4.0 installation, update both the master and colony supply
-computers to 4.1** with `--update`; settings, inventories, and request journals are
-preserved. Do not choose `CLEAN` for this upgrade. Pause master automation and let
-current handshakes finish before updating.
+After the first clean installation, use **Update** or **Repair** for future
+releases. Both preserve settings and request journals. Pause master automation
+and let current handshakes finish before updating.
 
 ## Development checks
 
