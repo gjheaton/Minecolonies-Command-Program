@@ -265,6 +265,8 @@ class InstallerTests(unittest.TestCase):
         self.assertIsNotNone(self.g.FILES["/colony/network/diagnostics.lua"])
         self.assertIsNotNone(self.g.FILES["/colony/network/telemetry.lua"])
         self.assertIsNotNone(self.g.FILES["/colony/network/displays.lua"])
+        self.assertIsNotNone(self.g.FILES["/colony/network/setup.lua"])
+        self.assertIsNotNone(self.g.FILES["/colony/network/setup_ui.lua"])
         self.assertIsNone(self.g.FILES["/colony/network/client.lua"])
         for url in self.g.HTTP_LOG.values():
             if url.startswith("https://raw.githubusercontent.com/"):
@@ -274,10 +276,14 @@ class InstallerTests(unittest.TestCase):
         self.assertTrue(self.install("command"))
         self.assertIsNotNone(self.g.FILES["/colony/command/visitor_jobs.lua"])
         self.assertIsNone(self.g.FILES["/colony/network/client.lua"])
+        self.assertIsNone(self.g.FILES["/colony/network/setup.lua"])
+        self.assertIsNone(self.g.FILES["/colony/network/setup_ui.lua"])
         self.assertTrue(self.install("supply"))
         self.assertIsNotNone(self.g.FILES["/colony/network/client.lua"])
         self.assertIsNotNone(self.g.FILES["/colony/network/telemetry.lua"])
         self.assertIsNotNone(self.g.FILES["/colony/network/displays.lua"])
+        self.assertIsNotNone(self.g.FILES["/colony/network/setup.lua"])
+        self.assertIsNotNone(self.g.FILES["/colony/network/setup_ui.lua"])
         self.assertIsNotNone(self.g.FILES["/colony/supply/matcher.lua"])
         self.assertIsNone(self.g.FILES["/colony/network/master.lua"])
         self.assertIsNone(self.g.FILES["/colony_command.lua"])
@@ -358,6 +364,25 @@ class InstallerTests(unittest.TestCase):
         cfg = self.g.textutils.unserialize(self.g.FILES["/colony/app.cfg"])
         self.assertEqual(cfg.customExtension, "keep this")
 
+    def test_same_version_repair_restores_setup_modules_for_both_supply_roles(self):
+        for role in ("master", "supply"):
+            with self.subTest(role=role):
+                self.setUp()
+                self.seed_v4(role)
+                for path in ("/colony/network/setup.lua", "/colony/network/setup_ui.lua"):
+                    self.g.fs.delete(path)
+                before = self.snapshot()
+                self.g.CONFIRM = "do not clean"
+                self.assertTrue(self.g.runInstaller("--repair", SOURCE))
+                for remote in ("colony/network/setup.lua", "colony/network/setup_ui.lua"):
+                    self.assertEqual(self.g.FILES["/" + remote], self.g.REMOTE_FILES[remote])
+                for path in ("/colony/network.cfg", "/colony/master_state.cfg", "/my_other_program.lua"):
+                    self.assertEqual(self.g.FILES[path], before[path], path)
+                cfg = self.g.textutils.unserialize(self.g.FILES["/colony/app.cfg"])
+                self.assertEqual(cfg.appVersion, CURRENT_VERSION)
+                self.assertEqual(cfg.role, role)
+                self.assertEqual(cfg.customExtension, "keep this")
+
     def test_failed_update_restores_code_and_preserves_state(self):
         self.seed_v4()
         before = self.snapshot()
@@ -384,6 +409,8 @@ class InstallerTests(unittest.TestCase):
                 self.assertEqual(cfg.customExtension, "keep this")
                 self.assertIsNotNone(self.g.FILES["/colony/network/telemetry.lua"])
                 self.assertIsNotNone(self.g.FILES["/colony/network/displays.lua"])
+                self.assertIsNotNone(self.g.FILES["/colony/network/setup.lua"])
+                self.assertIsNotNone(self.g.FILES["/colony/network/setup_ui.lua"])
                 self.assertEqual(self.g.FILES["/my_other_program.lua"], "unrelated")
 
     def test_failed_same_version_prototype_update_restores_old_package_and_journal(self):

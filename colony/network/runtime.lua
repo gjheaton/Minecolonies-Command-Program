@@ -10,50 +10,6 @@ local SuiteUpdater=require("colony.lib.updater")
 local Telemetry=require("colony.network.telemetry")
 local Displays=require("colony.network.displays")
 local M={}
-local function ask(label,current,required)
-    while true do
-        print(label..(current~=nil and " ["..tostring(current).."]" or "")..":")
-        write("> "); local value=read()
-        if value=="" and current~=nil then value=tostring(current) end
-        if not required or value~="" then return value end
-        print("A value is required.")
-    end
-end
-local function setup(config)
-    print("MineColonies "..config.role.." setup")
-    print("Visible peripherals:")
-    for _,name in ipairs(peripheral.getNames()) do print("  "..name.." ("..tostring(peripheral.getType(name))..")") end
-    print("Leave bridge/monitor names blank only if exactly one is attached.")
-    print("Build every supply display 5 blocks wide x 3 high; text scale is fixed at 0.5.")
-    config.monitorName=ask(config.role=="master" and "Overview Advanced Monitor peripheral (explicit with multiple screens)" or "Advanced Monitor peripheral",config.monitorName,false)
-    if config.role=="master" then
-        config.playerBridgeName=ask("Player RS Bridge peripheral",config.playerBridgeName,false)
-        print("Each colony needs two exclusive color channels, with no external automation.")
-        repeat
-            local id=ask("Add colony computer ID (blank to finish)",nil,false)
-            if id=="" then break end
-            local route={id=tonumber(id),overrides={}}
-            route.label=ask("Colony label",nil,true)
-            route.deliveryChest=ask("Master delivery chest peripheral",nil,true)
-            route.returnChest=ask("Master return chest peripheral",nil,true)
-            route.deliveryChannel=ask("Delivery color channel (e.g. red-blue-white, to colony)",nil,true):lower()
-            route.returnChannel=ask("Return color channel (e.g. red-blue-black, from colony)",nil,true):lower()
-            route.monitorName=ask("Master colony dashboard monitor (optional, blank for none)",nil,false)
-            local ok,err=Config.setColony(config,route)
-            if not ok then print("Route rejected: "..tostring(err)) end
-        until false
-    else
-        config.masterId=tonumber(ask("Master computer ID",config.masterId>=0 and config.masterId or nil,true))
-        config.colonyIntegratorName=ask("Colony Integrator peripheral",config.colonyIntegratorName,false)
-        config.colonyBridgeName=ask("Colony RS Bridge peripheral",config.colonyBridgeName,false)
-        config.deliveryChestName=ask("Local delivery chest peripheral",config.deliveryChestName,true)
-        config.returnChestName=ask("Local return chest peripheral",config.returnChestName,true)
-        config.deliveryChannel=ask("Delivery color channel (match master route)",config.deliveryChannel,true):lower()
-        config.returnChannel=ask("Return color channel (match master route)",config.returnChannel,true):lower()
-    end
-    Config.save(config)
-    print("Saved. Timeouts, limits, crafting, overflow and routes are editable in SETTINGS.")
-end
 local function staged(store,id)
     local data=store.data
     for _,entry in pairs(data.client and data.client.shipments or {}) do if (entry.count or 0)>(entry.imported or 0) then return true end end
@@ -84,7 +40,7 @@ function M.run(role,...)
     local store=Store.new("/colony/"..role.."_v4_state",config); store.load()
     if mode=="setup" or (not fs.exists(Config.PATH) and mode==nil) then
         if retainedWork(store) then error("Finish/reconcile retained turns, deliveries, crafts and chest tests before changing hardware setup",0) end
-        setup(config); if mode=="setup" then return end
+        if not require("colony.network.setup").run(config) or mode=="setup" then return end
     end
     local matcher=Matcher.new(config,store)
     local io=IO.new(config,store,matcher)

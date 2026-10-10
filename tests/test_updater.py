@@ -188,6 +188,8 @@ class UpdaterTests(unittest.TestCase):
                 self.assertEqual(cfg.role, role)
                 self.assertIsNotNone(self.g.FILES["/colony/network/telemetry.lua"])
                 self.assertIsNotNone(self.g.FILES["/colony/network/displays.lua"])
+                self.assertIsNotNone(self.g.FILES["/colony/network/setup.lua"])
+                self.assertIsNotNone(self.g.FILES["/colony/network/setup_ui.lua"])
                 self.assertFalse(bool(self.g.REBOOTED))
                 self.assertFalse(self.g.fs.exists("/install_colony.lua.update_tmp"))
 

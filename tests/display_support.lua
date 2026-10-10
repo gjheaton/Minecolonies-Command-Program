@@ -5,8 +5,14 @@ function D.surface(width,height)
     local self={width=width,height=height,lines={},writes=0,clears=0}
     local x,y=1,1
     function self.getSize() if self.failed then error("detached monitor") end;return self.width,self.height end
-    function self.setTextColor() if self.failed then error("detached monitor") end end
-    function self.setBackgroundColor() if self.failed then error("detached monitor") end end
+    function self.setTextColor(value) if self.failed then error("detached monitor") end;self.textColor=value end
+    function self.setBackgroundColor(value) if self.failed then error("detached monitor") end;self.backgroundColor=value end
+    function self.getTextColor() return self.textColor or 1 end
+    function self.getBackgroundColor() return self.backgroundColor or 32768 end
+    function self.getCursorPos() return x,y end
+    function self.setCursorBlink(value) self.cursorBlink=value end
+    function self.getCursorBlink() return self.cursorBlink==true end
+    function self.clearLine() self.lines[y]=string.rep(" ",self.width) end
     function self.isColor() return true end
     function self.setTextScale(value) self.scale=value end
     function self.setCursorPos(a,b)

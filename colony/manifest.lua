@@ -27,6 +27,8 @@ return {
         { path = "/colony/network/protocol.lua", app = "network" },
         { path = "/colony/network/telemetry.lua", app = "network" },
         { path = "/colony/network/displays.lua", app = "network" },
+        { path = "/colony/network/setup.lua", app = "network" },
+        { path = "/colony/network/setup_ui.lua", app = "network" },
         { path = "/colony/network/runtime.lua", app = "network" },
         { path = "/colony/network/ui.lua", app = "network" },
         { path = "/colony/network/diagnostics.lua", app = "network" },

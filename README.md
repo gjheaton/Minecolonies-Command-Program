@@ -28,7 +28,11 @@ files and does not remove Minecraft inventories or items. Downloads are validate
 before cleanup. Later **Update** and **Repair** preserve the new settings and state.
 
 After installation, run `colony_master setup` or `colony_supply setup`, as indicated
-by the installer, then reboot. See the [hardware, configuration, and testing guide](docs/PRS_NETWORK.md)
+by the installer. Setup uses the computer's built-in keyboard screen, with one
+question at a time and numbered peripheral choices. Use `N`/`P` for pages or
+`:q` to cancel without saving; settings are saved only after the final confirmation.
+Master setup leaves automation paused for wiring tests. See the
+[hardware, configuration, and testing guide](docs/PRS_NETWORK.md)
 before enabling automatic supply. HTTP access to `raw.githubusercontent.com` and
 `api.github.com` is required; the installer resolves each download batch to one Git
 commit so all installed modules come from the same revision.
@@ -48,6 +52,11 @@ and all colony clients together when a release changes the protocol.
 After the first clean installation, use **Update** or **Repair** for future
 releases. Both preserve settings and request journals. Pause master automation
 and let current handshakes finish before updating.
+
+For a fix to an already installed 4.0.0 build with the same version number, run
+`install_colony --repair`, then rerun `colony_master setup` or `colony_supply setup`
+as appropriate. Repair preserves configuration and journals; do not choose
+`CLEAN` to obtain the corrected setup screens.
 
 ## Development checks
 

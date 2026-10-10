@@ -46,8 +46,22 @@ for returns from the colony**.
 
 Set each channel's master-side and colony-side chests to the same code and access
 settings. Enter these labels in both computers' setup. They are checked during the
-handshake. The controlled item test below establishes that the configured physical
-channels agree.
+handshake. The program cannot read the actual dyes or set the chest colors; you
+must check them in-game. The controlled item test below establishes that the
+configured physical channels agree.
+
+Use physical labels on the chests to distinguish the four channels:
+
+```text
+MASTER                                    COLONY
+Clockwork delivery: Red-Blue-White   <==>   Clockwork delivery: Red-Blue-White
+Clockwork returns:  Red-Blue-Black   <==>   Clockwork returns:  Red-Blue-Black
+Stardust delivery:  Red-Pink-White   <==>   Stardust delivery:  Red-Pink-White
+Stardust returns:   Red-Pink-Black   <==>   Stardust returns:   Red-Pink-Black
+```
+
+Add each chest's local peripheral name to its label. The names at the two ends
+may differ even though the color code is the same.
 
 **No hoppers, pipes, players, or other computers may move items through these
 channels during automated transfers or the test.** Delivery verification depends
@@ -86,6 +100,31 @@ item transport alone does not provide computer communications.
 Stop all previous programs and disconnect other PRS bridge clients. Do not run a
 second master or let other automation race the master's Ender Chest movements.
 
+### Identifying monitors, bridges, and chests
+
+Before setup, use the computer's built-in command to list visible peripherals:
+
+```lua
+peripherals
+```
+
+Right-click the wired modem attached to the physical monitor, RS Bridge, or chest
+to enable its peripheral connection. The connection message identifies its
+peripheral name. Match that name with the list on the computer, and write it on
+a sign or other label next to the device. For example, label the primary screen
+`Overview — monitor_0` and a chest `Clockwork DELIVERY — red-blue-white — <name>`.
+Use the actual names reported in your world.
+
+If you cannot tell which name belongs to a device, stop supply automation, run
+`peripherals`, disconnect only that device's wired modem or cable, and run the
+command again. The missing name identifies it. Reconnect and re-enable the modem,
+then verify the name again before selecting it in setup. Avoid disconnecting a
+backbone cable that removes several devices at once.
+
+`colony_master monitors` also lists monitor names, sizes, and dashboard mappings.
+There is no automatic reading of a chest's dye colors: use its physical label,
+the configured color-channel label, and the controlled chest test together.
+
 ## First installation
 
 On each computer:
@@ -122,9 +161,9 @@ Run the indicated setup command before starting automation:
 colony_master setup
 ```
 
-For the master, choose its PRS Bridge and add each colony's computer ID, label,
-master-side delivery and return inventory names, and color-channel labels. On each
-colony run:
+For the master, select its overview monitor and PRS Bridge, then add each colony's
+computer ID, label, master-side delivery and return inventories, color-channel
+labels, and optional dashboard monitor. On each colony run:
 
 ```lua
 colony_supply setup
@@ -132,12 +171,28 @@ colony_supply setup
 
 Enter the master computer ID, the colony's RS Bridge/Integrator, local chest names,
 and the same color-channel labels. CC:Tweaked's `id` command displays the computer
-ID. Setup lists visible peripherals. Blank bridge/monitor overrides work only when
-exactly one peripheral of that type is visible; explicit names are preferable.
-When several monitors are attached, explicitly set `monitorName` to the master
-overview monitor. Each colony dashboard is mapped separately as described below.
+ID.
 
-Set the master to paused before the initial hardware test:
+Setup runs on the **computer's built-in 51 × 19 keyboard screen**, one question
+per screen. It does not put setup prompts on the external 5 × 3 operational
+monitors. Hardware choices show numbered peripheral names; long names wrap in
+full and long lists have pages.
+
+- Enter the listed number for the device you physically identified.
+- Type `N` or `P` and press Enter to move between pages.
+- Enter keeps a valid current selection, or selects the sole listed choice.
+- Optional dashboard monitors can be left unassigned with the displayed **None** choice.
+- Type `:q` at any step to cancel. Your existing configuration remains unchanged.
+
+Setup stores explicit hardware names. Review the selections and choose **Yes**
+at the final save confirmation; intermediate answers are not saved. Confirmed
+master setup leaves **Run supply automation** disabled, including when rerunning
+setup on an existing master, so you can check the wiring first.
+
+Each master-side colony dashboard is mapped separately as described below. If
+several monitors are attached, select the overview by its exact peripheral name.
+
+The following command also explicitly pauses the master before a hardware test:
 
 ```lua
 colony_master set automationEnabled false
@@ -448,6 +503,12 @@ After the first clean Supply 4.0.0 installation, future **Update** and **Repair*
 operations preserve the schema 4 configuration, monitor assignments, and request
 journals. Do not use `--install` or type `CLEAN` when preserving an existing
 installation.
+
+If the corrected setup screens are a fix within the same 4.0.0 version, use
+`install_colony --repair` to fetch the current code even when the version number
+has not changed. Repair preserves the configuration and request journals. Then
+run `colony_master setup` or `colony_supply setup` as appropriate; do not use
+`CLEAN` to obtain a same-version fix.
 
 The installer resolves `supply-master-colony` to a Git SHA through GitHub's API and
 downloads all modules from that immutable revision. If GitHub API access is disabled,
