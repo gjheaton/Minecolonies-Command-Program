@@ -34,9 +34,20 @@ Each **colony computer** needs:
 Each pair of Ender Chests shares its color code and ownership/access settings.
 Use two exclusive codes per colony. A delivery code must never be shared with a
 return code or another colony's channel. Peripheral names can differ between the
-master and colony; the physical color codes must agree. Channel labels such as
-`red-white-blue` are entered in setup and checked during the handshake. The
-controlled item test below establishes that the configured physical channels agree.
+master and colony; the physical color codes must agree. The color order is
+**Red → colony designator → direction**. Clockwork uses **Blue**, Stardust uses
+**Pink**, and the final color is **White for delivery to the colony** or **Black
+for returns from the colony**.
+
+| Colony | Delivery channel (to colony) | Return channel (from colony) |
+| --- | --- | --- |
+| Clockwork | `red-blue-white` | `red-blue-black` |
+| Stardust | `red-pink-white` | `red-pink-black` |
+
+Set each channel's master-side and colony-side chests to the same code and access
+settings. Enter these labels in both computers' setup. They are checked during the
+handshake. The controlled item test below establishes that the configured physical
+channels agree.
 
 **No hoppers, pipes, players, or other computers may move items through these
 channels during automated transfers or the test.** Delivery verification depends
