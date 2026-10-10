@@ -432,7 +432,16 @@ function M.new(config, store, engine, io, updater, options)
             local message = h[key] or snapshot[key]
             if message and tostring(message)~="" then rows[#rows+1]={label="Supply",detail=textOf(message),ok=false,severity="ERROR"} end
         end
-        if h.ok==false and h.detail then rows[#rows+1]={label="Supply",detail=textOf(h.detail),ok=false,severity="ERROR"} end
+        if h.detail and textOf(h.detail)~="" then
+            local detail=textOf(h.detail)
+            local duplicate=false
+            for _,check in ipairs(rows) do if check.label=="Supply" and check.detail==detail then duplicate=true;break end end
+            if not duplicate then
+                local ok=h.overall~=false and h.ok~=false
+                local warning=tostring(h.severity or ""):lower()=="warning" or h.waiting==true
+                rows[#rows+1]={label="Supply",detail=detail,ok=ok,severity=ok and "OK" or (warning and "WARNING" or "ERROR")}
+            end
+        end
         if #rows==0 then
             local ok=h.overall~=false and h.ok~=false
             rows[1]={label="Supply",detail=h.detail or (ok and "Ready" or "Check configuration and peripheral connections."),ok=ok,severity=ok and "OK" or "ERROR"}
@@ -467,7 +476,8 @@ function M.new(config, store, engine, io, updater, options)
             local reportedStatus=snapshot.statusMessage or health.detail or snapshot.status
             if reportedStatus then row(11,"Reported status: "..textOf(reportedStatus),healthy and C.dim or C.danger) end
         elseif role()=="master" and config.automationEnabled==false then row(11,"AUTOMATION PAUSED - existing deliveries can drain; no new supply is sent.",C.warn)
-        elseif updater and updater.checkError then row(11,"Update check failed: "..tostring(updater.checkError),C.warn) end
+        elseif updater and updater.checkError then row(11,"Update check failed: "..tostring(updater.checkError),C.warn)
+        elseif role()=="supply" and snapshot.statusMessage then row(11,textOf(snapshot.statusMessage),healthy and C.good or C.warn) end
         if role()=="master" then
             row(12,"COLONIES  (routes in SETTINGS)",C.title,function() self.view="routes"; draw() end)
             local y=13
@@ -857,6 +867,10 @@ function M.new(config, store, engine, io, updater, options)
             return
         end
         local lines={}
+        local health=type(snapshot.health)=="table" and snapshot.health or {}
+        if role()=="supply" and not options.readOnly and health.ok~=false and snapshot.statusMessage then
+            lines[#lines+1]={text="Supply: "..textOf(snapshot.statusMessage),color=C.good}
+        end
         for _,check in ipairs(healthRows()) do
             if not check.ok then lines[#lines+1]={text=check.severity..": "..check.label.." - "..check.detail,color=check.severity=="WARNING" and C.warn or C.danger} end
         end

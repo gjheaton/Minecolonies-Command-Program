@@ -731,12 +731,18 @@ function M.new(config, store, io, matcher)
                     local detail = "Colony color labels disagree with configured delivery/return routes"
                     if cs.routeError ~= detail then errorEvent("CHANNEL_MISMATCH", detail, {colonyId=colony.id}) end
                     cs.routeError = detail
-                    save()
-                    return true
+                else
+                    cs.routeError = nil
                 end
-                cs.routeError = nil
             end
             save()
+            if kind == "hello" then
+                -- A paused master still confirms connectivity. This receipt
+                -- cannot grant permission to touch either Ender Chest.
+                io.send(colony.id, {kind="hello_ack", routeConfirmed=cs.routeConfirmed == true,
+                    automationEnabled=config.automationEnabled ~= false, error=cs.routeError})
+                if not cs.routeConfirmed then return true end
+            end
             if cs.turn and (cs.turn.phase == "RESULT" or (cs.turn.phase == "WAIT_BATCH" and checkRoutes(colony, cs))) then sendTurn(colony, cs) end
             return true
         end

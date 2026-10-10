@@ -50,7 +50,8 @@ function M.new(config, store, io, matcher)
     data.seenTurns = type(data.seenTurns) == "table" and data.seenTurns or {}
     data.cursor = amount(data.cursor)
     local nextHello, nextRetry = 0, 0
-    local lastContact = tonumber(data.lastContact)
+    local lastContact
+    local masterConnection
     local persistenceError
 
     local function setting(key, default)
@@ -483,6 +484,18 @@ function M.new(config, store, io, matcher)
 
     function self.onMessage(sender, message)
         if tonumber(sender) ~= tonumber(config.masterId) or type(message) ~= "table" or message.version ~= 1 then return false end
+        if message.kind == "hello_ack" then
+            if type(message.routeConfirmed) ~= "boolean" or type(message.automationEnabled) ~= "boolean"
+                or message.error ~= nil and (type(message.error) ~= "string" or #message.error > 512) then return false end
+            lastContact = io.now()
+            masterConnection = {
+                routeConfirmed = message.routeConfirmed,
+                automationEnabled = message.automationEnabled,
+                error = message.error,
+                receivedAt = lastContact,
+            }
+            return true
+        end
         local session = message.session and tostring(message.session)
         local turnId = message.turn and tostring(message.turn)
         if message.kind ~= "turn" and message.kind ~= "result" then return false end
@@ -693,11 +706,22 @@ function M.new(config, store, io, matcher)
         end
         table.sort(rows, function(a, b) return a.id < b.id end)
         local connected = lastContact and io.now() - lastContact <= (tonumber(setting("messageTimeoutSeconds", 30)) or 30)
+        local routeConfirmed = masterConnection and masterConnection.routeConfirmed
+        local automationEnabled = masterConnection and masterConnection.automationEnabled
+        local detail = clientError()
+        if not detail then
+            if not connected then detail = "Waiting for master connection"
+            elseif routeConfirmed == false then detail = masterConnection.error or "Master connected; colony route mismatch"
+            elseif automationEnabled == false then detail = "Master connected; automation paused"
+            else detail = "Master connected; waiting for turns" end
+        end
         return {
             role = "supply", colonyName = data.colonyName,
-            health = { ok = connected == true and not clientError(), connected = connected == true,
-                detail = clientError() or (connected and "Waiting for master turns" or "Waiting for master connection") },
+            health = { ok = connected == true and not clientError() and routeConfirmed ~= false,
+                connected = connected == true, detail = detail,
+                routeConfirmed = routeConfirmed, automationEnabled = automationEnabled },
             status = clientError() and "error" or (data.turn and data.turn.phase or "waiting"),
+            statusMessage = detail,
             requests = rows, colonies = {}, history = store.data.history or {}, errors = store.data.errors or {},
             settings = store.data.settings or config, turn = copy(data.turn), intent = copy(data.intent),
             masterId = config.masterId, lastContact = lastContact,

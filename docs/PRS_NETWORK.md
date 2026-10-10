@@ -203,6 +203,28 @@ shell for diagnostics. You can later start `colony_master`, open **SETTINGS**, a
 enable **Run supply automation**. Pausing stops new grants but finishes existing
 handshakes; it does not cancel deliveries or crafts.
 
+### Connection timing
+
+After an explicit setup command, run `colony_master` on the master and
+`colony_supply` on each colony, or reboot the configured computers. Both programs
+must be running for a connection check; completing setup alone does not start
+the master service.
+
+With the default settings, expect confirmation in about 1–5 seconds. Colonies
+send a hello immediately and retry every 5 seconds (`helloSeconds`); the master
+normally processes messages every second (`pollIntervalSeconds`). A busy
+processor can take longer. The master acknowledges connections even when its
+automation is paused, and the colony displays **Master connected; automation
+paused**. Connecting does not grant a supply turn or move items.
+
+The colony reports a lost connection after 30 seconds without a master response
+by default (`messageTimeoutSeconds`). If it keeps waiting, check that its saved
+master ID matches the master's `id`, that the master has a saved route for this
+colony's `id`, and that both computers have rednet connectivity. A reply with
+mismatched delivery/return color labels shows a connection with a channel error;
+correct the labels on both computers before starting transfers. Connection and
+item-delivery timeouts are separate configurable settings.
+
 ## Ender Chest identification and transfer test
 
 First perform read-only checks on both endpoints:
