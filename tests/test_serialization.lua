@@ -133,4 +133,83 @@ Test.case("real interrupted import fault contexts reuse intent safely and remain
     Test.equal(#w.callsFor("import",false),1)
 end)
 
+Test.case("compact journal encoding preserves aliased values and fits a quota that rejects the pretty representation",function()
+    local w=S.world();local store=Store.new("/compact/journal",Config.defaults("master"))
+    local item={name="minecraft:stone",nbt={variant="polished",description="Quotes \" and slash \\ remain intact"}}
+    store.data.requests={}
+    for i=1,40 do store.data.requests[i]={id="R"..i,item=item,status="requested",count=i} end
+    local pending={};for key,value in pairs(store.data) do pending[key]=value end;pending.revision=1
+    local compact=textutils.serialize(pending,{compact=true,allow_repetitions=true})
+    local pretty=textutils.serialize(pending,{allow_repetitions=true})
+    assert(#compact<#pretty and pretty:find("\n",1,true),"fixture does not model compact versus default whitespace")
+    local quota=S.quota(w,math.max(500,#compact)+500)
+    assert(#pretty+500>quota.capacity,"pretty encoding would also fit the compact-only disk quota")
+    assert(store.save());Test.equal(w.files[store.path..".b"],compact);Test.equal(quota.free(),0)
+    local recovered=Store.new(store.path,Config.defaults("master"));recovered.load()
+    Test.equal(recovered.data.revision,1);Test.equal(recovered.data.requests[40].count,40)
+    Test.equal(recovered.data.requests[1].item.nbt.description,item.nbt.description)
+    Test.equal(recovered.data.requests[40].item.name,item.name)
+    assert(recovered.data.requests[1].item~=recovered.data.requests[40].item,"shared tables must reload as independent values")
+end)
+
+Test.case("a completely full ComputerCraft drive can overwrite the alternating target with a smaller verified journal without deleting files",function()
+    local w=S.world();local store=Store.new("/full/journal",Config.defaults("master"))
+    store.data.payload=string.rep("a",4096);store.save()
+    store.data.payload=string.rep("b",8192);store.save()
+    local first,second=w.files[store.path..".a"],w.files[store.path..".b"]
+    local quota=S.quota(w,math.huge);quota.capacity=quota.used();Test.equal(quota.free(),0)
+    store.data.payload=string.rep("c",1024);assert(store.save())
+    Test.equal(store.data.revision,3);Test.equal(w.files[store.path..".a"],first)
+    assert(#w.files[store.path..".b"]<#second and quota.free()>0)
+    Test.equal(quota.stats.writeOpens,1);Test.equal(quota.stats.writes,1);Test.equal(quota.stats.deletes,0)
+    local recovered=Store.new(store.path,Config.defaults("master"));recovered.load()
+    Test.equal(recovered.data.revision,3);Test.equal(recovered.data.payload,string.rep("c",1024))
+end)
+
+Test.case("insufficient journal space fails before opening the alternating slot and preserves both durable revisions",function()
+    local w=S.world();local store=Store.new("/limited/journal",Config.defaults("master"))
+    store.data.payload="revision one";store.save();store.data.payload="revision two";store.save()
+    local quota=S.quota(w,math.huge);quota.capacity=quota.used()+100
+    local before=textutils.serialize(w.files);store.data.payload=string.rep("large",2000)
+    local ok,err=pcall(store.save);assert(not ok and tostring(err):find("Persistence failure",1,true))
+    Test.equal(store.data.revision,2);Test.equal(textutils.serialize(w.files),before)
+    Test.equal(quota.stats.writeOpens,0);Test.equal(quota.stats.writes,0);Test.equal(quota.stats.mkdirs,0);Test.equal(quota.stats.deletes,0)
+    quota.capacity=math.huge;assert(not pcall(store.save),"disk-space failure did not latch later writes")
+    Test.equal(quota.stats.writeOpens,0)
+    local recovered=Store.new(store.path,Config.defaults("master"));recovered.load()
+    Test.equal(recovered.data.revision,2);Test.equal(recovered.data.payload,"revision two")
+end)
+
+Test.case("new journal preflight includes every missing directory and the minimum file allocation before creating anything",function()
+    local w=S.world();local quota=S.quota(w,1499)
+    local store=Store.new("/new/deep/journal",Config.defaults("master"))
+    assert(not pcall(store.save));Test.equal(store.data.revision,0)
+    assert(next(w.files)==nil and next(w.dirs)==nil)
+    Test.equal(quota.stats.mkdirs,0);Test.equal(quota.stats.writeOpens,0)
+    quota.capacity=1500;store=Store.new(store.path,Config.defaults("master"));assert(store.save())
+    Test.equal(quota.used(),1500);Test.equal(quota.free(),0)
+    Test.equal(quota.stats.mkdirs,2);Test.equal(quota.stats.writeOpens,1)
+    local recovered=Store.new(store.path,Config.defaults("master"));recovered.load();Test.equal(recovered.data.revision,1)
+end)
+
+Test.case("a real master transfer whose intent cannot fit the disk stops before exporting and leaves both original journals intact",function()
+    local w,m=pair();m.rs.add({name="minecraft:stone"},8)
+    local save=m.store.save;local quota,before,revision
+    m.store.save=function()
+        if m.store.data.master.pendingTransfer and m.store.data.master.pendingTransfer.intent and not quota then
+            quota=S.quota(w,math.huge);quota.capacity=quota.used()
+            before=textutils.serialize(w.files);revision=m.store.data.revision
+        end
+        return save()
+    end
+    local ok,err=pcall(function() for _=1,30 do w.step() end end)
+    assert(not ok and tostring(err):find("Persistence failure",1,true),"the full drive accepted an enlarged write-ahead intent")
+    assert(quota and m.store.fault);Test.equal(m.store.data.revision,revision)
+    Test.equal(textutils.serialize(w.files),before);Test.equal(quota.stats.writeOpens,0);Test.equal(quota.stats.writes,0)
+    Test.equal(#w.callsFor("export",true),0);Test.equal(w.count(w.channels.D2,{name="minecraft:stone"}),0)
+    quota.capacity=math.huge;m.restart()
+    w.untilTrue(function() local item=w.computers[2].rs.items[w.identity({name="minecraft:stone"})];return item and item.amount==4 end)
+    Test.equal(#w.callsFor("export",true),1);Test.equal(#w.callsFor("import",false),1)
+end)
+
 return true

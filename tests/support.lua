@@ -15,7 +15,8 @@ local function encoded(value,options)
     options=options or {}
     for _,key in ipairs({"compact","allow_repetitions"}) do assert(options[key]==nil or type(options[key])=="boolean","bad serialization option "..key) end
     local tracking={}
-    local function encode(current)
+    local function encode(current,depth)
+        depth=depth or 0
         local kind=type(current)
         if kind=="string" then return string.format("%q",current) end
         if kind=="number" then
@@ -32,9 +33,15 @@ local function encoded(value,options)
         tracking[current]=true
         local keys={};for key in pairs(current) do keys[#keys+1]=key end
         table.sort(keys,function(a,b) return tostring(a)<tostring(b) end)
-        local entries={};for _,key in ipairs(keys) do entries[#entries+1]="["..encode(key).."]="..encode(current[key]) end
+        local entries={}
+        for _,key in ipairs(keys) do
+            local prefix=options.compact and "" or string.rep("  ",depth+1)
+            local separator=options.compact and "=" or " = "
+            entries[#entries+1]=prefix.."["..encode(key,depth+1).."]"..separator..encode(current[key],depth+1)
+        end
         if options.allow_repetitions then tracking[current]=nil else tracking[current]=false end
-        return "{"..table.concat(entries,",").."}"
+        if options.compact or #entries==0 then return "{"..table.concat(entries,",").."}" end
+        return "{\n"..table.concat(entries,",\n")..",\n"..string.rep("  ",depth).."}"
     end
     return encode(value)
 end
@@ -71,6 +78,8 @@ function S.world()
     _G.sleep=function(seconds) w.advance(seconds) end
     _G.fs={exists=function(path) return w.files[path]~=nil or w.dirs[path]==true end,
         getDir=function(path) return path:match("^(.*)/[^/]+$") or "" end,
+        getSize=function(path) assert(w.files[path]~=nil,"missing file");return #w.files[path] end,
+        getFreeSpace=function() return math.huge end,
         makeDir=function(path) w.dirs[path]=true end,
         delete=function(path) w.files[path]=nil;w.dirs[path]=nil end,
         move=function(source,target) assert(w.files[source]~=nil,"missing source");assert(w.files[target]==nil,"target exists");w.files[target]=w.files[source];w.files[source]=nil end,
@@ -242,6 +251,51 @@ function S.world()
     end
     function w.tick(id) local computer=assert(w.computers[id]);return w.at(id,computer.engine.tick) end
     return w
+end
+
+-- Optional writable-mount model for disk tests. ComputerCraft charges at least
+-- 500 bytes per file and directory; opening an existing file in "w" refunds
+-- its previous size before subsequent writes enforce the remaining quota.
+-- See CC:Tweaked WritableFileMount.java createDirectory/openForWrite/write.
+function S.quota(w,capacity)
+    local q={capacity=capacity,stats={writeOpens=0,writes=0,mkdirs=0,deletes=0}}
+    function q.used()
+        local used=0
+        for _,source in pairs(w.files) do used=used+math.max(500,#source) end
+        for path,present in pairs(w.dirs) do if present and path~="" and path~="/" then used=used+500 end end
+        return used
+    end
+    function q.free() return q.capacity-q.used() end
+    function q.reset() for key in pairs(q.stats) do q.stats[key]=0 end end
+    local originalOpen,originalDelete=fs.open,fs.delete
+    fs.getFreeSpace=function() return q.free() end
+    fs.makeDir=function(path)
+        if path=="" or path=="/" or w.dirs[path] then return end
+        local parent=fs.getDir(path);if parent~="" and parent~="/" and not w.dirs[parent] then fs.makeDir(parent) end
+        assert(q.free()>=500,"Out of space")
+        q.stats.mkdirs=q.stats.mkdirs+1;w.dirs[path]=true
+    end
+    fs.open=function(path,mode)
+        if mode=="r" then return originalOpen(path,mode) end
+        assert(mode=="w","quota fixture only supports r/w")
+        q.stats.writeOpens=q.stats.writeOpens+1
+        if w.writeFail then return nil,"Write failure" end
+        local parent=fs.getDir(path)
+        if parent~="" and parent~="/" and not w.dirs[parent] then return nil,"No such directory" end
+        local previous=w.files[path]
+        if previous==nil and q.free()<500 then return nil,"Out of space" end
+        w.files[path]=""
+        local closed=false
+        return {write=function(source)
+            assert(not closed,"Closed file")
+            local nextSource=w.files[path]..tostring(source)
+            local extra=math.max(500,#nextSource)-math.max(500,#w.files[path])
+            assert(q.free()>=extra,"Out of space")
+            q.stats.writes=q.stats.writes+1;w.files[path]=nextSource
+        end,close=function() closed=true end}
+    end
+    fs.delete=function(path) q.stats.deletes=q.stats.deletes+1;return originalDelete(path) end
+    return q
 end
 
 function S.request(id,name,count,nbt)

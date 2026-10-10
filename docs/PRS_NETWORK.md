@@ -549,6 +549,38 @@ statuses when their next turn completes. If restart reports **TURN_INTERRUPTED**
 close and use the corresponding reconciliation command or action described
 above; retained transfer safeguards still apply.
 
+### Recovering from a full computer disk
+
+1. Pause **Run supply automation** on the master, then stop the server or leave
+   the singleplayer world. If the full disk prevents saving the pause setting,
+   after increasing the quota stop the master application and startup launcher
+   at the shell, run `colony_master set automationEnabled false`, then repair
+   and reboot it as below.
+2. In the existing `<world>/serverconfig/computercraft-server.toml`, change the
+   root setting to `computer_space_limit = 10000000` (10 MB), then restart the
+   server or reopen the world. A computer `reboot` alone does not apply the new
+   capacity. This keeps computer IDs, files, journals, and inventories intact.
+3. On the master and **every** colony supply computer, stop the application and
+   startup launcher to reach the shell, run `install_colony --repair`, then
+   run `reboot`. Repair fetches this fix even though the
+   release remains 4.0.0; it preserves configuration and request/transfer journals.
+   Do not use `CLEAN`, delete journal slots, or empty delivery chests to force a retry.
+4. Keep the master and affected colony programs running with new automation
+   paused. Existing turns still finish their original batch/result/acknowledgment
+   handshake. If Stardust retains an interrupted-transfer fault, use **HEALTH →
+   RECONCILE** on its own colony screen once that turn closes. If reconciliation
+   says to wait for the master result, leave both programs running and retry
+   after the original turn finishes.
+5. Resume master automation only after reconciliation succeeds and the active
+   fault clears. **Reconciliation queued** is not success: check **HISTORY** for
+   the successful **RECOVERY** / **RECONCILED** result. A blocked result requires
+   inspection of the reported transfer; do not reset its ledger to bypass it.
+
+The **ERRORS** page contains recorded history; use **HEALTH** for current faults.
+Old errors, including terminal lines labeled **RECORDED**, remain after recovery;
+their presence alone does not mean supply is still stopped. An active **ERROR**
+or stopped processor still needs attention.
+
 For updates, pause the master, let turns finish, then use the shared update control
 or the same installer:
 

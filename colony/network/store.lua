@@ -1,5 +1,22 @@
 -- Two-slot persistent journal. Never continue a mutation after a failed save.
 local M = {}
+-- CC:Tweaked charges at least 500 bytes for each file and directory.
+local MINIMUM_FILE_SIZE = 500
+local function checkSpace(target,source,directory)
+    local free=fs.getFreeSpace(target)
+    if free=="unlimited" then return end
+    assert(type(free)=="number" and free>=0,"Cannot determine available persistent journal space")
+    local reclaim=fs.exists(target) and math.max(fs.getSize(target),MINIMUM_FILE_SIZE) or 0
+    local required=math.max(#source,MINIMUM_FILE_SIZE)
+    local missing=directory
+    while missing~="" and not fs.exists(missing) do
+        required=required+MINIMUM_FILE_SIZE
+        missing=fs.getDir(missing)
+    end
+    -- Opening this alternating slot with "w" reclaims its previous footprint.
+    assert(required<=free+reclaim,"Out of space for persistent journal (need "..required
+        .." bytes; "..(free+reclaim).." available including the replaced slot)")
+end
 local function read(path)
     if not fs.exists(path) then return nil end
     local h=fs.open(path,"r"); if not h then error("Cannot read journal "..path,0) end
@@ -29,9 +46,11 @@ function M.new(path,config)
         local ok,err=pcall(function()
             -- CC:Tweaked stores shared tables by value with this option, while
             -- still rejecting cycles. Serialize before touching either slot.
-            local source=textutils.serialize(pending,{allow_repetitions=true})
+            local source=textutils.serialize(pending,{compact=true,allow_repetitions=true})
             assert(type(source)=="string","Persistent journal serialization returned no text")
-            local directory=fs.getDir(path); if directory~="" and not fs.exists(directory) then fs.makeDir(directory) end
+            local directory=fs.getDir(path)
+            checkSpace(target,source,directory)
+            if directory~="" and not fs.exists(directory) then fs.makeDir(directory) end
             local h=assert(fs.open(target,"w"),"Cannot write persistent journal")
             h.write(source); h.close()
             local verify=assert(fs.open(target,"r")); local saved=verify.readAll(); verify.close()

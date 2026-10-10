@@ -71,6 +71,15 @@ local function timeOf(value)
     return tostring(value or "--:--:--")
 end
 
+local function colonyFailure(colony)
+    local state=tostring(colony.status or colony.phase or colony.state or ""):lower()
+    local explicit=textOf(colony.error or colony.routeError)
+    if state:find("error",1,true) or state=="failed" or explicit~="" then
+        local detail=textOf(colony.detail or colony.error or colony.routeError)
+        return detail~="" and detail or "Colony reports an error; check its HEALTH screen."
+    end
+end
+
 function M.new(config, store, engine, io, updater, options)
     options=options or {}
     local self = {view="home", pages={}, edit=nil, route=nil, routeSelections={}, notice=nil, checkingUpdate=false}
@@ -442,6 +451,15 @@ function M.new(config, store, engine, io, updater, options)
                 rows[#rows+1]={label="Supply",detail=detail,ok=ok,severity=ok and "OK" or (warning and "WARNING" or "ERROR")}
             end
         end
+        if role()=="master" then
+            for _,colony in ipairs(list(snapshot.colonies)) do
+                local detail=colonyFailure(colony)
+                if detail then
+                    rows[#rows+1]={label=tostring(colony.label or colony.name or "Colony").." ["..tostring(colony.id or colony.colonyId or "?").."]",
+                        detail=detail,ok=false,severity="ERROR"}
+                end
+            end
+        end
         if #rows==0 then
             local ok=h.overall~=false and h.ok~=false
             rows[1]={label="Supply",detail=h.detail or (ok and "Ready" or "Check configuration and peripheral connections."),ok=ok,severity=ok and "OK" or "ERROR"}
@@ -482,9 +500,18 @@ function M.new(config, store, engine, io, updater, options)
             row(12,"COLONIES  (routes in SETTINGS)",C.title,function() self.view="routes"; draw() end)
             local y=13
             for _,colony in ipairs(list(snapshot.colonies or config.colonies)) do
-                row(y,tostring(colony.label or colony.name or "Colony").." ["..tostring(colony.id or colony.colonyId or "?").."] "
+                local label=tostring(colony.label or colony.name or "Colony").." ["..tostring(colony.id or colony.colonyId or "?").."]"
+                local detail=colonyFailure(colony)
+                row(y,label.." "
                     .. tostring(colony.status or colony.phase or colony.state or (colony.online==false and "OFFLINE" or "")),
-                    colony.online==false and C.warn or C.text)
+                    (detail or colony.online==false) and C.warn or C.text,detail and function()
+                        self.notice=label..": "..detail;self.view="health"
+                        local _,h=screen.size()
+                        for index,check in ipairs(healthRows()) do
+                            if check.label==label then self.pages.health=math.floor((index-1)/math.max(1,h-7))+1;break end
+                        end
+                        draw()
+                    end or nil)
                 y=y+1
             end
         else
@@ -554,7 +581,7 @@ function M.new(config, store, engine, io, updater, options)
         local w,h=screen.size()
         local records=errors()
         local page=Util.clamp(self.pages.errors or 1,1,math.max(1,#records)); self.pages.errors=page
-        frame("ERROR / DEBUG DETAILS  "..page.."/"..math.max(1,#records),#records.." recorded; unresolved safety faults remain blocking.",#records>0 and C.warn or C.good)
+        frame("ERROR / DEBUG DETAILS  "..page.."/"..math.max(1,#records),#records.." recorded; see HEALTH for current status.",#records>0 and C.warn or C.good)
         if #records==0 then row(6,"No recorded errors.",C.good)
         else
             local e=records[page]
@@ -877,7 +904,7 @@ function M.new(config, store, engine, io, updater, options)
         local currentErrors=errors()
         if #currentErrors>0 then
             local e=currentErrors[1]
-            lines[#lines+1]={text=tostring(e.severity or "ERROR")..": "..tostring(e.code or "").." "..textOf(e),
+            lines[#lines+1]={text="RECORDED "..tostring(e.severity or "ERROR"):upper().." "..timeOf(e.time or e.at)..": "..tostring(e.code or "").." "..textOf(e),
                 color=tostring(e.severity or ""):upper()=="WARNING" and C.warn or C.danger}
         end
         if updater and updater.checkError then lines[#lines+1]={text="WARNING: Update check failed - "..tostring(updater.checkError),color=C.warn} end
