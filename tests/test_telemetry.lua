@@ -113,12 +113,17 @@ Test.case("maximum telemetry configuration remains inside protocol limits with e
         imported=16,staged=16,detail=string.rep("x",600),firstSeen=1,lastSeen=2,lastResponse=3,phaseSince=4,craftStartedAt=5,deliveryStartedAt=6,completedAt=7,deadline=8} end
     for i=1,200 do f.view.history[i]={kind="EVENT",code="CODE",message=string.rep("y",600),severity="INFO",time=i,detail="details",item="minecraft:stone",count=64,
         context={requestId="R",shipmentId="D",colonyId=2,computerId=2,item="minecraft:stone",count=64,amount=64,reported=64,actualDelta=64,error="detail",kind="IMPORT",direction="IN",beforeChest=64,afterChest=0}} end
-    for i=1,100 do f.view.errors[i]=S.copy(f.view.history[i]) end
+    for i=1,100 do
+        f.view.errors[i]=S.copy(f.view.history[i])
+        f.view.errors[i].context.intent={kind="import",count=64,chest=string.rep("c",128),reported=64,beforeChest=64,
+            callError=string.rep("e",512),item={name="minecraft:stone",nbt={secret="private-intent-nbt"}}}
+    end
     local message=f.publish();assert(Protocol.valid(message),"maximum dashboard packet exceeds protocol node budget")
     assert(message.snapshot.shown.requests<=1024)
     Test.equal(message.snapshot.totals.requests,1024)
     assert(type(message.snapshot.truncated)=="table" and message.snapshot.truncated.requests>0)
     Test.equal(message.snapshot.shown.requests+message.snapshot.truncated.requests,1024)
+    assert(not textutils.serialize(message.snapshot):find("private-intent-nbt",1,true))
 end)
 
 Test.case("telemetry requires a durable boot identity and never silently starts after failed persistence",function()
@@ -137,6 +142,26 @@ Test.case("removed telemetry routes cannot retain old cached dashboards or recei
     f.w.at(1,f.master.telemetry.tick)
     local refresh=0;for _,packet in ipairs(f.w.sent) do if packet.to==2 and packet.message.kind=="telemetry_request" then refresh=refresh+1 end end
     Test.equal(refresh,1)
+end)
+
+Test.case("telemetry retains a bounded transfer intent summary with unknown versus zero results while dropping raw item and session metadata",function()
+    local f=fixture();local rawIntent={kind="import",count=4,chest="delivery-"..string.rep("x",1000),beforeChest=4,
+        callError="NOT_CONNECTED\n"..string.rep("e",1000),item={name="minecraft:stone",nbt={secret="private-nbt-payload"}},
+        session={secret="private-session-payload"},raw={secret="private-intent-payload"}}
+    f.view.errors={{code="TRANSFER_DESYNC",time=100,message="Unknown import",context={intent=rawIntent,actualDelta=0,error="NOT_CONNECTED"}},
+        {code="TRANSFER_DESYNC",time=101,message="Known zero",context={intent=S.copy(rawIntent),reported=0,actualDelta=0}}}
+    f.view.errors[2].context.intent.reported=0
+    local message=f.publish();assert(Protocol.valid(message));assert(f.accept(message))
+    for _,snapshot in ipairs({message.snapshot,f.get()}) do
+        local unknown,zero=snapshot.errors[1].context.intent,snapshot.errors[2].context.intent
+        Test.equal(unknown.kind,"import");Test.equal(unknown.count,4);Test.equal(unknown.beforeChest,4)
+        Test.equal(unknown.item,"minecraft:stone");assert(unknown.reported==nil);Test.equal(zero.reported,0)
+        Test.equal(snapshot.errors[1].context.actualDelta,0);Test.equal(snapshot.errors[2].context.reported,0)
+        assert(#unknown.chest<=256 and #unknown.callError<=256 and not unknown.callError:find("[%c]"))
+        assert(unknown.session==nil and unknown.raw==nil and unknown.nbt==nil)
+        assert(not textutils.serialize(snapshot):find("private-",1,true),"private transfer metadata escaped the intent summary whitelist")
+    end
+    Test.equal(#f.w.calls,0)
 end)
 
 return true

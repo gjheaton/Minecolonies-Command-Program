@@ -44,7 +44,7 @@ function M.run(role,...)
     end
     local matcher=Matcher.new(config,store)
     local io=IO.new(config,store,matcher)
-    if mode=="diag" or mode=="diagnostics" then Diagnostics.printReport(config,io); return end
+    if mode=="diag" or mode=="diagnostics" then Diagnostics.printReport(config,io,store); return end
     if mode=="monitors" then
         print("All supply monitors: 5 blocks wide x 3 high, scale 0.5 (100 x 38 characters).")
         for _,monitor in ipairs(io.monitors()) do

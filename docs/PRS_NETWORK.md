@@ -549,6 +549,36 @@ statuses when their next turn completes. If restart reports **TURN_INTERRUPTED**
 close and use the corresponding reconciliation command or action described
 above; retained transfer safeguards still apply.
 
+### Unknown colony transfer result
+
+For local **TRANSFER_DESYNC: Transfer result unknown**, pause master automation.
+Stop the affected colony application and startup launcher to reach the shell,
+then fetch the latest same-version fix and run its read-only diagnostic:
+
+```lua
+install_colony --repair
+colony_supply diag
+```
+
+The report shows the selected RS Bridge name, `isConnected`, stock-read result,
+and any held operation, item, chest, quantity, and reported count (**UNKNOWN**
+when absent). An older journal may lack the bridge's original error reason.
+
+Advanced Peripherals 1.20.1 can return `nil, NOT_CONNECTED` when the bridge cannot
+access an RS network. Check the colony warehouse's RS Bridge, cables, controller,
+storage routing, and chunk loading. `isConnected = true` alone does not prove
+the controller has power. For named transfers, the bridge and chest must be
+accessible on the same enabled CC wired network, using the bridge's remote
+peripheral name. A target outside that scope can return `0, INVALID_TARGET`,
+which differs from an unknown result.
+
+A zero observed chest delta plus an unknown reported count does **not** justify
+resetting or retrying the transfer. Diagnose the connection without repeatedly
+attempting transfers. Fixing it leaves the existing unknown intent held: inspect
+the physical chest and warehouse against the retained ledger before deciding on
+recovery. Repair and diagnostics do not clear that intent or guarantee that
+automatic reconciliation will succeed.
+
 ### Recovering from a full computer disk
 
 1. Pause **Run supply automation** on the master, then stop the server or leave

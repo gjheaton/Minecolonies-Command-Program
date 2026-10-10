@@ -16,7 +16,7 @@ local function verify(io,config,fn)
         io.wait(config.transferPollSeconds)
     until false
 end
-function M.printReport(config,io)
+function M.printReport(config,io,store)
     print("MineColonies "..config.role.." v"..Config.VERSION)
     local health=io.health()
     for name,check in pairs(health.checks) do print((check.ok and "OK   " or "FAIL ")..name..": "..tostring(check.detail)) end
@@ -35,6 +35,41 @@ function M.printReport(config,io)
         for _,monitor in ipairs(io.monitors()) do
             print((monitor.sizeOK and monitor.color and "OK   " or "WARN ")..monitor.name..": "..tostring(monitor.width).." x "..tostring(monitor.height)..", color="..tostring(monitor.color)..", "..monitor.assigned)
         end
+    end
+    -- Inspect the RS connection only on this explicit diagnostic command.
+    -- Seeing a bridge peripheral does not prove it is joined to an RS grid.
+    local bridgeStatus=io.bridgeStatus and io.bridgeStatus() or {}
+    local configuredBridge=config.role=="master" and config.playerBridgeName or config.colonyBridgeName
+    print("RS bridge: "..tostring(bridgeStatus.name or configuredBridge or "automatic"))
+    print("RS network connected: "..(type(bridgeStatus.connected)=="boolean" and tostring(bridgeStatus.connected) or "UNKNOWN")
+        ..(bridgeStatus.error and (" - "..tostring(bridgeStatus.error)) or ""))
+    local readStock=config.role=="master" and io.stock or io.colonyStock
+    if type(readStock)=="function" then
+        local items,err=readStock()
+        print("RS stock read: "..(type(items)=="table" and "OK" or ("FAIL - "..tostring(err or "unknown result"))))
+    end
+    local data=store and store.data
+    local client=config.role=="supply" and type(data)=="table" and data.client
+    local intent=type(client)=="table" and client.intent
+    if type(intent)=="table" then
+        local operation=intent.kind=="import" and "Delivery import" or intent.kind=="return" and "Overflow return" or tostring(intent.kind or "UNKNOWN")
+        print("HELD TRANSFER: "..operation)
+        print("Item: "..tostring(type(intent.item)=="table" and intent.item.name or "UNKNOWN").." x"..tostring(intent.count or "UNKNOWN"))
+        print("Chest: "..tostring(intent.chest or "UNKNOWN"))
+        print("Before chest: "..tostring(intent.beforeChest or "UNKNOWN").."; reported: "..tostring(intent.reported==nil and "UNKNOWN" or intent.reported))
+        for i=#(data.errors or {}),1,-1 do
+            local context=data.errors[i].context
+            local original=type(context)=="table" and context.intent
+            if type(original)=="table" and intent.startedAt~=nil and original.startedAt==intent.startedAt
+                and original.kind==intent.kind and original.chest==intent.chest
+                and original.session==intent.session and original.turn==intent.turn
+                and type(context.actualDelta)=="number" then
+                print("Recorded chest change: "..context.actualDelta);break
+            end
+        end
+        print("Bridge error: "..tostring(intent.callError or "none recorded"))
+        if intent.shipmentId~=nil then print("Shipment: "..tostring(intent.shipmentId)) end
+        print("Inspection only; the transfer and its ledger remain unchanged.")
     end
 end
 function M.handleClient(config,store,io,message,canProbe)

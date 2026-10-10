@@ -31,6 +31,7 @@ local CONTEXT_FIELDS = {
     "requestId", "shipmentId", "colonyId", "computerId", "item", "count", "amount",
     "reported", "actualDelta", "error", "reason", "expected", "observed", "kind", "direction", "beforeChest", "afterChest",
 }
+local INTENT_FIELDS={"kind","count","chest","reported","beforeChest","callError"}
 
 local function finite(value)
     return type(value) == "number" and value == value and value ~= math.huge and value ~= -math.huge
@@ -163,6 +164,14 @@ local function compact(source, config)
                 local context = map()
                 fields(context, rawContext, CONTEXT_FIELDS)
                 if type(rawContext.item) == "table" then put(context, "item", rawContext.item.name) end
+                if type(rawContext.intent)=="table" then
+                    local intent=map()
+                    fields(intent,rawContext.intent,INTENT_FIELDS)
+                    local item=rawContext.intent.item
+                    local itemName=type(item)=="table" and item.name or item
+                    if type(itemName)=="string" then put(intent,"item",itemName) end
+                    attach(context,"intent",intent)
+                end
                 attach(event, "context", context)
             end
             remaining = remaining - 1

@@ -83,4 +83,53 @@ Test.case("cached colony details do not replace active master transfer faults wi
     end)
 end)
 
+Test.case("actual retained import details render on the native colony and cached read-only master display without storage discovery or mutation",function()
+    local w=D.world();local c=S.computer(w,2,"supply")
+    local prefix="enderchests:ender_chest_"
+    local chestName=prefix..string.rep("s",128-#prefix);Test.equal(#chestName,128)
+    c.config.deliveryChestName=chestName
+    w.chest(2,chestName,"D2");w.chest(2,"returns","R2")
+    c.rs=w.bridge(2,"crs",false);c.integrator=w.integrator(2,"integrator")
+    c.integrator.requests={S.request("R1","minecraft:stone",4)};c.start()
+    local transfers=0;w.devices[2].crs.api.importItemFromPeripheral=function() transfers=transfers+1;return nil,"NOT_CONNECTED" end
+    w.insert(w.channels.D2,{name="minecraft:stone"},4)
+    local delivery={id="D1",requestId="R1",item={name="minecraft:stone"},count=4,verified=true,createdAt=100}
+    w.at(2,c.engine.onMessage,1,{version=1,kind="turn",session="master-1",turn=1,policy={},deliveries={delivery}})
+    c.store.data.client.intent.item.nbt={secret="private-item-metadata"};c.store.data.client.intent.raw={secret="private-transfer-metadata"}
+    c.store.save()
+    local master=S.computer(w,1,"master");master.config.colonies={D.route(2)}
+    local Telemetry=require("colony.network.telemetry")
+    local source=w.at(2,Telemetry.new,c.config,c.store,c.io,c.engine)
+    local receiver=w.at(1,Telemetry.new,master.config,master.store,master.io,{snapshot=function() error("master telemetry requested hardware state") end})
+    w.at(2,source.tick);local packet=assert(w.packet("telemetry",1)).message;assert(w.at(1,receiver.onMessage,2,packet))
+    local monitor=D.surface(100,38);local UI=require("colony.network.ui")
+    local localUI=UI.new(c.config,c.store,c.engine,{monitor=function() end})
+    local remoteUI=UI.new(c.config,master.store,{snapshot=function() return receiver.get(2) end},
+        {monitor=function() return monitor,"remote" end},nil,{readOnly=true,displayOnly=true,monitorName="remote",sourceId=2})
+    localUI.view="errors";remoteUI.view="errors"
+    local before=textutils.serialize(w.files);local previousNames,previousWrap,previousOpen=peripheral.getNames,peripheral.wrap,fs.open
+    local discoveries,opens=0,0
+    peripheral.getNames=function() discoveries=discoveries+1;error("transfer details discovered storage") end
+    peripheral.wrap=function() discoveries=discoveries+1;error("transfer details wrapped storage") end
+    fs.open=function(...) opens=opens+1;return previousOpen(...) end
+    local ok,err=pcall(function()
+        localUI.draw();remoteUI.draw()
+        for _,surface in ipairs({w.terminal,monitor}) do
+            local text=surface.dump()
+            assert(text:find("Operation: Delivery import",1,true) and text:find("Item: minecraft:stone",1,true))
+            assert(text:find("Quantity: 4",1,true) and text:find("Reported result: UNKNOWN",1,true))
+            assert(text:find("Before chest: 4",1,true) and text:find("Observed change: 0",1,true))
+            assert(text:find("Bridge error: NOT_CONNECTED",1,true))
+            assert(text:gsub("%s",""):find(chestName,1,true),"the full chest name was lost when the transfer summary wrapped")
+            assert(not text:find("table:",1,true),"a raw intent table address replaced the actionable transfer details")
+        end
+        assert(not textutils.serialize(receiver.get(2)):find("private-",1,true))
+        assert(remoteUI.handleEvent("paste","replacement")==false and remoteUI.handleEvent("key",keys.enter)==false)
+    end)
+    peripheral.getNames=previousNames;peripheral.wrap=previousWrap;fs.open=previousOpen;assert(ok,err)
+    Test.equal(discoveries,0);Test.equal(opens,0);Test.equal(transfers,1);Test.equal(#w.calls,0)
+    Test.equal(textutils.serialize(w.files),before);Test.equal(c.store.data.client.shipments.D1.imported,0)
+    assert(c.store.data.client.intent and c.store.data.client.intent.reported==nil)
+end)
+
 return true

@@ -5,9 +5,9 @@ local M={}
 local function integer(value) return math.max(0,math.floor(tonumber(value) or 0)) end
 local function call(device,method,...)
     if not device or type(device[method])~="function" then return nil,"Missing peripheral method "..method end
-    local ok,value=pcall(device[method],...)
+    local ok,value,detail=pcall(device[method],...)
     if not ok then return nil,tostring(value) end
-    return value
+    return value,detail
 end
 local function resolve(name,wanted)
     if name and name~="" then
@@ -131,6 +131,18 @@ function M.new(config,store,matcher)
         if role=="master" and config.role~="master" then return nil,"Colony clients cannot access PRS" end
         return resolve(role=="master" and config.playerBridgeName or config.colonyBridgeName,"rsBridge")
     end
+    function self.bridgeStatus()
+        local rs,name=bridge(config.role)
+        if not rs then return {connected=false,error=name} end
+        if type(rs.isConnected)~="function" then
+            return {name=name,error="Bridge lacks isConnected; RS connection unknown"}
+        end
+        local connected,err=call(rs,"isConnected")
+        if type(connected)~="boolean" then
+            return {name=name,error=err or "Invalid RS Bridge connection status; connection unknown"}
+        end
+        return {name=name,connected=connected,error=err or (not connected and "NOT_CONNECTED" or nil)}
+    end
     local function stock(role)
         local rs,err=bridge(role); if not rs then return nil,err end
         local items,listErr=call(rs,"listItems")
@@ -239,7 +251,7 @@ function M.new(config,store,matcher)
         local modem=false
         for _,name in ipairs(peripheral.getNames()) do if peripheral.hasType(name,"modem") and rednet.isOpen(name) then modem=true end end
         out.checks.modem={ok=modem,detail=modem and "Rednet modem open" or "Attach/open a wired or wireless modem"}
-        local rs,err=bridge(config.role); out.checks.bridge={ok=rs~=nil,detail=rs and "Bridge connected" or err}
+        local rs,err=bridge(config.role); out.checks.bridge={ok=rs~=nil,detail=rs and "Bridge peripheral visible; use diag to check RS connection" or err}
         if rs then
             local needed=config.usePeripheralTransfer and {"listItems","importItemFromPeripheral","exportItemToPeripheral"} or {"listItems","importItem","exportItem"}
             for _,method in ipairs(needed) do if type(rs[method])~="function" then out.checks.bridge={ok=false,detail="Bridge lacks "..method} end end

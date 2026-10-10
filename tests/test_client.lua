@@ -183,4 +183,55 @@ Test.case("completed requests with partially imported deliveries survive retenti
     Test.equal(c.store.data.client.shipments.D1.imported,6)
     Test.equal(w.count(w.channels.D2,{name="minecraft:stone"}),2)
 end)
+
+Test.case("a bridge NOT_CONNECTED return survives the client intent journal and restart without coercing unknown to zero or retrying",function()
+    local w,c=S.clientFixture();local delivery=shipment();w.insert(w.channels.D2,{name="minecraft:stone"},4)
+    local original=w.devices[2].crs.api.importItemFromPeripheral;local calls=0
+    w.devices[2].crs.api.importItemFromPeripheral=function() calls=calls+1;return nil,"NOT_CONNECTED" end
+    assert(w.grant(1,{delivery}))
+    local intent=c.store.data.client.intent;assert(intent and intent.reported==nil)
+    Test.equal(intent.callError,"NOT_CONNECTED");Test.equal(c.store.data.client.shipments.D1.imported,0)
+    local event=c.store.data.errors[#c.store.data.errors]
+    Test.equal(event.code,"TRANSFER_DESYNC");Test.equal(event.context.error,"NOT_CONNECTED");Test.equal(event.context.actualDelta,0)
+    assert(w.packet("batch").message.clientError);Test.equal(w.packet("batch").message.imports.D1,0)
+    w.devices[2].crs.api.importItemFromPeripheral=function(...) calls=calls+1;return original(...) end
+    w.result(1,{delivery},response("error"));c.restart();w.tick(2)
+    intent=c.store.data.client.intent;assert(intent and intent.reported==nil);Test.equal(intent.callError,"NOT_CONNECTED")
+    local found=false
+    for _,record in ipairs(c.store.data.errors) do
+        if record.code=="TRANSFER_DESYNC" then found=true;Test.equal(record.context.error,"NOT_CONNECTED");Test.equal(record.context.actualDelta,0) end
+    end
+    assert(found);local repaired,err=w.at(2,c.engine.reconcile)
+    assert(not repaired and tostring(err):find("no reliable return value",1,true))
+    w.grant(2,{delivery});w.tick(2)
+    Test.equal(calls,1);Test.equal(#w.callsFor("import",false),0)
+    Test.equal(w.count(w.channels.D2,{name="minecraft:stone"}),4);Test.equal(c.store.data.client.shipments.D1.imported,0)
+    assert(c.store.data.client.intent and c.store.data.client.fault)
+end)
+
+Test.case("a plain nil bridge result keeps the generic unknown error and remains held after restart",function()
+    local w,c=S.clientFixture();local delivery=shipment();w.insert(w.channels.D2,{name="minecraft:stone"},4)
+    local calls=0;w.devices[2].crs.api.importItemFromPeripheral=function() calls=calls+1;return nil end
+    w.grant(1,{delivery});Test.equal(c.store.data.client.intent.callError,"Transfer result unknown")
+    Test.equal(c.store.data.errors[#c.store.data.errors].context.error,"Transfer result unknown")
+    w.result(1,{delivery},response("error"));c.restart();w.tick(2)
+    local repaired,err=w.at(2,c.engine.reconcile);assert(not repaired and tostring(err):find("no reliable return value",1,true))
+    Test.equal(calls,1);Test.equal(c.store.data.client.shipments.D1.imported,0)
+    Test.equal(w.count(w.channels.D2,{name="minecraft:stone"}),4)
+end)
+
+Test.case("a definite zero with a bridge detail accounts nothing without an unknown intent and a later granted positive import accounts once",function()
+    local w,c=S.clientFixture();local delivery=shipment();w.insert(w.channels.D2,{name="minecraft:stone"},4)
+    local api=w.devices[2].crs.api;local original=api.importItemFromPeripheral;local calls=0
+    api.importItemFromPeripheral=function() calls=calls+1;return 0,"INVALID_TARGET" end
+    w.grant(1,{delivery})
+    assert(c.store.data.client.intent==nil and c.store.data.client.fault==nil)
+    Test.equal(w.packet("batch").message.imports.D1,0);Test.equal(w.count(w.channels.D2,{name="minecraft:stone"}),4)
+    w.result(1,{delivery},response("in progress"))
+    api.importItemFromPeripheral=function(...) calls=calls+1;return original(...) end
+    w.grant(2,{delivery});Test.equal(w.packet("batch").message.imports.D1,4)
+    w.grant(2,{delivery});Test.equal(calls,2);Test.equal(#w.callsFor("import",false),1)
+    assert(c.store.data.client.intent==nil and c.store.data.client.fault==nil)
+    Test.equal(w.count(w.channels.D2,{name="minecraft:stone"}),0);Test.equal(c.rs.items[w.identity({name="minecraft:stone"})].amount,4)
+end)
 return true

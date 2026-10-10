@@ -587,10 +587,36 @@ function M.new(config, store, engine, io, updater, options)
             local e=records[page]
             row(5,timeOf(e.time or e.at).." ["..tostring(e.severity or "ERROR").."] "..tostring(e.code or ""),
                 tostring(e.severity or ""):upper()=="WARNING" and C.warn or C.danger)
-            local text=textOf(e).."\n"..textOf(e.context)
+            local context=type(e.context)=="table" and e.context or {}
+            local intent=type(context.intent)=="table" and context.intent or nil
+            local text=textOf(e).."\n"..textOf(context)
+            local shown={}
+            if intent then
+                local function value(raw)
+                    if type(raw)=="table" then raw=raw.name end
+                    if type(raw)=="string" or type(raw)=="number" or type(raw)=="boolean" then return tostring(raw) end
+                    return "UNKNOWN"
+                end
+                local operation=({import="Delivery import (chest -> colony RS)", ["return"]="Overflow return (colony RS -> chest)"})[intent.kind]
+                    or value(intent.kind)
+                local reported=context.reported
+                if reported==nil then reported=intent.reported end
+                text="Operation: "..operation.."\nItem: "..value(intent.item).."\nQuantity: "..value(intent.count)
+                    .."\nChest: "..value(intent.chest).."\nReported result: "..value(reported)
+                    .."\nBefore chest: "..value(intent.beforeChest or context.beforeChest)
+                    .."\nObserved change: "..value(context.actualDelta)
+                local bridgeError=intent.callError or context.error
+                if bridgeError and tostring(bridgeError)~="" then text=text.."\nBridge error: "..value(bridgeError) end
+                text=text.."\n"..textOf(e)
+                shown={item=true,reported=true,beforeChest=true,actualDelta=true}
+            end
             if type(e.context)=="table" then
                 for _,key in ipairs({"item","colonyId","requestId","shipmentId","reason","expected","observed","reported","actualDelta","beforeChest","afterChest"}) do
-                    if e.context[key]~=nil then text=text.."\n"..key..": "..tostring(e.context[key]) end
+                    if e.context[key]~=nil and not shown[key] then
+                        local value=e.context[key]
+                        if key=="item" and type(value)=="table" then value=value.name or "UNKNOWN" end
+                        text=text.."\n"..key..": "..tostring(value)
+                    end
                 end
             end
             for i,line in ipairs(Util.wrapText(text,math.max(1,w-4))) do row(5+i,line,C.text) end

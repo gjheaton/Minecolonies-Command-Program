@@ -86,4 +86,68 @@ Test.case("unknown stack limits reserve a chest slot until inventory details tea
         Test.equal(c.io.capacity("delivery",learned,pearl,0),31)
     end)
 end)
+
+Test.case("real bridge IO preserves returned failure reasons and thrown errors while keeping unknown zero and positive quantities distinct",function()
+    for _,mode in ipairs({"reason","unknown","throw","zero","positive"}) do
+        local w,c=S.clientFixture();w.insert(w.channels.D2,{name="minecraft:stone"},4)
+        local original=w.devices[2].crs.api.importItemFromPeripheral;local calls=0
+        w.devices[2].crs.api.importItemFromPeripheral=function(filter,chest)
+            calls=calls+1
+            if mode=="reason" then return nil,"NOT_CONNECTED" end
+            if mode=="unknown" then return nil end
+            if mode=="throw" then error("Bridge disconnected during import",0) end
+            if mode=="zero" then return 0,"INVALID_TARGET" end
+            return original(filter,chest),"successful import detail"
+        end
+        local count,err
+        w.at(2,function() count,err=c.io.importColony({name="minecraft:stone"},4,"delivery") end)
+        Test.equal(calls,1)
+        if mode=="reason" then Test.equal(count,nil);Test.equal(err,"NOT_CONNECTED")
+        elseif mode=="unknown" then Test.equal(count,nil);Test.equal(err,"Transfer result unknown")
+        elseif mode=="throw" then Test.equal(count,nil);Test.equal(err,"Bridge disconnected during import")
+        elseif mode=="zero" then Test.equal(count,0);Test.equal(err,nil)
+        else Test.equal(count,4);Test.equal(err,nil) end
+        Test.equal(w.count(w.channels.D2,{name="minecraft:stone"}),mode=="positive" and 0 or 4)
+    end
+end)
+
+Test.case("bridge connection diagnostics select the configured role bridge and preserve unknown states without reading or mutating RS storage",function()
+    for _,mode in ipairs({"true","false","false_reason","nil_reason","invalid","throw","no_method","missing"}) do
+        local w,c=S.clientFixture();w.bridge(2,"prs",true);w.bridge(2,"other-crs",false)
+        local api=w.devices[2].crs.api;local statusCalls=0
+        api.listItems=function() error("connection status queried stock",0) end
+        api.importItemFromPeripheral=function() error("connection status imported",0) end
+        api.exportItemToPeripheral=function() error("connection status exported",0) end
+        api.isConnected=function()
+            statusCalls=statusCalls+1
+            if mode=="true" then return true end
+            if mode=="false" then return false end
+            if mode=="false_reason" then return false,"Network controller is offline" end
+            if mode=="nil_reason" then return nil,"NOT_CONNECTED" end
+            if mode=="invalid" then return "probably" end
+            error("Connection query unavailable",0)
+        end
+        if mode=="no_method" then api.isConnected=nil end
+        if mode=="missing" then c.config.colonyBridgeName="missing-crs" end
+        local before=textutils.serialize(w.files);local revision=c.store.data.revision;local result
+        w.at(2,function() result=c.io.bridgeStatus() end)
+        if mode=="missing" then
+            Test.equal(result.connected,false);assert(result.error:find("missing-crs",1,true));Test.equal(statusCalls,0)
+        else
+            Test.equal(result.name,"crs")
+            Test.equal(statusCalls,mode=="no_method" and 0 or 1)
+            if mode=="true" then Test.equal(result.connected,true);Test.equal(result.error,nil)
+            elseif mode=="false" then Test.equal(result.connected,false);Test.equal(result.error,"NOT_CONNECTED")
+            elseif mode=="false_reason" then Test.equal(result.connected,false);Test.equal(result.error,"Network controller is offline")
+            else
+                Test.equal(result.connected,nil)
+                if mode=="nil_reason" then Test.equal(result.error,"NOT_CONNECTED")
+                elseif mode=="throw" then Test.equal(result.error,"Connection query unavailable")
+                elseif mode=="no_method" then assert(result.error:find("lacks isConnected",1,true))
+                else assert(result.error:find("connection unknown",1,true)) end
+            end
+        end
+        Test.equal(#w.calls,0);Test.equal(c.store.data.revision,revision);Test.equal(textutils.serialize(w.files),before)
+    end
+end)
 return true
