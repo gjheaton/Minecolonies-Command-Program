@@ -1,5 +1,6 @@
 -- Hardware boundary. Only the master is allowed to discover or call PRS.
 local Protocol=require("colony.network.protocol")
+local Config=require("colony.network.config")
 local M={}
 local function integer(value) return math.max(0,math.floor(tonumber(value) or 0)) end
 local function call(device,method,...)
@@ -25,11 +26,33 @@ function M.new(config,store,matcher)
     function self.now() return os.epoch and os.epoch("utc")/1000 or os.clock() end
     function self.wait(seconds) sleep(seconds) end
     self.send=Protocol.send
-    function self.monitor()
-        local mon,name=resolve(config.monitorName,"monitor")
+    function self.monitor(nameOverride)
+        local mon,name=resolve(nameOverride or config.monitorName,"monitor")
         if not mon then return nil,nil end
-        if mon.setTextScale then pcall(mon.setTextScale,config.monitorTextScale) end
+        if mon.setTextScale then pcall(mon.setTextScale,Config.DISPLAY.textScale) end
         return mon,name
+    end
+    function self.monitors()
+        local out={}
+        for _,name in ipairs(peripheral.getNames()) do
+            if peripheral.hasType(name,"monitor") then
+                local mon=peripheral.wrap(name)
+                if mon and mon.setTextScale then pcall(mon.setTextScale,Config.DISPLAY.textScale) end
+                local width,height
+                if mon and type(mon.getSize)=="function" then
+                    local ok,w,h=pcall(mon.getSize); if ok then width,height=w,h end
+                end
+                local color=call(mon,"isColor")
+                local assigned=name==config.monitorName and "overview" or "unassigned"
+                for _,route in ipairs(config.colonies or {}) do
+                    if name==route.monitorName then assigned="colony "..tostring(route.id).." ("..tostring(route.label or route.id)..")" end
+                end
+                out[#out+1]={name=name,width=width,height=height,color=color==true,assigned=assigned,
+                    sizeOK=width==Config.DISPLAY.columns and height==Config.DISPLAY.rows}
+            end
+        end
+        table.sort(out,function(a,b) return a.name<b.name end)
+        return out
     end
     function self.inventory(name)
         if type(name)~="string" or name=="" then return nil,"Inventory peripheral name is not configured" end

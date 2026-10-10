@@ -4,6 +4,7 @@ Run with Python + Lupa's Lua 5.2 runtime, for example:
 PYTHONPATH=/workspace/.onboarding/python python3 -m unittest discover -s tests
 """
 from pathlib import Path
+import re
 import unittest
 
 from lupa.lua52 import LuaRuntime
@@ -11,6 +12,11 @@ from lupa.lua52 import LuaRuntime
 
 ROOT = Path(__file__).resolve().parents[1]
 INSTALLER = (ROOT / "install_colony.lua").read_text()
+CURRENT_VERSION = re.search(r'suiteVersion = "([^"]+)"', INSTALLER).group(1)
+_major, _minor, _patch = map(int, CURRENT_VERSION.split("."))
+NEXT_VERSION = f"{_major}.{_minor}.{_patch + 1}"
+LATER_VERSION = f"{_major}.{_minor}.{_patch + 2}"
+PREVIOUS_INSTALLER = (ROOT / "tests/fixtures/installer_4_0_metadata.lua").read_text()
 SOURCE = "https://raw.githubusercontent.com/gjheaton/Minecolonies-Command-Program/supply-master-colony/install_colony.lua"
 PINNED = "https://raw.githubusercontent.com/gjheaton/Minecolonies-Command-Program/" + "a" * 40 + "/install_colony.lua"
 
@@ -193,12 +199,47 @@ class InstallerTests(unittest.TestCase):
             put("/colony/app.cfg", textutils.serialize(cfg))
         ''')
 
+    def seed_previous_v4(self, role="master"):
+        """Seed published 4.0.0 file metadata and persisted schema-4 data."""
+        loader = self.lua.eval('function(body) local c,e=load(body,"old installer","t",{}); assert(c,e); return c("--metadata") end')
+        previous = loader(PREVIOUS_INSTALLER)
+        self.assertEqual(previous.suiteVersion, "4.0.0")
+        self.g.PREVIOUS_INFO = previous
+        self.g.PREVIOUS_INSTALLER = PREVIOUS_INSTALLER
+        self.g.SEED_ROLE = role
+        self.lua.execute('''
+            for _, entry in ipairs(PREVIOUS_INFO.files) do
+                if entry.app == "common" or entry.app == SEED_ROLE or entry.app == "network" then
+                    put(entry.path, "-- MineColonies Control Suite 4.0.0 managed file\\nreturn {}\\n")
+                end
+            end
+            put("/install_colony.lua", PREVIOUS_INSTALLER)
+            local app = PREVIOUS_INFO.apps[SEED_ROLE]
+            put("/colony/app.cfg", textutils.serialize({schema=4,installationSchema=4,role=SEED_ROLE,
+                app=SEED_ROLE,program=app.program,displayName=app.displayName,appVersion=app.version,
+                suiteVersion=PREVIOUS_INFO.suiteVersion,suiteSourceUrl=SOURCE_URL,customExtension="keep this"}))
+            put("/colony/network.cfg", textutils.serialize({schema=4,role=SEED_ROLE,
+                monitorName="monitor_legacy",monitorTextScale=.5,masterId=9,autoCraftEnabled=false,
+                colonies={{id=17,label="Original colony",deliveryChest="delivery_17",returnChest="returns_17",
+                    deliveryChannel="red/blue/green",returnChannel="yellow/white/black",
+                    overrides={onHandTimeoutSeconds=180}}}}))
+            put("/colony/"..SEED_ROLE.."_v4_state.a", textutils.serialize({schema=4,revision=8,
+                requests={one={id="persistent_request",status="in progress",delivered=12}},history={},errors={}}))
+            put("/colony/"..SEED_ROLE.."_v4_state.b", textutils.serialize({schema=4,revision=9,
+                requests={one={id="persistent_request",status="in progress",delivered=16}},history={},errors={}}))
+            put("/my_other_program.lua", "unrelated")
+        ''')
+        self.assertIsNone(self.g.FILES["/colony/network/telemetry.lua"])
+        self.assertIsNone(self.g.FILES["/colony/network/displays.lua"])
+
     def test_metadata_is_safe_and_every_packaged_file_compiles(self):
         manifest = self.lua.eval('function(body) local c,e=load(body,"manifest","t",{}); assert(c,e); return c() end')(
             (ROOT / "colony/manifest.lua").read_text()
         )
         self.assertEqual(self.info.suiteVersion, manifest.suiteVersion)
         self.assertEqual(self.info.installationSchema, 4)
+        self.assertEqual(self.info.apps.command.version, "3.0.7")
+        self.assertEqual(self.info.components.ui, "1.1.0")
         self.assertEqual(len(self.info.files), len(manifest.files))
         for i in range(1, len(self.info.files) + 1):
             entry = self.info.files[i]
@@ -222,6 +263,8 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(cfg.installedSourceUrl, PINNED)
         self.assertFalse(self.g.fs.exists("/.colony_install_transaction"))
         self.assertIsNotNone(self.g.FILES["/colony/network/diagnostics.lua"])
+        self.assertIsNotNone(self.g.FILES["/colony/network/telemetry.lua"])
+        self.assertIsNotNone(self.g.FILES["/colony/network/displays.lua"])
         self.assertIsNone(self.g.FILES["/colony/network/client.lua"])
         for url in self.g.HTTP_LOG.values():
             if url.startswith("https://raw.githubusercontent.com/"):
@@ -233,6 +276,8 @@ class InstallerTests(unittest.TestCase):
         self.assertIsNone(self.g.FILES["/colony/network/client.lua"])
         self.assertTrue(self.install("supply"))
         self.assertIsNotNone(self.g.FILES["/colony/network/client.lua"])
+        self.assertIsNotNone(self.g.FILES["/colony/network/telemetry.lua"])
+        self.assertIsNotNone(self.g.FILES["/colony/network/displays.lua"])
         self.assertIsNotNone(self.g.FILES["/colony/supply/matcher.lua"])
         self.assertIsNone(self.g.FILES["/colony/network/master.lua"])
         self.assertIsNone(self.g.FILES["/colony_command.lua"])
@@ -277,7 +322,7 @@ class InstallerTests(unittest.TestCase):
         self.g.seedLegacy()
         before = self.snapshot()
         body = self.g.REMOTE_FILES["colony/manifest.lua"]
-        self.g.REMOTE_FILES["colony/manifest.lua"] = body.replace('suiteVersion = "4.0.0"', 'suiteVersion = "9.0.0"')
+        self.g.REMOTE_FILES["colony/manifest.lua"] = body.replace(f'suiteVersion = "{CURRENT_VERSION}"', 'suiteVersion = "9.0.0"')
         with self.assertRaisesRegex(Exception, "metadata disagree"):
             self.install()
         self.assertEqual(self.snapshot(), before)
@@ -320,6 +365,36 @@ class InstallerTests(unittest.TestCase):
         with self.assertRaisesRegex(Exception, "previous installation was restored"):
             self.g.runInstaller("--update", "master", SOURCE)
         self.assertEqual(self.snapshot(), before)
+
+    def test_previous_4_0_update_adds_new_modules_and_preserves_configuration_and_journal(self):
+        for role in ("master", "supply"):
+            with self.subTest(role=role):
+                self.setUp()
+                self.seed_previous_v4(role)
+                before = self.snapshot()
+                # Updates must proceed without destructive confirmation.
+                self.g.CONFIRM = "do not clean"
+                self.assertTrue(self.g.runInstaller("--update", role, SOURCE))
+                for path in ("/colony/network.cfg", f"/colony/{role}_v4_state.a", f"/colony/{role}_v4_state.b"):
+                    self.assertEqual(self.g.FILES[path], before[path], path)
+                cfg = self.g.textutils.unserialize(self.g.FILES["/colony/app.cfg"])
+                self.assertEqual(cfg.appVersion, CURRENT_VERSION)
+                self.assertEqual(cfg.suiteVersion, CURRENT_VERSION)
+                self.assertEqual(cfg.installationSchema, 4)
+                self.assertEqual(cfg.customExtension, "keep this")
+                self.assertIsNotNone(self.g.FILES["/colony/network/telemetry.lua"])
+                self.assertIsNotNone(self.g.FILES["/colony/network/displays.lua"])
+                self.assertEqual(self.g.FILES["/my_other_program.lua"], "unrelated")
+
+    def test_failed_previous_4_0_update_restores_old_package_and_journal(self):
+        self.seed_previous_v4()
+        before = self.snapshot()
+        self.g.FAIL_COPY = "/colony/network/master.lua"
+        with self.assertRaisesRegex(Exception, "previous installation was restored"):
+            self.g.runInstaller("--update", "master", SOURCE)
+        self.assertEqual(self.snapshot(), before)
+        self.assertIsNone(self.g.FILES["/colony/network/telemetry.lua"])
+        self.assertIsNone(self.g.FILES["/colony/network/displays.lua"])
 
     def test_legacy_or_different_role_cannot_use_update(self):
         self.g.seedLegacy()

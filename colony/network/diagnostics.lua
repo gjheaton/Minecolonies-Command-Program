@@ -1,6 +1,7 @@
 -- Ender Chest identity is established by an actual one-item round trip, not
 -- by matching two empty inventory lists or trusting peripheral names.
 local Protocol=require("colony.network.protocol")
+local Config=require("colony.network.config")
 local M={}
 local function countAll(items)
     local count=0; for _,item in pairs(items or {}) do count=count+(item.count or item.amount or 0) end; return count
@@ -16,7 +17,7 @@ local function verify(io,config,fn)
     until false
 end
 function M.printReport(config,io)
-    print("MineColonies "..config.role.." v4.0.0")
+    print("MineColonies "..config.role.." v"..Config.VERSION)
     local health=io.health()
     for name,check in pairs(health.checks) do print((check.ok and "OK   " or "FAIL ")..name..": "..tostring(check.detail)) end
     local names={}
@@ -29,6 +30,12 @@ function M.printReport(config,io)
         else print("FAIL "..tostring(name)..": "..tostring(err)) end
     end
     print("Color labels are user configuration; chesttest verifies the physical channels.")
+    if io.monitors then
+        print("Supply displays: 5 blocks wide x 3 high, text scale 0.5 (100 x 38 characters).")
+        for _,monitor in ipairs(io.monitors()) do
+            print((monitor.sizeOK and monitor.color and "OK   " or "WARN ")..monitor.name..": "..tostring(monitor.width).." x "..tostring(monitor.height)..", color="..tostring(monitor.color)..", "..monitor.assigned)
+        end
+    end
 end
 function M.handleClient(config,store,io,message,canProbe)
     if message.kind~="probe" or type(message.token)~="string" or message.token=="" then return nil end

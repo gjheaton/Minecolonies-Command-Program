@@ -28,7 +28,7 @@ if errors:
 print("Lua 5.2: all Lua sources compile", flush=True)
 try:
     lua.execute("require('tests.support')")
-    for suite in ("tests.test_io", "tests.test_client", "tests.test_network", "tests.test_diagnostics", "tests.test_ui", "tests.test_runtime"):
+    for suite in ("tests.test_io", "tests.test_client", "tests.test_network", "tests.test_diagnostics", "tests.test_ui", "tests.test_displays", "tests.test_telemetry", "tests.test_runtime", "tests.test_runtime_displays"):
         lua.execute(f"require('{suite}')")
     passed, failed = lua.eval("Test.run()")
 except Exception as error:

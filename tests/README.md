@@ -25,6 +25,11 @@ imports, craft reservation and timeout behavior, restart reconciliation,
 uncertain transfers, phantom stock, exact item variants, overflow safety, and
 completed-request retention. Runtime checks exercise typed CLI settings and
 prevent changing hardware around retained turns, crafts, or deliveries.
+Display checks exercise independent 5 by 3 monitor dashboards at scale 0.5,
+read-only colony settings, monitor reassignment and disconnects, and explicit
+partial/stale/offline telemetry. The real runtime event loop is simulated with
+bounded coroutine scheduling to verify that display traffic remains available
+when automation is paused, a chest test is reserved, or the processor stops.
 The Ender Chest suite runs the real one-item round-trip diagnostic, including
 incorrect physical channels behind otherwise matching labels, lost probe
 messages, interrupted verification, exclusive reservations, and explicit

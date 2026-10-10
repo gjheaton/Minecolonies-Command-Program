@@ -49,7 +49,7 @@ end
 
 local function textOf(value)
     if type(value) == "table" then
-        return tostring(value.message or value.detail or value.reason or value.label or value.code or "")
+        return tostring(value.message or value.detail or value.reason or value.error or value.label or value.code or "")
     end
     return tostring(value or "")
 end
@@ -70,15 +70,18 @@ local function timeOf(value)
     return tostring(value or "--:--:--")
 end
 
-function M.new(config, store, engine, io, updater)
+function M.new(config, store, engine, io, updater, options)
+    options=options or {}
     local self = {view="home", pages={}, edit=nil, route=nil, notice=nil, checkingUpdate=false}
     local mon, monName, hasMonitor
+    local monitorSizeError
     local snapshot = {}
     local lastTerminal = nil
     local monitorFailure = nil
     local draw
 
     local function logError(code, message)
+        if options.readOnly then return end
         if store and type(store.error) == "function" then pcall(store.error, code, tostring(message))
         elseif store and type(store.log) == "function" then pcall(store.log, code .. ": " .. tostring(message)) end
     end
@@ -94,13 +97,33 @@ function M.new(config, store, engine, io, updater)
             if not ok or type(w)~="number" or type(h)~="number" or w<1 or h<1 then
                 local reason="Monitor unavailable: "..tostring(w)
                 if monitorFailure~=reason then logError("MONITOR",reason); monitorFailure=reason end
-                self.notice="Monitor unavailable; controls moved to the computer terminal."
+                self.notice=options.displayOnly and "Monitor unavailable." or "Monitor unavailable; controls moved to the computer terminal."
                 candidate,name=nil,nil
             else monitorFailure=nil end
         end
+        monitorSizeError=nil
+        if candidate and candidate.setTextScale then pcall(candidate.setTextScale,options.fixedTextScale or config.monitorTextScale or 0.5) end
+        if candidate and options.expectedSize then
+            local expected=options.expectedSize
+            local ok,w,h=pcall(candidate.getSize)
+            local columns=expected.columns or expected.width
+            local rows=expected.rows or expected.height
+            if ok and columns and rows and (w~=columns or h~=rows) then
+                monitorSizeError="Use "..tostring(expected.blocksWide or 5).." x "..tostring(expected.blocksHigh or 3).." monitor blocks at scale "..tostring(options.fixedTextScale or expected.textScale or .5).."."
+                pcall(function()
+                    candidate.setBackgroundColor(C.bg);candidate.setTextColor(C.warn);candidate.clear()
+                    candidate.setCursorPos(1,1);candidate.write(Util.clip("MONITOR SIZE",w))
+                    if h>=2 then candidate.setCursorPos(1,2);candidate.write(Util.clip(monitorSizeError,w)) end
+                    if h>=3 then candidate.setCursorPos(1,3);candidate.write(Util.clip("Detected "..w.." x "..h.."; expected "..columns.." x "..rows.." characters.",w)) end
+                end)
+                if not options.displayOnly then candidate=nil;self.notice=monitorSizeError.." Controls are on the computer terminal." end
+            end
+        end
         hasMonitor = candidate ~= nil
-        mon, monName = candidate or term.current(), name
-        if candidate and candidate.setTextScale then pcall(candidate.setTextScale, config.monitorTextScale or 0.5) end
+        mon,monName=candidate,name or options.monitorName
+        if not mon and not options.displayOnly then mon=term.current() end
+        self.monitorName=monName
+        self.monitorPresent=hasMonitor
         return mon
     end
 
@@ -133,6 +156,10 @@ function M.new(config, store, engine, io, updater)
     local function effective(key)
         local policy=snapshot.effectivePolicy or (type(snapshot.turn)=="table" and snapshot.turn.policy)
         if role()~="master" and type(policy)=="table" and policy[key]~=nil then return policy[key],true end
+        if options.readOnly then
+            if type(snapshot.settings)=="table" then return snapshot.settings[key],false end
+            return nil,false
+        end
         return config[key],false
     end
 
@@ -149,6 +176,7 @@ function M.new(config, store, engine, io, updater)
     end
 
     local function setValue(key, value)
+        if options.readOnly then return false,"Remote colony dashboards are read-only." end
         if hardwareKeys[key] and config[key]~=value then
             if type(engine.canEditHardware)=="function" then
                 local allowed,result,reason=pcall(engine.canEditHardware,key,value)
@@ -175,6 +203,7 @@ function M.new(config, store, engine, io, updater)
     end
 
     local function saveRoute(route)
+        if options.readOnly then return false,"Remote colony dashboards are read-only." end
         if isBusy() then return false, "Wait until the current turn has finished before editing routes." end
         if type(engine.canEditRoute)=="function" then
             local ok,allowed,reason=pcall(engine.canEditRoute,route.id)
@@ -197,6 +226,7 @@ function M.new(config, store, engine, io, updater)
     end
 
     local function editField(field, value, onSave)
+        if options.readOnly then return end
         self.edit = {field=field, value=value == nil and "" or tostring(value), onSave=onSave, error=nil}
         self.edit.replace = true
         lastTerminal = nil
@@ -254,6 +284,7 @@ function M.new(config, store, engine, io, updater)
     end
 
     local function update()
+        if options.readOnly then return end
         if not updater or self.checkingUpdate or updater.checking or updater.installing then return end
         if isBusy() then self.notice="Update waits until the active turn is safely closed."; draw(); return end
         local method = updater.availableVersion and updater.install or updater.check
@@ -281,9 +312,32 @@ function M.new(config, store, engine, io, updater)
         end
         local titleName = role()=="master" and "MINECOLONIES SUPPLY MASTER" or "MINECOLONIES SUPPLY CLIENT"
         local subtitle = tostring(snapshot.colonyName or config.label or config.colonyName or (role()=="master" and "PLAYER REFINED STORAGE" or "Colony"))
-            .. "  [v" .. tostring(config.PROGRAM_VERSION or config.programVersion or "4.0.0") .. "]"
+            .. "  [v" .. tostring(config.PROGRAM_VERSION or config.programVersion or Config.VERSION) .. "]"
+        if options.readOnly then
+            local telemetry=type(snapshot.telemetry)=="table" and snapshot.telemetry or {}
+            local state=tostring(telemetry.state or (snapshot.offline and "offline") or (snapshot.stale and "stale") or "waiting"):upper()
+            local age=tonumber(telemetry.age)
+            local sourceAge=tonumber(telemetry.sourceAge)
+            if sourceAge then age=math.max(age or 0,sourceAge) end
+            local freshness=age and ("Last update "..math.max(0,math.floor(age)).."s ago") or "Awaiting first update"
+            local partial=snapshot.truncated or telemetry.truncated
+            if type(partial)=="table" then
+                local any=false;for _,value in pairs(partial) do if value==true or type(value)=="number" and value>0 then any=true;break end end;partial=any
+            end
+            status="COLONY #"..tostring(options.sourceId or snapshot.computerId or "?").."  "..state.."  "..freshness..(partial and "  PARTIAL" or "")
+            color=state=="ONLINE" and (color or C.good) or C.warn
+            subtitle=subtitle.."  REMOTE DASHBOARD"
+            local countKey=({requests="requests",history="history",errors="errors",health="healthChecks"})[self.view]
+            if countKey and type(snapshot.totals)=="table" and tonumber(snapshot.totals[countKey]) then
+                local total=math.max(0,math.floor(snapshot.totals[countKey]))
+                local shown=type(snapshot.shown)=="table" and tonumber(snapshot.shown[countKey]) or nil
+                if shown then title=title.."  ["..math.max(0,math.floor(shown)).."/"..total.." reported]" end
+            end
+        end
+        local button=options.readOnly and {id="read_only",label="READ ONLY",bg=C.nav,fg=C.dim}
+            or {id="program_update",label=label,bg=updater and (updater.availableVersion or updater.checkError) and C.warn or C.navActive,action=update}
         screen.drawHeader({title=titleName,subtitle=subtitle,status=status or "",statusFg=color or C.dim,
-            pageTitle=title,button={id="program_update",label=label,bg=updater and (updater.availableVersion or updater.checkError) and C.warn or C.navActive,action=update}})
+            pageTitle=title,button=button})
         local active = (self.view=="routes" or self.view=="route" or self.view=="overrides") and "settings" or self.view
         screen.drawNav(active,tabs,nil,function(id) self.view=id; self.notice=nil; draw() end)
     end
@@ -337,15 +391,23 @@ function M.new(config, store, engine, io, updater)
         for _,r in ipairs(requests) do local s=tostring(r.status or "requested"):lower(); counts[s]=(counts[s] or 0)+1 end
         local turn = snapshot.turn or snapshot.session
         local turnName = type(turn)=="table" and (turn.label or turn.colonyId or turn.id or turn.phase) or turn
-        row(5,"Role: "..role():upper().."   Computer: "..tostring(os.getComputerID()),C.dim)
+        row(5,"Role: "..role():upper().."   Computer: "..tostring(options.sourceId or snapshot.computerId or os.getComputerID()),C.dim)
         row(6,"Current turn: "..tostring(turnName or "Waiting").."   "..tostring(snapshot.phase or ""),C.accent)
         local autoCraft,inherited=effective("autoCraftEnabled")
-        row(7,"Active requests: "..#requests.."   Auto craft: "..(autoCraft and "ON" or "OFF")..(inherited and " (MASTER)" or ""))
-        row(8,"Requested: "..(counts.requested or 0).."   In progress: "..(counts["in progress"] or 0).."   Crafting: "..(counts.crafting or 0))
+        local totalRequests=type(snapshot.totals)=="table" and tonumber(snapshot.totals.requests) or #requests
+        totalRequests=math.max(#requests,math.floor(totalRequests or #requests))
+        local requestCount=tostring(totalRequests)..(totalRequests>#requests and (" ("..#requests.." shown)") or "")
+        local craftText=autoCraft==nil and "UNAVAILABLE" or (autoCraft and "ON" or "OFF")
+        row(7,"Active requests: "..requestCount.."   Auto craft: "..craftText..(inherited and " (MASTER)" or ""))
+        row(8,(totalRequests>#requests and "Shown rows - " or "").."Requested: "..(counts.requested or 0).."   In progress: "..(counts["in progress"] or 0).."   Crafting: "..(counts.crafting or 0))
         row(9,"Missing: "..(counts.missing or 0).."   Timed out: "..(counts["timed out"] or 0).."   Errors: "..(counts.error or 0),
             (counts.error or counts.missing or counts["timed out"]) and C.warn or C.good)
         row(10,"VERIFIED = chest checked; COMPLETE = MineColonies request gone.",C.dim)
         if self.notice then row(11,self.notice,C.warn)
+        elseif options.readOnly then
+            local health=type(snapshot.health)=="table" and snapshot.health or {}
+            local reportedStatus=snapshot.statusMessage or health.detail or snapshot.status
+            if reportedStatus then row(11,"Reported status: "..textOf(reportedStatus),healthy and C.dim or C.danger) end
         elseif role()=="master" and config.automationEnabled==false then row(11,"AUTOMATION PAUSED - existing deliveries can drain; no new supply is sent.",C.warn)
         elseif updater and updater.checkError then row(11,"Update check failed: "..tostring(updater.checkError),C.warn) end
         if role()=="master" then
@@ -373,7 +435,7 @@ function M.new(config, store, engine, io, updater)
                 check.ok and C.good or (check.severity=="WARNING" and C.warn or C.danger))
         end
         if self.notice then row(h-2,self.notice,C.warn) end
-        local reconcile=type(engine.requestReconcile)=="function" and function()
+        local reconcile=not options.readOnly and type(engine.requestReconcile)=="function" and function()
             local ok,result,err=pcall(engine.requestReconcile)
             self.notice=(ok and result~=false) and "Reconciliation queued; uncertain transfers remain reserved." or tostring(err or result)
         end or nil
@@ -432,7 +494,7 @@ function M.new(config, store, engine, io, updater)
                 tostring(e.severity or ""):upper()=="WARNING" and C.warn or C.danger)
             local text=textOf(e).."\n"..textOf(e.context)
             if type(e.context)=="table" then
-                for _,key in ipairs({"item","colonyId","requestId","reason","expected","observed"}) do
+                for _,key in ipairs({"item","colonyId","requestId","shipmentId","reason","expected","observed","reported","actualDelta","beforeChest","afterChest"}) do
                     if e.context[key]~=nil then text=text.."\n"..key..": "..tostring(e.context[key]) end
                 end
             end
@@ -445,18 +507,22 @@ function M.new(config, store, engine, io, updater)
         local _,h=screen.size()
         local schemas=fields()
         local rows,page,pages=pageRows(schemas,"settings",h-9)
-        frame("SETTINGS  "..page.."/"..pages,"Touch a setting; type its value on the computer keyboard.",C.dim)
+        frame("SETTINGS  "..page.."/"..pages,options.readOnly and "Reported colony configuration; edit on its computer or the master." or "Touch a setting; type its value on the computer keyboard.",C.dim)
         for i,field in ipairs(rows) do
             local value=config[field.key]
+            if options.readOnly then
+                value=nil
+                if type(snapshot.settings)=="table" then value=snapshot.settings[field.key] end
+            end
             local current,inherited=effective(field.key)
-            local label=tostring(field.label or field.key)..": "..(current==nil and "AUTO / unset" or tostring(current))
+            local label=tostring(field.label or field.key)..": "..(current==nil and (options.readOnly and "UNAVAILABLE" or "AUTO / unset") or tostring(current))
                 ..(inherited and (" [MASTER; local "..tostring(value).."]") or "")
             local function saveSetting(v)
                 local ok,err=setValue(field.key,v)
                 if ok and inherited then self.notice="Local default saved. Effective policy is set on the master / colony route." end
                 return ok,err
             end
-            row(4+i,label,field.type=="boolean" and (current and C.good or C.warn) or C.text,function()
+            row(4+i,label,field.type=="boolean" and (current and C.good or C.warn) or C.text,not options.readOnly and function()
                 if field.type=="boolean" then
                     local ok,err=saveSetting(not value)
                     if not ok then self.notice=err end
@@ -469,9 +535,9 @@ function M.new(config, store, engine, io, updater)
                     end
                     editField(schema,value,saveSetting)
                 end
-            end)
+            end or nil)
         end
-        row(h-3,self.notice or "Changes are saved. Leave optional peripheral names empty for discovery.",C.dim)
+        row(h-3,self.notice or (options.readOnly and "Read-only telemetry. Master policy overrides are marked MASTER." or "Changes are saved. Leave optional peripheral names empty for discovery."),C.dim)
         if role()=="master" then row(h-2,"COLONY ROUTES / OVERRIDES  >",C.accent,function() self.view="routes"; draw() end) end
         footer("settings",page,pages)
     end
@@ -479,6 +545,7 @@ function M.new(config, store, engine, io, updater)
     local routeFields={
         {key="id",label="Computer ID",type="integer",min=0},
         {key="label",label="Colony name",type="string"},
+        {key="monitorName",label="Master colony dashboard monitor",type="string"},
         {key="deliveryChest",label="Master delivery chest peripheral",type="string"},
         {key="returnChest",label="Master return chest peripheral",type="string"},
         {key="deliveryChannel",label="Delivery Ender color code",type="string"},
@@ -492,13 +559,13 @@ function M.new(config, store, engine, io, updater)
         local rows,page,pages=pageRows(list(config.colonies),"routes",h-9)
         frame("COLONY ROUTES  "..page.."/"..pages,"Each colony needs two exclusive, physically matching Ender color channels.",C.dim)
         for i,r in ipairs(rows) do
-            row(4+i,"["..tostring(r.id).."] "..tostring(r.label).."  "..tostring(r.deliveryChannel).." / "..tostring(r.returnChannel),C.text,function()
+            row(4+i,"["..tostring(r.id).."] "..tostring(r.label).."  "..tostring(r.deliveryChannel).." / "..tostring(r.returnChannel).."  Monitor: "..tostring(r.monitorName or "none"),C.text,function()
                 self.route=copy(r); self.routeId=r.id; self.view="route"; draw()
             end)
         end
         row(h-3,self.notice or "Route edits take effect after restart; existing delivery records are preserved.",C.dim)
         row(h-2,"ADD COLONY ROUTE  >",C.accent,function()
-            self.route={label="",deliveryChest="",returnChest="",deliveryChannel="",returnChannel="",outputDirection="west",returnDirection="west",overrides={}}
+            self.route={label="",monitorName="",deliveryChest="",returnChest="",deliveryChannel="",returnChannel="",outputDirection="west",returnDirection="west",overrides={}}
             self.routeId=nil
             self.view="route"; draw()
         end)
@@ -589,6 +656,7 @@ function M.new(config, store, engine, io, updater)
     draw=function()
         resolveMonitor()
         snap()
+        if options.displayOnly and (not mon or monitorSizeError) then screen.resetButtons();return end
         local w,h=screen.size()
         if not w or not h then return end
         if w<24 or h<10 then
@@ -599,6 +667,7 @@ function M.new(config, store, engine, io, updater)
             screen.writeAt(1,4,"CLI: setup / config",C.dim)
             return
         end
+        if options.readOnly and (self.view=="routes" or self.view=="route" or self.view=="overrides") then self.view="settings" end
         if self.edit then drawEdit()
         elseif self.view=="home" then drawHome()
         elseif self.view=="health" then drawHealth()
@@ -613,6 +682,7 @@ function M.new(config, store, engine, io, updater)
     self.draw=draw
 
     function self.renderTerminal()
+        if options.displayOnly then return end
         if not hasMonitor then return end
         local lines={}
         for _,check in ipairs(healthRows()) do
@@ -642,10 +712,11 @@ function M.new(config, store, engine, io, updater)
 
     function self.handleEvent(event, a,b,c)
         if type(event)=="table" then return self.handleEvent(table.unpack(event)) end
+        if options.displayOnly and (event=="char" or event=="paste" or event=="key" or event=="mouse_click" or event=="term_resize") then return false end
         if event=="monitor_resize" or event=="term_resize" or event=="peripheral" or event=="peripheral_detach" then
             mon=nil; lastTerminal=nil; draw(); return false
         end
-        if self.edit then
+        if self.edit and not options.readOnly then
             if event=="char" then
                 if self.edit.replace then self.edit.value=""; self.edit.replace=false end
                 self.edit.value=self.edit.value..tostring(a)
@@ -662,13 +733,13 @@ function M.new(config, store, engine, io, updater)
             if event=="char" or event=="paste" or event=="key" then draw(); self.renderTerminal(); return true end
         end
         local x,y
-        if event=="monitor_touch" and hasMonitor and (not monName or a==monName) then x,y=b,c
+        if event=="monitor_touch" and hasMonitor and not monitorSizeError and (monName and a==monName or not monName and not options.displayOnly) then x,y=b,c
         elseif event=="mouse_click" and not hasMonitor then x,y=b,c end
         if x and y then
             local button=screen.hitButton(x,y)
             if button and type(button.action)=="function" then button.action(); self.renderTerminal(); return true end
         end
-        if event=="char" and not self.edit then
+        if event=="char" and not self.edit and not options.readOnly then
             local selected=tonumber(a)
             if selected and tabs[selected] then self.view=tabs[selected].id; self.notice=nil; draw(); return true end
         end

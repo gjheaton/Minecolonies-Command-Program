@@ -1,9 +1,16 @@
 # MineColonies Control Suite
 
-The `supply-master-colony` branch introduces Supply v4: one dedicated computer owns
+The `supply-master-colony` branch provides Supply 4.1: one dedicated computer owns
 Player Refined Storage (PRS), and colony supply computers communicate with it over
 rednet. Each colony has a delivery and a return Ender Chest channel. Command Center
 is also available through the same installer.
+
+The master can now show its overview and a separate read-only dashboard for each
+colony. The master overview, master-side colony dashboards, and colony-local supply
+screens all use **5 blocks wide × 3 blocks high Advanced Monitors at text scale 0.5**
+(CC:Tweaked reports **100 × 38 characters**). Each dashboard has independent tabs
+and paging. See the [monitor setup and wiring instructions](docs/PRS_NETWORK.md#master-and-colony-monitors)
+for assigning monitors and checking the live telemetry.
 
 ## Install in CC:Tweaked
 
@@ -37,6 +44,11 @@ install_colony --update master
 Use `supply` or `command` instead of `master` on those computers. The stored update
 source remains this development branch until explicitly changed. Update the master
 and all colony clients together when a release changes the protocol.
+
+For an existing **4.0 installation, update both the master and colony supply
+computers to 4.1** with `--update`; settings, inventories, and request journals are
+preserved. Do not choose `CLEAN` for this upgrade. Pause master automation and let
+current handshakes finish before updating.
 
 ## Development checks
 

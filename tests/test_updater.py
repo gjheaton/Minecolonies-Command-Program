@@ -5,6 +5,8 @@ import test_installer as installer_fixture
 
 ROOT, INSTALLER, SOURCE, PINNED = (installer_fixture.ROOT, installer_fixture.INSTALLER,
                                  installer_fixture.SOURCE, installer_fixture.PINNED)
+CURRENT_VERSION, NEXT_VERSION, LATER_VERSION = (installer_fixture.CURRENT_VERSION,
+                                               installer_fixture.NEXT_VERSION, installer_fixture.LATER_VERSION)
 
 
 class UpdaterTests(unittest.TestCase):
@@ -12,10 +14,14 @@ class UpdaterTests(unittest.TestCase):
     snapshot = installer_fixture.InstallerTests.snapshot
     install = installer_fixture.InstallerTests.install
     seed_v4 = installer_fixture.InstallerTests.seed_v4
+    seed_previous_v4 = installer_fixture.InstallerTests.seed_previous_v4
 
     def setUp(self):
         installer_fixture.InstallerTests.setUp(self)
         self.g.TEST_ROOT = str(ROOT)
+        self.g.TEST_BASE_VERSION = CURRENT_VERSION
+        self.g.TEST_NEXT_VERSION = NEXT_VERSION
+        self.g.TEST_LATER_VERSION = LATER_VERSION
         self.lua.execute('package.path = TEST_ROOT .. "/?.lua;" .. TEST_ROOT .. "/?/init.lua;" .. package.path')
         self.lua.execute('''
             local originalGet = http.get
@@ -35,13 +41,14 @@ class UpdaterTests(unittest.TestCase):
                 if RUN_MODE == "throw" then error("injected shell failure") end
                 if RUN_MODE == "cfg_only" then
                     local cfg = textutils.unserialize(FILES["/colony/app.cfg"])
-                    cfg.appVersion, cfg.suiteVersion = "4.0.1", "4.0.1"
+                    cfg.appVersion, cfg.suiteVersion = TEST_NEXT_VERSION, TEST_NEXT_VERSION
                     put("/colony/app.cfg", textutils.serialize(cfg))
                     return true
                 end
                 if RUN_MODE == "advance_branch" then
-                    REMOTE_FILES["install_colony.lua"] = REMOTE_FILES["install_colony.lua"]:gsub('"4%.0%.1"', '"4.0.2"')
-                    REMOTE_FILES["colony/manifest.lua"] = REMOTE_FILES["colony/manifest.lua"]:gsub('"4%.0%.1"', '"4.0.2"')
+                    local pattern = '"' .. TEST_NEXT_VERSION:gsub("%.", "%%.") .. '"'
+                    REMOTE_FILES["install_colony.lua"] = REMOTE_FILES["install_colony.lua"]:gsub(pattern, '"' .. TEST_LATER_VERSION .. '"')
+                    REMOTE_FILES["colony/manifest.lua"] = REMOTE_FILES["colony/manifest.lua"]:gsub(pattern, '"' .. TEST_LATER_VERSION .. '"')
                     COMMIT_CHAR = "b"
                 end
                 local chunk, err = load(FILES[path], "@" .. path, "t", _G)
@@ -52,16 +59,17 @@ class UpdaterTests(unittest.TestCase):
                 return executed
             end }
             Updater = require("colony.lib.updater")
-            function makeUpdater()
-                return Updater.new({appId="master",appVersion="4.0.0",suiteVersion="4.0.0",displayName="Supply Master"})
+            function makeUpdater(version, role)
+                version, role = version or TEST_BASE_VERSION, role or "master"
+                return Updater.new({appId=role,appVersion=version,suiteVersion=version,displayName="Supply Master"})
             end
         ''')
 
     def seed_update(self):
         self.seed_v4()
         self.current_installer = self.g.FILES["/install_colony.lua"]
-        self.g.REMOTE_FILES["install_colony.lua"] = INSTALLER.replace('"4.0.0"', '"4.0.1"')
-        self.g.REMOTE_FILES["colony/manifest.lua"] = (ROOT / "colony/manifest.lua").read_text().replace('"4.0.0"', '"4.0.1"')
+        self.g.REMOTE_FILES["install_colony.lua"] = INSTALLER.replace(f'"{CURRENT_VERSION}"', f'"{NEXT_VERSION}"')
+        self.g.REMOTE_FILES["colony/manifest.lua"] = (ROOT / "colony/manifest.lua").read_text().replace(f'"{CURRENT_VERSION}"', f'"{NEXT_VERSION}"')
         self.g.RUN_MODE = "real"
         return self.g.makeUpdater()
 
@@ -108,8 +116,8 @@ class UpdaterTests(unittest.TestCase):
         self.assertEqual(list(self.g.SHELL_ARGUMENTS.values()), ["--update", "master", SOURCE])
         self.assertEqual(self.g.CANONICAL_BEFORE_RUN, self.current_installer)
         cfg = self.g.textutils.unserialize(self.g.FILES["/colony/app.cfg"])
-        self.assertEqual(cfg.appVersion, "4.0.1")
-        self.assertEqual(cfg.suiteVersion, "4.0.1")
+        self.assertEqual(cfg.appVersion, NEXT_VERSION)
+        self.assertEqual(cfg.suiteVersion, NEXT_VERSION)
         self.assertEqual(cfg.installationSchema, 4)
         self.assertEqual(cfg.role, "master")
         self.assertEqual(cfg.installedSourceUrl, PINNED)
@@ -123,8 +131,8 @@ class UpdaterTests(unittest.TestCase):
         self.g.RUN_MODE = "advance_branch"
         self.assertTrue(updater.install())
         cfg = self.g.textutils.unserialize(self.g.FILES["/colony/app.cfg"])
-        self.assertEqual(cfg.appVersion, "4.0.2")
-        self.assertEqual(cfg.suiteVersion, "4.0.2")
+        self.assertEqual(cfg.appVersion, LATER_VERSION)
+        self.assertEqual(cfg.suiteVersion, LATER_VERSION)
         self.assertIn("/" + "b" * 40 + "/", cfg.installedSourceUrl)
         self.assertTrue(self.g.REBOOTED)
 
@@ -138,7 +146,7 @@ class UpdaterTests(unittest.TestCase):
     def test_updater_legacy_installation_requires_clean_migration(self):
         self.g.seedLegacy()
         before = self.snapshot()
-        self.g.REMOTE_FILES["install_colony.lua"] = INSTALLER.replace('"4.0.0"', '"4.0.1"')
+        self.g.REMOTE_FILES["install_colony.lua"] = INSTALLER.replace(f'"{CURRENT_VERSION}"', f'"{NEXT_VERSION}"')
         self.assertFalse(self.g.makeUpdater().install())
         self.assertEqual(self.snapshot(), before)
         self.assertIsNone(self.g.SHELL_PATH)
@@ -157,6 +165,26 @@ class UpdaterTests(unittest.TestCase):
         self.assertEqual(self.snapshot(), before)
         self.assertIsNone(self.g.SHELL_PATH)
         self.assert_no_reboot()
+
+    def test_updater_previous_4_0_installation_updates_without_cleaning_persistent_data(self):
+        for role in ("master", "supply"):
+            with self.subTest(role=role):
+                self.setUp()
+                self.seed_previous_v4(role)
+                before = self.snapshot()
+                self.g.CONFIRM = "do not clean"
+                self.assertTrue(self.g.makeUpdater("4.0.0", role).install())
+                for path in ("/colony/network.cfg", f"/colony/{role}_v4_state.a", f"/colony/{role}_v4_state.b"):
+                    self.assertEqual(self.g.FILES[path], before[path], path)
+                cfg = self.g.textutils.unserialize(self.g.FILES["/colony/app.cfg"])
+                self.assertEqual(cfg.appVersion, CURRENT_VERSION)
+                self.assertEqual(cfg.suiteVersion, CURRENT_VERSION)
+                self.assertEqual(cfg.installationSchema, 4)
+                self.assertEqual(cfg.role, role)
+                self.assertIsNotNone(self.g.FILES["/colony/network/telemetry.lua"])
+                self.assertIsNotNone(self.g.FILES["/colony/network/displays.lua"])
+                self.assertTrue(self.g.REBOOTED)
+                self.assertFalse(self.g.fs.exists("/install_colony.lua.update_tmp"))
 
     def test_updater_does_not_delete_a_preexisting_temporary_file(self):
         updater = self.seed_update()

@@ -1,5 +1,6 @@
 -- Persisted settings for the dedicated PRS master and colony clients.
-local M = { VERSION = "4.0.0", PATH = "/colony/network.cfg" }
+local M = { VERSION = "4.1.0", PATH = "/colony/network.cfg",
+    DISPLAY = {blocksWide=5,blocksHigh=3,textScale=.5,columns=100,rows=38} }
 local fields = {
     {key="automationEnabled",label="Run supply automation",type="boolean",default=true,roles={master=true}},
     {key="masterId",label="Master computer ID",type="number",default=-1,min=-1,max=2147483647,integer=true,roles={supply=true}},
@@ -18,6 +19,12 @@ local fields = {
     {key="overflowEnabled",label="Return overflow",type="boolean",default=false,roles={supply=true}},
     {key="pollIntervalSeconds",label="Processor interval (s)",type="number",default=1,min=.1,max=3600},
     {key="helloSeconds",label="Hello interval (s)",type="number",default=5,min=1,max=3600},
+    {key="telemetryIntervalSeconds",label="Dashboard update interval (s)",type="number",default=5,min=1,max=3600},
+    {key="telemetryStaleSeconds",label="Dashboard stale timeout (s)",type="number",default=20,min=2,max=86400},
+    {key="telemetryOfflineSeconds",label="Dashboard offline timeout (s)",type="number",default=60,min=2,max=604800},
+    {key="telemetryMaxRequests",label="Dashboard request limit",type="number",default=128,min=1,max=1024,integer=true},
+    {key="telemetryHistoryEntries",label="Dashboard history limit",type="number",default=40,min=1,max=200,integer=true},
+    {key="telemetryErrorEntries",label="Dashboard error limit",type="number",default=20,min=1,max=100,integer=true},
     {key="colonyResponseTimeoutSeconds",label="Colony response timeout (s)",type="number",default=30,min=1,max=86400},
     {key="batchRetrySeconds",label="Message retry interval (s)",type="number",default=5,min=1,max=3600},
     {key="messageTimeoutSeconds",label="Master response timeout (s)",type="number",default=30,min=1,max=86400},
@@ -48,14 +55,14 @@ local fields = {
     {key="maxErrorEntries",label="Error entries",type="number",default=100,min=10,max=10000,integer=true},
     {key="requestRetentionSeconds",label="Completed request retention (s)",type="number",default=86400,min=60,max=31536000},
     {key="maxCompletedRequests",label="Retained completed requests",type="number",default=1000,min=10,max=10000,integer=true},
-    {key="monitorTextScale",label="Monitor text scale",type="number",default=.5,min=.5,max=5},
+    {key="monitorTextScale",label="Monitor text scale (5 x 3 screens)",type="number",default=.5,min=.5,max=.5,hidden=true},
     {key="chestTestItem",label="Chest test item",type="string",default="minecraft:cobblestone"},
     {key="chestTestTimeoutSeconds",label="Chest test response timeout (s)",type="number",default=30,min=1,max=3600},
 }
 local byKey = {}
 local directions={north=true,south=true,east=true,west=true,up=true,down=true,top=true,bottom=true,left=true,right=true,front=true,back=true}
 for _, field in ipairs(fields) do byKey[field.key] = field end
-local localOnly={automationEnabled=true,usePeripheralTransfer=true,monitorTextScale=true,maxHistoryEntries=true,maxErrorEntries=true,maxCompletedRequests=true,requestRetentionSeconds=true,updateCheckSeconds=true,chestTestTimeoutSeconds=true,masterId=true}
+local localOnly={automationEnabled=true,usePeripheralTransfer=true,monitorTextScale=true,telemetryIntervalSeconds=true,telemetryStaleSeconds=true,telemetryOfflineSeconds=true,telemetryMaxRequests=true,telemetryHistoryEntries=true,telemetryErrorEntries=true,maxHistoryEntries=true,maxErrorEntries=true,maxCompletedRequests=true,requestRetentionSeconds=true,updateCheckSeconds=true,chestTestTimeoutSeconds=true,masterId=true}
 function M.isPolicyKey(key)
     return byKey[key]~=nil and byKey[key].type~="string" and not localOnly[key]
 end
@@ -75,9 +82,9 @@ local function checked(field, value)
     end
     return true
 end
-local function validRoutes(routes)
+local function validRoutes(routes,primaryMonitor)
     if type(routes) ~= "table" then return false, "Colonies must be a list" end
-    local ids, chests, channels = {}, {}, {}
+    local ids, chests, channels, monitors = {}, {}, {}, {}
     for k, route in pairs(routes) do
         if type(k) ~= "number" or k < 1 or k % 1 ~= 0 or k > #routes then return false, "Colonies must be a dense list" end
         if type(route) ~= "table" or type(route.id) ~= "number" or route.id < 0 or route.id % 1 ~= 0 then
@@ -86,6 +93,15 @@ local function validRoutes(routes)
         if ids[route.id] then return false, "Duplicate colony ID " .. route.id end
         ids[route.id] = true
         if route.label~=nil and (type(route.label)~="string" or #route.label>128 or route.label:find("[%c]")) then return false,"Invalid colony label" end
+        if route.monitorName~=nil then
+            local name=route.monitorName
+            if type(name)~="string" or #name>128 or name:find("[%c]") then return false,"Invalid colony dashboard monitor" end
+            if name~="" then
+                if name==primaryMonitor then return false,"Colony dashboard monitor must differ from the master overview monitor" end
+                if monitors[name] then return false,"Duplicate colony dashboard monitor "..name end
+                monitors[name]=true
+            end
+        end
         for _,key in ipairs({"outputDirection","returnDirection"}) do
             if route[key]~=nil and route[key]~="" and not directions[route[key]] then return false,"Invalid transfer direction "..tostring(route[key]) end
         end
@@ -112,7 +128,7 @@ local function validRoutes(routes)
 end
 function M.fields(role)
     local out = {}; for _,field in ipairs(fields) do
-        if not field.roles or field.roles[role] then out[#out+1] = copy(field) end
+        if not field.hidden and (not field.roles or field.roles[role]) then out[#out+1] = copy(field) end
     end; return out
 end
 function M.defaults(role)
@@ -126,7 +142,7 @@ function M.validate(config)
     for _,field in ipairs(fields) do local ok,err=checked(field,config[field.key]); if not ok then return false,err end end
     if config.monitorTextScale*2%1~=0 then return false,"Monitor text scale must use increments of 0.5" end
     for _,key in ipairs({"colonyImportDirection","colonyExportDirection"}) do if not directions[config[key]] then return false,"Invalid "..key end end
-    local ok,err=validRoutes(config.colonies); if not ok then return false,err end
+    local ok,err=validRoutes(config.colonies,config.monitorName); if not ok then return false,err end
     if type(config.keepCounts) ~= "table" then return false,"Keep counts must be a table" end
     for name,value in pairs(config.keepCounts) do
         if type(name) ~= "string" or type(value) ~= "number" or value < 0 or value%1~=0 then return false,"Invalid per-item keep count" end
@@ -145,6 +161,8 @@ function M.load(role)
         local saved=textutils.unserialize(h.readAll()); h.close()
         if type(saved)~="table" or saved.schema~=4 then error("Invalid network configuration; run installer clean installation",0) end
         for key,value in pairs(saved) do config[key]=value end
+        -- v4.1 standardises all supply displays without touching transfer state.
+        config.monitorTextScale=M.DISPLAY.textScale
         if config.role~=role then error("Installed role differs from saved network role",0) end
     end
     local ok,err=M.validate(config); if not ok then error(err,0) end

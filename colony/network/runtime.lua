@@ -7,7 +7,8 @@ local Protocol=require("colony.network.protocol")
 local Diagnostics=require("colony.network.diagnostics")
 local Matcher=require("colony.supply.matcher")
 local SuiteUpdater=require("colony.lib.updater")
-local UI=require("colony.network.ui")
+local Telemetry=require("colony.network.telemetry")
+local Displays=require("colony.network.displays")
 local M={}
 local function ask(label,current,required)
     while true do
@@ -23,7 +24,8 @@ local function setup(config)
     print("Visible peripherals:")
     for _,name in ipairs(peripheral.getNames()) do print("  "..name.." ("..tostring(peripheral.getType(name))..")") end
     print("Leave bridge/monitor names blank only if exactly one is attached.")
-    config.monitorName=ask("Advanced Monitor peripheral",config.monitorName,false)
+    print("Build every supply display 5 blocks wide x 3 high; text scale is fixed at 0.5.")
+    config.monitorName=ask(config.role=="master" and "Overview Advanced Monitor peripheral (explicit with multiple screens)" or "Advanced Monitor peripheral",config.monitorName,false)
     if config.role=="master" then
         config.playerBridgeName=ask("Player RS Bridge peripheral",config.playerBridgeName,false)
         print("Each colony needs two exclusive color channels, with no external automation.")
@@ -36,6 +38,7 @@ local function setup(config)
             route.returnChest=ask("Master return chest peripheral",nil,true)
             route.deliveryChannel=ask("Delivery color channel (e.g. red-white-blue)",nil,true):lower()
             route.returnChannel=ask("Return color channel",nil,true):lower()
+            route.monitorName=ask("Master colony dashboard monitor (optional, blank for none)",nil,false)
             local ok,err=Config.setColony(config,route)
             if not ok then print("Route rejected: "..tostring(err)) end
         until false
@@ -86,6 +89,29 @@ function M.run(role,...)
     local matcher=Matcher.new(config,store)
     local io=IO.new(config,store,matcher)
     if mode=="diag" or mode=="diagnostics" then Diagnostics.printReport(config,io); return end
+    if mode=="monitors" then
+        print("All supply monitors: 5 blocks wide x 3 high, scale 0.5 (100 x 38 characters).")
+        for _,monitor in ipairs(io.monitors()) do
+            print(monitor.name..": "..tostring(monitor.width).." x "..tostring(monitor.height)..", color="..tostring(monitor.color)..", "..monitor.assigned..((monitor.sizeOK and monitor.color) and "" or " - check size / Advanced Monitor"))
+        end
+        if config.monitorName=="" then print("Overview monitor uses automatic selection only when exactly one monitor is visible.") end
+        return
+    end
+    if mode=="monitor" and role=="master" then
+        local id=tonumber(arg2)
+        if not id or type(arg3)~="string" or arg3=="" then error("Usage: colony_master monitor <colony ID> <monitor peripheral | none>",0) end
+        local route
+        for _,candidate in ipairs(config.colonies) do if candidate.id==id then
+            route={}; for key,value in pairs(candidate) do route[key]=value end; break
+        end end
+        if not route then error("Unknown colony computer ID "..tostring(arg2),0) end
+        -- Display assignment changes no transfer channel, policy, or ledger.
+        route.monitorName=arg3=="none" and "" or arg3
+        local ok,err=Config.setColony(config,route); if not ok then error(err,0) end
+        Config.save(config)
+        print("Colony "..id.." dashboard: "..(route.monitorName~="" and route.monitorName or "none"))
+        return
+    end
     if mode=="set" then
         if hardwareKeys[arg2] and retainedWork(store) then error("Retained work prevents changing transfer hardware; pause and finish/reconcile it first",0) end
         local field; for _,candidate in ipairs(Config.fields(role)) do if candidate.key==arg2 then field=candidate end end
@@ -134,13 +160,16 @@ function M.run(role,...)
         end
         print((ok and "OK: " or "BLOCKED: ")..tostring(err)); return
     end
-    if mode and mode~="" then error("Usage: "..(role=="master" and "colony_master" or "colony_supply").." [setup | diag | reconcile | set key value"..(role=="master" and " | chesttest ID [item]" or "").."]",0) end
+    if mode and mode~="" then error("Usage: "..(role=="master" and "colony_master" or "colony_supply").." [setup | diag | monitors | reconcile | set key value"..(role=="master" and " | monitor ID name | chesttest ID [item]" or "").."]",0) end
     local inbox,action={},nil
     local processorFault
+    local telemetryFault
     local originalSnapshot=engine.snapshot
     function engine.snapshot()
         local view=originalSnapshot()
+        view.programVersion=Config.VERSION
         local hardware=io.health()
+        if telemetryFault then hardware.checks["Dashboard telemetry"]={ok=false,detail=telemetryFault} end
         if type(view.health)=="table" and view.health[1]~=nil then
             for label,check in pairs(hardware.checks) do view.health[#view.health+1]={label=label,ok=check.ok,detail=check.detail} end
         else view.health=view.health or {}; view.health.checks=hardware.checks end
@@ -167,7 +196,8 @@ function M.run(role,...)
     local updater=setmetatable({}, {__index=actualUpdater})
     function updater.check() action="check"; return true end
     function updater.install() action="update"; return true end
-    local ui=UI.new(config,store,engine,io,updater)
+    local telemetry=Telemetry.new(config,store,io,engine)
+    local ui=Displays.new(config,store,engine,io,updater,telemetry)
     local nextCheck=io.now()
     local function processor()
         while true do
@@ -175,7 +205,10 @@ function M.run(role,...)
                 while #inbox>0 do
                     local packet=table.remove(inbox,1)
                     local message=packet.message
-                    if role=="supply" and packet.sender==config.masterId and message.kind=="probe" then
+                    if message.kind=="telemetry" or message.kind=="telemetry_request" then
+                        local accepted,detail=pcall(telemetry.onMessage,packet.sender,message)
+                        if not accepted then telemetryFault=tostring(detail) end
+                    elseif role=="supply" and packet.sender==config.masterId and message.kind=="probe" then
                         local response=Diagnostics.handleClient(config,store,io,message,engine.canProbe)
                         if response then io.send(config.masterId,response) end
                     elseif not store.data.chestTest and not processorFault then engine.onMessage(packet.sender,message) end
@@ -207,6 +240,10 @@ function M.run(role,...)
                 processorFault="Processor stopped; restart after recovery: "..tostring(err)
                 pcall(store.error,"PROCESSOR_ERROR",processorFault)
             end
+            -- Display traffic remains available while automation is paused,
+            -- a chest test is reserved, or a transfer needs recovery.
+            local shown,detail=pcall(telemetry.tick)
+            if shown then telemetryFault=nil else telemetryFault=tostring(detail) end
             pcall(ui.draw); pcall(ui.renderTerminal)
             sleep(config.pollIntervalSeconds)
         end
@@ -216,7 +253,7 @@ function M.run(role,...)
             local event={os.pullEvent()}
             if event[1]=="rednet_message" and event[4]==Protocol.NAME and Protocol.valid(event[3]) then
                 if #inbox<256 then inbox[#inbox+1]={sender=event[2],message=event[3]} end
-            elseif event[1]=="peripheral" then pcall(Protocol.open)
+            elseif event[1]=="peripheral" then pcall(Protocol.open); pcall(ui.handleEvent,table.unpack(event))
             else pcall(ui.handleEvent,table.unpack(event)) end
         end
     end
