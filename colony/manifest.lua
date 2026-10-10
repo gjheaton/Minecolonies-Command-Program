@@ -24,6 +24,7 @@ return {
         { path = "/colony/network/config.lua", app = "network" },
         { path = "/colony/network/store.lua", app = "network" },
         { path = "/colony/network/io.lua", app = "network" },
+        { path = "/colony/network/devices.lua", app = "network" },
         { path = "/colony/network/protocol.lua", app = "network" },
         { path = "/colony/network/telemetry.lua", app = "network" },
         { path = "/colony/network/displays.lua", app = "network" },

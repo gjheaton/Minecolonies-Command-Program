@@ -37,6 +37,11 @@ before enabling automatic supply. HTTP access to `raw.githubusercontent.com` and
 `api.github.com` is required; the installer resolves each download batch to one Git
 commit so all installed modules come from the same revision.
 
+**SETTINGS** and **COLONY ROUTES** also offer numbered, touch-selectable lists of
+compatible unused peripherals, so you do not have to type long device names.
+Names wrap in full, lists have pages, and choices refresh when hardware changes.
+Route selections are saved only when you choose **SAVE ROUTE**.
+
 ## Updates
 
 Use the UI's **CHECK UPDATE / UPDATE** control or the same installer:
@@ -54,9 +59,10 @@ releases. Both preserve settings and request journals. Pause master automation
 and let current handshakes finish before updating.
 
 For a fix to an already installed 4.0.0 build with the same version number, run
-`install_colony --repair`, then rerun `colony_master setup` or `colony_supply setup`
-as appropriate. Repair preserves configuration and journals; do not choose
-`CLEAN` to obtain the corrected setup screens.
+`install_colony --repair`, then restart the application. Rerun
+`colony_master setup` or `colony_supply setup` if you need the hardware wizard.
+Repair preserves configuration and journals; do not choose `CLEAN` to obtain
+the corrected setup screens or peripheral pickers.
 
 ## Development checks
 

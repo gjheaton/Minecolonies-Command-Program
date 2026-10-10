@@ -190,6 +190,7 @@ class UpdaterTests(unittest.TestCase):
                 self.assertIsNotNone(self.g.FILES["/colony/network/displays.lua"])
                 self.assertIsNotNone(self.g.FILES["/colony/network/setup.lua"])
                 self.assertIsNotNone(self.g.FILES["/colony/network/setup_ui.lua"])
+                self.assertIsNotNone(self.g.FILES["/colony/network/devices.lua"])
                 self.assertFalse(bool(self.g.REBOOTED))
                 self.assertFalse(self.g.fs.exists("/install_colony.lua.update_tmp"))
 

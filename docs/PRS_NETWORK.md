@@ -434,6 +434,39 @@ settings display when a master policy is inherited; change those values on the
 master or its route override, rather than changing an ineffective client default.
 Overflow settings and keep counts remain local unless explicitly overridden.
 
+### Selecting hardware in SETTINGS and COLONY ROUTES
+
+Touch a peripheral field to open a picker instead of typing its name. The
+numbered list shows compatible devices visible to that computer:
+
+- Monitor fields show monitors; bridge fields show RS Bridges; the Colony
+  Integrator field shows Colony Integrators.
+- Chest fields show inventories exposing the `list` and `size` methods.
+- Devices assigned to another field or colony route are hidden. A compatible,
+  connected current selection remains available. Optional fields offer
+  **None / Auto** where appropriate.
+
+Type a listed number and press Enter, or touch the entry on the monitor.
+The picker also appears on the computer's built-in screen for keyboard use,
+even when an external monitor is attached. Use `N`/`P` or **PREV / NEXT** for
+longer lists. **KEEP CURRENT** retains an available current selection;
+**Escape** or **CANCEL** closes the picker without changing the field.
+Full names wrap across lines rather than being truncated, and the choices
+refresh when peripherals are attached or detached. Required chest fields also
+offer **REFRESH** for a rescan. The same compatible-device selection is used
+during the initial keyboard setup.
+
+Choosing a device in **SETTINGS** saves that setting. When drafting a colony
+route, a chosen delivery chest, return chest, or dashboard
+monitor immediately disappears from the other applicable choices in that draft.
+The selections do not become saved assignments until **SAVE ROUTE** succeeds.
+Cancel discards the draft. Other fields, including computer IDs, color-channel
+labels, and timeout values, continue to use normal text or number entry.
+
+The picker cannot identify physical chest colors. Use the wired-modem name and
+physical-label procedure above before choosing a chest, then run its controlled
+transfer test. Required devices still need to be connected and modem-visible.
+
 Configurable settings include:
 
 - On-hand delivery, crafting, MineColonies acknowledgment, colony response,
@@ -504,11 +537,12 @@ operations preserve the schema 4 configuration, monitor assignments, and request
 journals. Do not use `--install` or type `CLEAN` when preserving an existing
 installation.
 
-If the corrected setup screens are a fix within the same 4.0.0 version, use
+For corrected setup screens or peripheral pickers within the same 4.0.0 version, use
 `install_colony --repair` to fetch the current code even when the version number
-has not changed. Repair preserves the configuration and request journals. Then
-run `colony_master setup` or `colony_supply setup` as appropriate; do not use
-`CLEAN` to obtain a same-version fix.
+has not changed. Repair preserves the configuration and request journals.
+Restart the application to use the new **SETTINGS** and **COLONY ROUTES** pickers.
+Run `colony_master setup` or `colony_supply setup` if you need to repeat the
+hardware wizard; do not use `CLEAN` to obtain a same-version fix.
 
 The installer resolves `supply-master-colony` to a Git SHA through GitHub's API and
 downloads all modules from that immutable revision. If GitHub API access is disabled,

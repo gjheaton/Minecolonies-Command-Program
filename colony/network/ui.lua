@@ -3,6 +3,7 @@
 local SharedUI = require("colony.lib.ui")
 local Util = require("colony.lib.util")
 local Config = require("colony.network.config")
+local Devices = require("colony.network.devices")
 local M = {}
 local C = SharedUI.theme()
 local hardwareKeys={masterId=true,playerBridgeName=true,colonyBridgeName=true,colonyIntegratorName=true,
@@ -72,7 +73,7 @@ end
 
 function M.new(config, store, engine, io, updater, options)
     options=options or {}
-    local self = {view="home", pages={}, edit=nil, route=nil, notice=nil, checkingUpdate=false}
+    local self = {view="home", pages={}, edit=nil, route=nil, routeSelections={}, notice=nil, checkingUpdate=false}
     local mon, monName, hasMonitor
     local monitorSizeError
     local snapshot = {}
@@ -131,6 +132,11 @@ function M.new(config, store, engine, io, updater, options)
         getMonitor=function() return mon or resolveMonitor() end,
         onFailure=function(err) logError("MONITOR", err); mon=nil end,
     })
+    local function nativeTerminal()
+        if type(term.native)=="function" then return term.native() end
+        return term.current()
+    end
+    local terminalPicker=SharedUI.newMonitor({getMonitor=nativeTerminal})
 
     local function data()
         if store and type(store.data) == "table" then return store.data end
@@ -204,6 +210,10 @@ function M.new(config, store, engine, io, updater, options)
 
     local function saveRoute(route)
         if options.readOnly then return false,"Remote colony dashboards are read-only." end
+        for key in pairs(self.routeSelections) do
+            local ok,available,reason=pcall(Devices.available,config,key,route[key],{route=route,routeId=self.routeId})
+            if not ok or not available then return false,tostring(reason or available) end
+        end
         if isBusy() then return false, "Wait until the current turn has finished before editing routes." end
         if type(engine.canEditRoute)=="function" then
             local ok,allowed,reason=pcall(engine.canEditRoute,route.id)
@@ -225,17 +235,65 @@ function M.new(config, store, engine, io, updater, options)
         return setValue("colonies", routes)
     end
 
-    local function editField(field, value, onSave)
+    local function refreshPicker(edit,hotplug)
+        if options.readOnly or not edit or edit.kind~="peripheral" then return end
+        local ok,choices=pcall(Devices.choices,config,edit.field.key,edit.deviceOptions)
+        if not ok then edit.choices={};edit.error="Device list unavailable: "..tostring(choices);return end
+        local changed=#(edit.choices or {})~=#choices
+        if not changed then
+            for i,choice in ipairs(choices) do
+                if choice.value~=edit.choices[i].value then changed=true;break end
+            end
+        end
+        edit.choices=choices
+        edit.currentAvailable=edit.current=="" and edit.spec.allowNone
+        for _,choice in ipairs(choices) do if choice.value==edit.current then edit.currentAvailable=true;break end end
+        if hotplug and changed then
+            edit.value="";edit.page=1;edit.error="Devices changed. Choose from the refreshed list."
+        end
+    end
+
+    local function editField(field, value, onSave, deviceOptions)
         if options.readOnly then return end
+        local spec=Devices.spec(field.key,deviceOptions and deviceOptions.route~=nil)
         self.edit = {field=field, value=value == nil and "" or tostring(value), onSave=onSave, error=nil}
+        if spec then
+            self.edit.kind="peripheral";self.edit.spec=spec
+            self.edit.current=self.edit.value;self.edit.value="";self.edit.page=1
+            self.edit.deviceOptions=deviceOptions
+            self.edit.choices={};refreshPicker(self.edit)
+        end
         self.edit.replace = true
         lastTerminal = nil
         draw()
     end
 
+    local function acceptPeripheral(value)
+        local edit=self.edit
+        if not edit or edit.kind~="peripheral" or options.readOnly then return end
+        local ok,available,reason=pcall(Devices.available,config,edit.field.key,value,edit.deviceOptions)
+        if not ok or not available then edit.error=tostring(reason or available);return end
+        local saved,accepted,err=pcall(edit.onSave,value)
+        if not saved or accepted==false then edit.error=tostring(err or accepted);return end
+        if edit.deviceOptions and edit.deviceOptions.route then self.routeSelections[edit.field.key]=true end
+        self.edit=nil;lastTerminal=nil
+    end
+
+    local function savePickerInput()
+        local edit=self.edit
+        local answer=Util.trim(edit.value)
+        if answer:lower()==":q" then self.edit=nil;lastTerminal=nil;return end
+        if answer=="" and edit.currentAvailable then acceptPeripheral(edit.current);return end
+        if answer=="0" and edit.spec.allowNone then acceptPeripheral("");return end
+        local number=tonumber(answer)
+        if number and number%1==0 and number>=1 and number<=#edit.choices then acceptPeripheral(edit.choices[number].value);return end
+        edit.error="Enter a listed number"..(edit.spec.allowNone and ", 0 for "..tostring(edit.spec.noneLabel or "none") or "").."."
+    end
+
     local function saveEdit()
         local edit = self.edit
         if not edit then return end
+        if edit.kind=="peripheral" then savePickerInput();return end
         local value = Util.trim(edit.value)
         local field = edit.field
         if field.type == "number" or field.type == "integer" then
@@ -507,7 +565,7 @@ function M.new(config, store, engine, io, updater, options)
         local _,h=screen.size()
         local schemas=fields()
         local rows,page,pages=pageRows(schemas,"settings",h-9)
-        frame("SETTINGS  "..page.."/"..pages,options.readOnly and "Reported colony configuration; edit on its computer or the master." or "Touch a setting; type its value on the computer keyboard.",C.dim)
+        frame("SETTINGS  "..page.."/"..pages,options.readOnly and "Reported colony configuration; edit on its computer or the master." or "Touch a setting. Devices use numbered lists of available peripherals.",C.dim)
         for i,field in ipairs(rows) do
             local value=config[field.key]
             if options.readOnly then
@@ -537,7 +595,7 @@ function M.new(config, store, engine, io, updater, options)
                 end
             end or nil)
         end
-        row(h-3,self.notice or (options.readOnly and "Read-only telemetry. Master policy overrides are marked MASTER." or "Changes are saved. Leave optional peripheral names empty for discovery."),C.dim)
+        row(h-3,self.notice or (options.readOnly and "Read-only telemetry. Master policy overrides are marked MASTER." or "Changes are saved. Optional device lists include NONE / AUTO."),C.dim)
         if role()=="master" then row(h-2,"COLONY ROUTES / OVERRIDES  >",C.accent,function() self.view="routes"; draw() end) end
         footer("settings",page,pages)
     end
@@ -560,13 +618,14 @@ function M.new(config, store, engine, io, updater, options)
         frame("COLONY ROUTES  "..page.."/"..pages,"Each colony needs two exclusive, physically matching Ender color channels.",C.dim)
         for i,r in ipairs(rows) do
             row(4+i,"["..tostring(r.id).."] "..tostring(r.label).."  "..tostring(r.deliveryChannel).." / "..tostring(r.returnChannel).."  Monitor: "..tostring(r.monitorName or "none"),C.text,function()
-                self.route=copy(r); self.routeId=r.id; self.view="route"; draw()
+                self.route=copy(r); self.routeId=r.id;self.routeSelections={}; self.view="route"; draw()
             end)
         end
         row(h-3,self.notice or "Route edits take effect after restart; existing delivery records are preserved.",C.dim)
         row(h-2,"ADD COLONY ROUTE  >",C.accent,function()
             self.route={label="",monitorName="",deliveryChest="",returnChest="",deliveryChannel="",returnChannel="",outputDirection="west",returnDirection="west",overrides={}}
             self.routeId=nil
+            self.routeSelections={}
             self.view="route"; draw()
         end)
         footer("routes",page,pages,"BACK",function() self.view="settings" end)
@@ -581,7 +640,7 @@ function M.new(config, store, engine, io, updater, options)
                 editField(f,self.route[f.key],function(value)
                     if f.key=="id" and self.routeId and value~=self.routeId then return false,"An existing route's ID is fixed; add a route for a different computer." end
                     self.route[f.key]=value; return true
-                end)
+                end,{route=self.route,routeId=self.routeId})
             end)
         end
         row(h-4,self.notice or "Map the color labels to your actual Ender Chests; colors cannot be discovered.",C.dim)
@@ -636,7 +695,113 @@ function M.new(config, store, engine, io, updater, options)
         footer("overrides",page,pages,"BACK",function() self.view="route" end)
     end
 
+    local function pickerPages(edit,width,capacity)
+        local blocks={}
+        local current={{text="CURRENT"..(edit.currentAvailable and "" or " (unavailable)"),color=C.accent}}
+        for _,line in ipairs(Util.wrapText(edit.current=="" and tostring(edit.spec.noneLabel or "None") or edit.current,width)) do
+            current[#current+1]={text=line,color=C.accent}
+        end
+        blocks[#blocks+1]=current
+        for index,choice in ipairs(edit.choices) do
+            local prefix=tostring(index)..") "
+            local block={}
+            for lineIndex,line in ipairs(Util.wrapText(choice.label,math.max(1,width-#prefix))) do
+                block[#block+1]={text=(lineIndex==1 and prefix or string.rep(" ",#prefix))..line,
+                    color=choice.value==edit.current and C.accent or C.text,index=index}
+            end
+            if choice.detail and choice.detail~="" then
+                for _,line in ipairs(Util.wrapText(choice.detail,math.max(1,width-2))) do
+                    block[#block+1]={text="  "..line,color=C.dim,index=index}
+                end
+            end
+            blocks[#blocks+1]=block
+        end
+        if #edit.choices==0 then
+            local block={}
+            for _,line in ipairs(Util.wrapText("No unused compatible devices. Connect a device or free its assignment, then refresh.",width)) do
+                block[#block+1]={text=line,color=C.warn}
+            end
+            blocks[#blocks+1]=block
+        end
+        local pages,page={},{}
+        local function finish() if #page>0 then pages[#pages+1]=page;page={} end end
+        for _,block in ipairs(blocks) do
+            if #block<=capacity and #page+#block>capacity then finish() end
+            for _,line in ipairs(block) do
+                if #page>=capacity then finish() end
+                page[#page+1]=line
+            end
+        end
+        finish()
+        return pages
+    end
+
+    local function drawPicker(canvas)
+        local screen=canvas or screen
+        local edit=self.edit
+        local w,h=screen.size()
+        screen.clear();screen.resetButtons()
+        if w<32 or h<16 then
+            screen.drawHeader({title="SELECT PERIPHERAL",subtitle=edit.field.label,status="Computer keyboard: Escape cancels."})
+            screen.writeAt(2,5,"Use the computer screen or a larger monitor.",C.warn)
+            screen.addButton("picker_cancel",1,h-1,w,h,"CANCEL",C.nav,C.text,function() self.edit=nil;lastTerminal=nil;draw() end)
+            return
+        end
+        -- The keyboard and monitor share global numbers and the same page.
+        -- Fit each page on the native computer even when the monitor is larger.
+        local native=nativeTerminal()
+        local ok,nativeWidth,nativeHeight=pcall(native.getSize)
+        local pageWidth,pageHeight=w,h
+        if ok and nativeWidth>=32 and nativeHeight>=16 then
+            pageWidth=math.min(pageWidth,nativeWidth);pageHeight=math.min(pageHeight,nativeHeight)
+        end
+        local pages=pickerPages(edit,pageWidth-4,math.max(1,pageHeight-11))
+        edit.pageCount=math.max(1,#pages)
+        edit.page=Util.clamp(edit.page or 1,1,edit.pageCount)
+        screen.drawHeader({title="SELECT PERIPHERAL",subtitle=edit.field.label or edit.field.key,
+            status="Unused "..tostring(edit.spec.kind).." devices; current selection included.",
+            pageTitle="DEVICES  "..edit.page.."/"..edit.pageCount})
+        for index,line in ipairs(pages[edit.page] or {}) do
+            local y=4+index
+            local bg=y%2==0 and C.panel or C.bg
+            screen.fillRow(y,bg);screen.writeAt(3,y,line.text,line.color,bg)
+            if line.index then
+                local choiceNumber=line.index
+                screen.addTouchArea("picker_choice_"..choiceNumber,1,y,w,y,function()
+                    acceptPeripheral(edit.choices[choiceNumber].value);draw()
+                end)
+            end
+        end
+        if edit.error then
+            for index,line in ipairs(Util.wrapText(edit.error,w-4)) do
+                if index>2 then break end
+                screen.writeAt(3,h-7+index,line,C.danger)
+            end
+        end
+        screen.writeAt(3,h-4,"Number + Enter / touch / N,P pages / Esc cancel",C.dim)
+        screen.writeAt(3,h-3,"Choice: "..edit.value.."_",C.text)
+        local first,second=math.floor(w/3),math.floor(w*2/3)
+        screen.addButton("picker_prev",1,h-2,first,h-2,"PREV",C.nav,C.text,function()
+            edit.page=math.max(1,edit.page-1);edit.value="";draw()
+        end)
+        screen.addButton("picker_keep",first+1,h-2,second,h-2,"KEEP CURRENT",edit.currentAvailable and C.navActive or C.nav,edit.currentAvailable and C.text or C.dim,function()
+            if edit.currentAvailable then acceptPeripheral(edit.current);draw() end
+        end)
+        screen.addButton("picker_next",second+1,h-2,w,h-2,"NEXT",C.nav,C.text,function()
+            edit.page=math.min(edit.pageCount,edit.page+1);edit.value="";draw()
+        end)
+        screen.addButton(edit.spec.allowNone and "picker_none" or "picker_refresh",1,h-1,math.floor(w/2),h,
+            edit.spec.allowNone and "NONE / AUTO (0)" or "REFRESH",C.navActive,C.text,function()
+                if edit.spec.allowNone then acceptPeripheral("") else refreshPicker(edit,true) end
+                draw()
+            end)
+        screen.addButton("picker_cancel",math.floor(w/2)+1,h-1,w,h,"CANCEL",C.nav,C.text,function()
+            self.edit=nil;lastTerminal=nil;draw()
+        end)
+    end
+
     local function drawEdit()
+        if self.edit.kind=="peripheral" then drawPicker();return end
         local w,h=screen.size()
         screen.clear(); screen.resetButtons()
         screen.drawHeader({title="EDIT SETTING",subtitle=self.edit.field.label or self.edit.field.key,
@@ -684,6 +849,13 @@ function M.new(config, store, engine, io, updater, options)
     function self.renderTerminal()
         if options.displayOnly then return end
         if not hasMonitor then return end
+        if self.edit and self.edit.kind=="peripheral" then
+            local marker={"PICKER",self.edit.field.key,self.edit.current,self.edit.value,tostring(self.edit.page),tostring(self.edit.error)}
+            for _,choice in ipairs(self.edit.choices) do marker[#marker+1]=choice.value..":"..tostring(choice.detail) end
+            marker=table.concat(marker,"\n")
+            if marker~=lastTerminal then lastTerminal=marker;drawPicker(terminalPicker) end
+            return
+        end
         local lines={}
         for _,check in ipairs(healthRows()) do
             if not check.ok then lines[#lines+1]={text=check.severity..": "..check.label.." - "..check.detail,color=check.severity=="WARNING" and C.warn or C.danger} end
@@ -698,7 +870,7 @@ function M.new(config, store, engine, io, updater, options)
         if self.edit then
             lines[#lines+1]={text="EDIT: "..tostring(self.edit.field.label or self.edit.field.key),color=C.title}
             lines[#lines+1]={text=self.edit.value.."_",color=C.text}
-            lines[#lines+1]={text=self.edit.error or "Enter saves; Escape cancels.",color=self.edit.error and C.danger or C.dim}
+            lines[#lines+1]={text=self.edit.error or (self.edit.kind=="peripheral" and "Type a device number; Enter selects. N/P pages; Escape cancels." or "Enter saves; Escape cancels."),color=self.edit.error and C.danger or C.dim}
         end
         local content={}
         for _,line in ipairs(lines) do content[#content+1]=line.text..":"..tostring(line.color) end
@@ -714,18 +886,28 @@ function M.new(config, store, engine, io, updater, options)
         if type(event)=="table" then return self.handleEvent(table.unpack(event)) end
         if options.displayOnly and (event=="char" or event=="paste" or event=="key" or event=="mouse_click" or event=="term_resize") then return false end
         if event=="monitor_resize" or event=="term_resize" or event=="peripheral" or event=="peripheral_detach" then
+            if event=="peripheral" or event=="peripheral_detach" then refreshPicker(self.edit,true) end
             mon=nil; lastTerminal=nil; draw(); return false
         end
         if self.edit and not options.readOnly then
             if event=="char" then
-                if self.edit.replace then self.edit.value=""; self.edit.replace=false end
-                self.edit.value=self.edit.value..tostring(a)
+                local command=tostring(a):lower()
+                if self.edit.kind=="peripheral" and (command=="n" or command=="p") then
+                    self.edit.page=Util.clamp(self.edit.page+(command=="n" and 1 or -1),1,self.edit.pageCount or 1)
+                    self.edit.value=""
+                else
+                    if self.edit.replace then self.edit.value=""; self.edit.replace=false end
+                    self.edit.value=self.edit.value..tostring(a)
+                end
             elseif event=="paste" then
                 if self.edit.replace then self.edit.value=""; self.edit.replace=false end
                 self.edit.value=self.edit.value..tostring(a):gsub("[\r\n]","")
             elseif event=="key" then
                 if a==keys.enter or a==keys.numPadEnter then saveEdit()
                 elseif a==keys.escape then self.edit=nil; lastTerminal=nil
+                elseif self.edit.kind=="peripheral" and (a==keys.left or a==keys.pageUp or a==keys.right or a==keys.pageDown) then
+                    local delta=(a==keys.left or a==keys.pageUp) and -1 or 1
+                    self.edit.page=Util.clamp(self.edit.page+delta,1,self.edit.pageCount or 1);self.edit.value=""
                 elseif a==keys.backspace then self.edit.value=self.edit.value:sub(1,-2); self.edit.replace=false
                 elseif a==keys.delete then self.edit.value=""; self.edit.replace=false
                 else return false end

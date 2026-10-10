@@ -2,6 +2,7 @@
 -- No inventory, bridge, monitor or journal operation occurs in this wizard.
 local Config=require("colony.network.config")
 local SetupUI=require("colony.network.setup_ui")
+local Devices=require("colony.network.devices")
 local M={}
 
 local function copy(value)
@@ -25,48 +26,11 @@ local function suggestedChannels(label)
     local colony=label:find("clockwork",1,true) and "blue" or label:find("stardust",1,true) and "pink"
     if colony then return "red-"..colony.."-white","red-"..colony.."-black" end
 end
-local function choices(kind,excluded)
-    local names=peripheral.getNames();table.sort(names)
-    local out={}
-    for _,name in ipairs(names) do
-        local match
-        if kind=="inventory" then
-            local device=peripheral.wrap(name)
-            match=device and type(device.list)=="function" and type(device.size)=="function"
-        else match=peripheral.hasType(name,kind) end
-        if match and not (excluded and excluded[name:lower()]) then
-            local types={peripheral.getType(name)}
-            out[#out+1]={label=name,value=name,detail=table.concat(types," / ")}
-        end
-    end
-    return out
-end
-local function selectDevice(ui,spec,kind,excluded)
-    spec.choices=choices(kind,excluded)
-    local present={};for _,entry in ipairs(spec.choices) do present[entry.value]=true end
+local function selectDevice(ui,spec,config,key,options)
+    spec.choices=Devices.choices(config,key,options)
     spec.required=not spec.allowNone
-    spec.validate=function(value)
-        if present[value] then return textValid(value) end
-        return false,"Choose a connected device from the list."
-    end
-    -- A disconnected old device is displayed for reference, but cannot be
-    -- silently kept in place of the connected device the user selects.
+    spec.validate=function(value) return Devices.available(config,key,value,options) end
     return ui.choose(spec)
-end
-local function excludedChests(config,id)
-    local out={}
-    for _,route in ipairs(config.colonies) do if route.id~=id then
-        out[route.deliveryChest:lower()]=true;out[route.returnChest:lower()]=true
-    end end
-    return out
-end
-local function excludedMonitors(config,id,includePrimary)
-    local out={}
-    if includePrimary and config.monitorName~="" then out[config.monitorName:lower()]=true end
-    for _,route in ipairs(config.colonies) do
-        if route.id~=id and route.monitorName and route.monitorName~="" then out[route.monitorName:lower()]=true end
-    end
-    return out
 end
 local function channel(ui,label,current,help,unavailable)
     return ui.ask({title="CHEST COLORS",label=label,current=current,required=true,help=help,
@@ -78,7 +42,7 @@ local function channel(ui,label,current,help,unavailable)
 end
 local function master(ui,draft)
     draft.playerBridgeName=selectDevice(ui,{title="PLAYER STORAGE",label="Choose the PRS Bridge",current=draft.playerBridgeName,
-        help={"Select the bridge connected to player storage.","Use its wired modem name to identify it."}},"rsBridge")
+        help={"Select the bridge connected to player storage.","Use its wired modem name to identify it."}},draft,"playerBridgeName")
     -- Wiring changes are applied only while idle (runtime checks retained
     -- work first), and must be tested before automatically moving items.
     draft.automationEnabled=false
@@ -92,17 +56,17 @@ local function master(ui,draft)
         local id=tonumber(value)
         local route
         for _,existing in ipairs(draft.colonies) do if existing.id==id then route=copy(existing);break end end
+        local deviceOptions={route=route,routeId=route and route.id or nil}
         route=route or {id=id,overrides={}}
+        deviceOptions.route=route
         local defaultLabel=route.label or (#draft.colonies==0 and "Clockwork" or #draft.colonies==1 and "Stardust" or nil)
         route.label=ui.ask({title="COLONY NAME",label="Colony label",current=defaultLabel,required=true,
             help={"Name shown on the master dashboard.","The connection uses the computer ID, not this name."},validate=textValid})
         local deliveryDefault,returnDefault=suggestedChannels(route.label)
-        local unavailable=excludedChests(draft,id)
         route.deliveryChest=selectDevice(ui,{title="MASTER DELIVERY",label="Choose the chest TO "..route.label,current=route.deliveryChest,
-            help={"Select this colony's master delivery chest.","Physical colors: "..(route.deliveryChannel or deliveryDefault or "red / colony color / white")}},"inventory",unavailable)
-        unavailable[route.deliveryChest:lower()]=true
+            help={"Select this colony's master delivery chest.","Physical colors: "..(route.deliveryChannel or deliveryDefault or "red / colony color / white")}},draft,"deliveryChest",deviceOptions)
         route.returnChest=selectDevice(ui,{title="MASTER RETURN",label="Choose the chest FROM "..route.label,current=route.returnChest,
-            help={"Select this colony's master overflow return chest.","Physical colors: "..(route.returnChannel or returnDefault or "red / colony color / black")}},"inventory",unavailable)
+            help={"Select this colony's master overflow return chest.","Physical colors: "..(route.returnChannel or returnDefault or "red / colony color / black")}},draft,"returnChest",deviceOptions)
         local usedChannels={}
         for _,other in ipairs(draft.colonies) do if other.id~=id then
             usedChannels[other.deliveryChannel:lower()]=true;usedChannels[other.returnChannel:lower()]=true
@@ -114,7 +78,7 @@ local function master(ui,draft)
             {"Type the physical dyes in order, such as", "red-blue-black (Clockwork) or red-pink-black", "(Stardust). This is a different chest channel."},usedChannels)
         route.monitorName=selectDevice(ui,{title="COLONY DISPLAY",label="Master dashboard for "..route.label,
             current=route.monitorName or "",allowNone=true,noneLabel="No extra colony dashboard",
-            help={"Optional separate monitor beside the overview.","Use a 5 blocks wide x 3 high Advanced Monitor."}},"monitor",excludedMonitors(draft,id,true))
+            help={"Optional separate monitor beside the overview.","Use a 5 blocks wide x 3 high Advanced Monitor."}},draft,"monitorName",deviceOptions)
         local ok,err=Config.setColony(draft,route)
         if not ok then ui.notice({title="CHECK COLONY SETUP",lines={tostring(err),"Enter the same computer ID to try again."}}) end
     end
@@ -124,15 +88,15 @@ local function supply(ui,draft)
         current=draft.masterId>=0 and draft.masterId or nil,required=true,
         help={"Run id on the dedicated PRS master computer.","Enter that number, not its computer label."},validate=idValid}))
     draft.colonyIntegratorName=selectDevice(ui,{title="COLONY REQUESTS",label="Choose the Colony Integrator",current=draft.colonyIntegratorName,
-        help={"Choose the integrator for this computer's colony."}},"colonyIntegrator")
+        help={"Choose the integrator for this computer's colony."}},draft,"colonyIntegratorName")
     draft.colonyBridgeName=selectDevice(ui,{title="COLONY STORAGE",label="Choose the Colony RS Bridge",current=draft.colonyBridgeName,
-        help={"Choose the bridge connected to this colony's storage."}},"rsBridge")
+        help={"Choose the bridge connected to this colony's storage."}},draft,"colonyBridgeName")
     local label=type(os.getComputerLabel)=="function" and os.getComputerLabel() or nil
     local deliveryDefault,returnDefault=suggestedChannels(label)
     draft.deliveryChestName=selectDevice(ui,{title="COLONY DELIVERY",label="Choose the chest TO this colony",current=draft.deliveryChestName,
-        help={"Local delivery chest; matches the master's colors.","Physical colors: "..(draft.deliveryChannel~="" and draft.deliveryChannel or deliveryDefault or "red / colony color / white")}},"inventory")
+        help={"Local delivery chest; matches the master's colors.","Physical colors: "..(draft.deliveryChannel~="" and draft.deliveryChannel or deliveryDefault or "red / colony color / white")}},draft,"deliveryChestName")
     draft.returnChestName=selectDevice(ui,{title="COLONY RETURN",label="Choose the chest FROM this colony",current=draft.returnChestName,
-        help={"Local overflow return chest; matches the master.","Physical colors: "..(draft.returnChannel~="" and draft.returnChannel or returnDefault or "red / colony color / black")}},"inventory",{[draft.deliveryChestName:lower()]=true})
+        help={"Local overflow return chest; matches the master.","Physical colors: "..(draft.returnChannel~="" and draft.returnChannel or returnDefault or "red / colony color / black")}},draft,"returnChestName")
     draft.deliveryChannel=channel(ui,"Delivery colors (TO colony)",draft.deliveryChannel~="" and draft.deliveryChannel or deliveryDefault,
         {"Match the delivery colors entered on the master.","Clockwork: red-blue-white", "Stardust: red-pink-white"},{})
     draft.returnChannel=channel(ui,"Return colors (FROM colony)",draft.returnChannel~="" and draft.returnChannel or returnDefault,
@@ -178,7 +142,7 @@ function M.run(config)
             "Write the peripheral name on a sign beside each chest or monitor. Chest colors are set by hand; setup cannot read the dyes."}})
         draft.monitorName=selectDevice(ui,{title="MAIN DISPLAY",label=draft.role=="master" and "Choose the master overview monitor" or "Choose this colony's monitor",
             current=draft.monitorName,allowNone=true,noneLabel="Automatic / computer screen",
-            help={"Use a 5 blocks wide x 3 high Advanced Monitor.","With several monitors, select one by number."}},"monitor",draft.role=="master" and excludedMonitors(draft,nil,false) or nil)
+            help={"Use a 5 blocks wide x 3 high Advanced Monitor.","With several monitors, select one by number."}},draft,"monitorName")
         if draft.role=="master" then master(ui,draft) else supply(ui,draft) end
         local valid,err=Config.validate(draft);if not valid then error(err,0) end
         if not review(ui,draft) then return false end

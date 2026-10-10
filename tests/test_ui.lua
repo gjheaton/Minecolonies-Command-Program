@@ -83,8 +83,11 @@ end)
 
 Test.case("UI editor validates values and persists scalar settings without blocking read",function()
     local f=fixture()
+    f.w.device(1,"prs-new","rsBridge",{})
     f.selectSetting("playerBridgeName");assert(f.ui.edit)
-    f.type("prs-new")
+    local selected
+    for index,choice in ipairs(f.ui.edit.choices or {}) do if choice.value=="prs-new" then selected=index end end
+    assert(selected,"connected PRS bridge was not listed");f.type(tostring(selected))
     Test.equal(f.config.playerBridgeName,"prs-new")
     local saved=textutils.unserialize(f.w.files[Config.PATH]);Test.equal(saved.playerBridgeName,"prs-new")
     f.selectSetting("maxRequestsPerTurn");f.type("2.5")

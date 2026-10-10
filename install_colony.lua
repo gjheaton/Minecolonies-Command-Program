@@ -30,6 +30,7 @@ local SUITE_INFO = {
         { path = "/colony/network/config.lua", app = "network", remote = "colony/network/config.lua" },
         { path = "/colony/network/store.lua", app = "network", remote = "colony/network/store.lua" },
         { path = "/colony/network/io.lua", app = "network", remote = "colony/network/io.lua" },
+        { path = "/colony/network/devices.lua", app = "network", remote = "colony/network/devices.lua" },
         { path = "/colony/network/protocol.lua", app = "network", remote = "colony/network/protocol.lua" },
         { path = "/colony/network/telemetry.lua", app = "network", remote = "colony/network/telemetry.lua" },
         { path = "/colony/network/displays.lua", app = "network", remote = "colony/network/displays.lua" },
