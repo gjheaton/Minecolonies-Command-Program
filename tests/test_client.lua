@@ -234,4 +234,223 @@ Test.case("a definite zero with a bridge detail accounts nothing without an unkn
     assert(c.store.data.client.intent==nil and c.store.data.client.fault==nil)
     Test.equal(w.count(w.channels.D2,{name="minecraft:stone"}),0);Test.equal(c.rs.items[w.identity({name="minecraft:stone"})].amount,4)
 end)
+
+local function zeroFixture(nbt)
+    local w,c=S.clientFixture();local rice={name="farmersdelight:rice",nbt=nbt}
+    local deliveries={{id="shipment-27",requestId="rice-request",item=rice,count=1,verified=true,createdAt=99}}
+    c.integrator.requests={S.request("rice-request",rice.name,1,nbt)}
+    w.insert(w.channels.D2,rice,1)
+    for index,name in ipairs({"minecraft:stone","minecraft:cobblestone","minecraft:oak_planks","minecraft:dirt","minecraft:glass"}) do
+        local item={name=name};w.insert(w.channels.D2,item,1)
+        deliveries[#deliveries+1]={id="shipment-"..(27+index),requestId="other-"..index,item=item,count=1,verified=true,createdAt=100}
+        c.integrator.requests[#c.integrator.requests+1]=S.request("other-"..index,name,1)
+    end
+    local api=w.devices[2].crs.api;local original=api.importItemFromPeripheral;local calls=0
+    api.importItemFromPeripheral=function() calls=calls+1;return nil,"NOT_CONNECTED" end
+    w.grant(1,deliveries)
+    local responses={};for _,delivery in ipairs(deliveries) do responses[#responses+1]={id=delivery.requestId,status="error"} end
+    w.result(1,deliveries,responses)
+    assert(c.store.data.client.intent and c.store.data.client.turn.phase=="finished")
+    api.importItemFromPeripheral=function(...) calls=calls+1;return original(...) end
+    api.isConnected=function() return true end
+    local recovery=require("colony.network.client").zeroImportRecovery(c.config,c.store,c.io,c.matcher)
+    local f={w=w,c=c,api=api,rice=rice,deliveries=deliveries,recovery=recovery,id="shipment-27",calls=function() return calls end}
+    function f.preview(id) return w.at(2,function() return recovery.previewZeroImport(id or f.id) end) end
+    function f.confirm(answer) return w.at(2,recovery.reconcileZeroImport,f.id,answer or "ZERO shipment-27") end
+    function f.readonly(fn)
+        local files=textutils.serialize(w.files);local data=textutils.serialize(c.store.data,{allow_repetitions=true})
+        local beforeCalls=calls;local oldSave=c.store.save;local saves=0
+        c.store.save=function(...) saves=saves+1;return oldSave(...) end
+        local ok,err=pcall(fn);c.store.save=oldSave;assert(ok,err)
+        Test.equal(saves,0);Test.equal(calls,beforeCalls);Test.equal(textutils.serialize(w.files),files)
+        Test.equal(textutils.serialize(c.store.data,{allow_repetitions=true}),data)
+    end
+    return f
+end
+
+Test.case("operator zero-import preview and an incorrect confirmation are read-only and identify the exact retained rice shipment",function()
+    local f=zeroFixture();f.readonly(function()
+        local preview=f.preview();assert(preview)
+        Test.equal(preview.shipmentId,f.id);Test.equal(preview.requestId,"rice-request")
+        Test.equal(preview.item.name,f.rice.name);Test.equal(preview.count,1);Test.equal(preview.chest,"delivery")
+        Test.equal(preview.beforeChest,1);Test.equal(preview.currentChest,1);Test.equal(preview.beforeImported,0);Test.equal(preview.imported,0)
+        Test.equal(preview.bridgeName,"crs");Test.equal(preview.confirmation,"ZERO shipment-27")
+        local approved,err=f.confirm("ZERO shipment-28");assert(not approved and type(err)=="string")
+        assert(f.c.store.data.client.intent and f.c.store.data.client.fault)
+    end)
+    Test.equal(f.calls(),1);Test.equal(#f.w.callsFor("import",false),0)
+end)
+
+Test.case("operator zero-import refuses mismatched physical items ledger identities uncertain connectivity unfinished turns and known outcomes",function()
+    local cases={
+        {name="wrong shipment ID",apply=function(f) f.id="shipment-unknown" end},
+        {name="rice removed",apply=function(f) f.w.take(f.w.channels.D2,f.rice,1) end},
+        {name="rice increased",apply=function(f) f.w.insert(f.w.channels.D2,f.rice,1) end},
+        {name="wrong physical NBT",apply=function(f) for _,item in pairs(f.w.channels.D2.slots) do if item.name==f.rice.name then item.nbt="other-variant" end end end},
+        {name="unverified shipment",apply=function(f) f.c.store.data.client.shipments[f.id].verified=false end},
+        {name="shipment identity changed",apply=function(f) f.c.store.data.client.shipments[f.id].item={name=f.rice.name,nbt="other-variant"} end},
+        {name="imported ledger advanced",apply=function(f) f.c.store.data.client.shipments[f.id].imported=1 end},
+        {name="requested count changed",apply=function(f) f.c.store.data.client.intent.count=2 end},
+        {name="another delivery missing",apply=function(f) f.w.take(f.w.channels.D2,{name="minecraft:stone"},1) end},
+        {name="RS disconnected",apply=function(f) f.api.isConnected=function() return false,"NOT_CONNECTED" end end},
+        {name="RS connection unknown",apply=function(f) f.api.isConnected=function() return nil,"NETWORK_STATUS_UNAVAILABLE" end end},
+        {name="stock unreadable",apply=function(f) f.api.listItems=function() return nil,"NOT_CONNECTED" end end},
+        {name="unfinished turn",apply=function(f) f.c.store.data.client.turn.phase="awaiting" end},
+        {name="missing finished turn",apply=function(f) f.c.store.data.client.turn=nil end},
+        {name="overflow export",apply=function(f) f.c.store.data.client.intent.kind="return" end},
+        {name="known zero",apply=function(f) f.c.store.data.client.intent.reported=0 end},
+        {name="known positive",apply=function(f) f.c.store.data.client.intent.reported=1 end},
+        {name="unrelated fault",apply=function(f) f.c.store.data.client.fault.code="BAD_DELIVERY" end},
+        {name="missing selected request ID",apply=function(f) f.c.store.data.client.shipments[f.id].requestId=nil end},
+        {name="empty selected request ID",apply=function(f) f.c.store.data.client.shipments[f.id].requestId="" end},
+        {name="numeric selected request ID",apply=function(f) f.c.store.data.client.shipments[f.id].requestId=27 end},
+        {name="selected shipment map ID mismatch",apply=function(f) f.c.store.data.client.shipments[f.id].id="shipment-28" end},
+        {name="numeric selected shipment ID",apply=function(f) f.c.store.data.client.shipments[f.id].id=27 end},
+        {name="malformed other delivery entry",apply=function(f) f.c.store.data.client.shipments["shipment-28"]=false end},
+        {name="other shipment map ID mismatch",apply=function(f) f.c.store.data.client.shipments["shipment-28"].id="shipment-29" end},
+        {name="missing other request ID",apply=function(f) f.c.store.data.client.shipments["shipment-28"].requestId=nil end},
+    }
+    local invalidNumbers={{label="NaN",value=0/0},{label="infinity",value=math.huge},{label="negative infinity",value=-math.huge},
+        {label="fraction",value=.5},{label="negative",value=-1},{label="numeric string",value="1"}}
+    for _,field in ipairs({{group="intent",key="count"},{group="intent",key="beforeChest"},{group="intent",key="beforeImported"},
+        {group="selected",key="count"},{group="selected",key="imported"},{group="other",key="count"},{group="other",key="imported"}}) do
+        for _,invalid in ipairs(invalidNumbers) do
+            local group,key,value=field.group,field.key,invalid.value
+            cases[#cases+1]={name=group.." "..key.." "..invalid.label,apply=function(f)
+                local data=f.c.store.data.client
+                local target=group=="intent" and data.intent or data.shipments[group=="other" and "shipment-28" or f.id]
+                target[key]=value
+            end}
+        end
+    end
+    for _,case in ipairs(cases) do
+        local f=zeroFixture();case.apply(f)
+        f.readonly(function()
+            local preview,err
+            f.w.at(2,function() preview,err=f.recovery.previewZeroImport(f.id) end)
+            assert(preview==nil and type(err)=="string",case.name.." was allowed or lacked a useful refusal")
+            local approved=f.confirm();assert(not approved,case.name.." bypassed the refused preview")
+        end)
+        Test.equal(f.calls(),1,case.name)
+    end
+end)
+
+Test.case("operator zero-import is supply-only and rejects a master missing or invalid role before any peripheral or storage access",function()
+    for _,role in ipairs({"master","missing","invalid"}) do
+        local f=zeroFixture()
+        if role=="missing" then f.c.config.role=nil else f.c.config.role=role end
+        local reads=0
+        local function forbidden() reads=reads+1;error("invalid role accessed a storage API",0) end
+        f.c.io.bridgeStatus=forbidden;f.c.io.colonyStock=forbidden;f.c.io.stock=forbidden;f.c.io.snapshot=forbidden
+        f.readonly(function()
+            local preview,err
+            f.w.at(2,function() preview,err=f.recovery.previewZeroImport(f.id) end)
+            assert(preview==nil and tostring(err):find("only available on colony supply",1,true))
+            assert(not f.confirm())
+        end)
+        Test.equal(reads,0);Test.equal(f.calls(),1)
+    end
+end)
+
+Test.case("operator zero-import compares full literal NBT but records only a bounded item identity and primitive audit metadata",function()
+    local nbt={a=string.rep("x",5000),zSecret="private-full-nbt"};local f=zeroFixture(nbt)
+    local intent=f.c.store.data.client.intent;local delivery=f.c.store.data.client.shipments[f.id]
+    intent.item.displayName=string.rep("display",200);intent.callError="private-error-metadata"
+    intent.session=string.rep("session",200);delivery.requestId=string.rep("request",200)
+    local preview=f.preview();assert(preview)
+    Test.equal(textutils.serialize(preview.item.nbt),textutils.serialize(nbt))
+    local slot
+    for index,item in pairs(f.w.channels.D2.slots) do if item.name==f.rice.name then slot=index end end
+    assert(slot);f.w.channels.D2.slots[slot].nbt.zSecret="different-exact-variant"
+    f.readonly(function() assert(not f.confirm(),"a different literal NBT item was accepted under the same name") end)
+    f.w.channels.D2.slots[slot].nbt.zSecret=nbt.zSecret
+    assert(f.preview());assert(f.confirm())
+    local audit=f.c.store.data.history[#f.c.store.data.history];Test.equal(audit.kind,"OPERATOR_ZERO_IMPORT")
+    Test.equal(audit.context.item.name,f.rice.name)
+    assert(audit.context.item.nbt==nil and audit.context.item.displayName==nil and audit.context.callError==nil)
+    assert(type(audit.context.itemIdentity)=="string" and #audit.context.itemIdentity<=256)
+    Test.equal(audit.context.itemIdentityLength,#f.c.matcher.itemIdentity(intent.item));Test.equal(audit.context.itemIdentityTruncated,true)
+    Test.equal(#audit.context.requestId,256);Test.equal(#audit.context.session,256)
+    local encoded=textutils.serialize(audit)
+    assert(#encoded<2000 and not encoded:find("private-full-nbt",1,true) and not encoded:find("private-error-metadata",1,true))
+    Test.equal(f.calls(),1);Test.equal(f.c.store.data.client.shipments[f.id].imported,0)
+    Test.equal(f.w.count(f.w.channels.D2,f.rice),1)
+end)
+
+Test.case("operator zero-import revalidates the original preview after physical or retained-state changes",function()
+    for _,mode in ipairs({"source","connection","another delivery","valid replacement intent"}) do
+        local f=zeroFixture();assert(f.preview())
+        if mode=="source" then f.w.take(f.w.channels.D2,f.rice,1)
+        elseif mode=="connection" then f.api.isConnected=function() return false,"NOT_CONNECTED" end
+        elseif mode=="another delivery" then f.w.take(f.w.channels.D2,{name="minecraft:glass"},1)
+        else
+            f.w.insert(f.w.channels.D2,f.rice,1)
+            f.c.store.data.client.intent.count=2;f.c.store.data.client.intent.beforeChest=2
+            f.c.store.data.client.shipments[f.id].count=2
+        end
+        f.readonly(function() local approved,err=f.confirm();assert(not approved and type(err)=="string",mode.." invalidated no recovery guard") end)
+        assert(f.c.store.data.client.intent and f.c.store.data.client.fault)
+    end
+end)
+
+Test.case("operator-confirmed zero import audits the held original turn then clears only its hold and imports all staged deliveries once on a later grant",function()
+    local f=zeroFixture();local c,w=f.c,f.w
+    -- Later read-only error turns must not erase the original retained intent.
+    w.grant(2,f.deliveries);w.result(2,f.deliveries)
+    Test.equal(c.store.data.client.intent.turn,1);Test.equal(c.store.data.client.turn.turn,2)
+    local chestBefore=textutils.serialize(w.channels.D2.slots);local originalSave=c.store.save;local saves={}
+    c.store.save=function()
+        saves[#saves+1]=textutils.unserialize(textutils.serialize(c.store.data,{allow_repetitions=true}))
+        return originalSave()
+    end
+    assert(f.preview());local approved,err=f.confirm();assert(approved,err);c.store.save=originalSave
+    Test.equal(#saves,2);assert(saves[1].client.intent and saves[1].client.fault)
+    assert(saves[2].client.intent==nil and saves[2].client.fault==nil)
+    local audit=saves[1].history[#saves[1].history];Test.equal(audit.kind,"OPERATOR_ZERO_IMPORT")
+    Test.equal(audit.context.shipmentId,f.id);Test.equal(audit.context.count,1);Test.equal(audit.context.beforeChest,1)
+    Test.equal(audit.context.currentChest,1);Test.equal(audit.context.beforeImported,0);Test.equal(audit.context.turn,1)
+    Test.equal(audit.context.operatorConfirmation,"ZERO shipment-27")
+    Test.equal(f.calls(),1);Test.equal(textutils.serialize(w.channels.D2.slots),chestBefore)
+    for _,delivery in ipairs(f.deliveries) do Test.equal(c.store.data.client.shipments[delivery.id].imported,0) end
+    w.grant(3,f.deliveries);w.grant(3,f.deliveries)
+    Test.equal(f.calls(),7);Test.equal(#w.callsFor("import",false),6)
+    Test.equal(next(w.channels.D2.slots),nil)
+    for _,delivery in ipairs(f.deliveries) do
+        Test.equal(c.store.data.client.shipments[delivery.id].imported,1)
+        Test.equal(c.rs.items[w.identity(delivery.item)].amount,1)
+    end
+    local responses={};for _,delivery in ipairs(f.deliveries) do responses[#responses+1]={id=delivery.requestId,status="in progress"} end
+    w.result(3,f.deliveries,responses)
+    Test.equal(c.store.data.client.requests["rice-request"].status,"in progress")
+end)
+
+Test.case("failed operator audit or hold-clear persistence restores the hold and restart never replays the unknown import",function()
+    for _,stage in ipairs({1,2}) do
+        for _,failure in ipairs({"throw","false","nil"}) do
+            local f=zeroFixture();local c,w=f.c,f.w;assert(f.preview())
+            local originalSave=c.store.save;local count=0;local revision=c.store.data.revision
+            local files=textutils.serialize(w.files)
+            c.store.save=function()
+                count=count+1
+                if count==stage then
+                    if failure=="false" then return false,"Simulated journal rejection" end
+                    if failure=="nil" then return nil,"Simulated journal loss" end
+                    w.writeFail=true
+                end
+                return originalSave()
+            end
+            local ok,approved,err=pcall(f.confirm);assert(ok,"recovery leaked a persistence exception: "..tostring(approved))
+            assert(not approved and type(err)=="string");assert(c.store.data.client.intent and c.store.data.client.fault)
+            Test.equal(c.store.data.revision,revision+stage-1)
+            Test.equal(c.store.data.client.shipments[f.id].imported,0);Test.equal(f.calls(),1)
+            if stage==1 then Test.equal(textutils.serialize(w.files),files) end
+            c.store.save=originalSave;w.writeFail=false;c.restart();w.tick(2)
+            assert(c.store.data.client.intent and c.store.data.client.fault);Test.equal(c.store.data.client.shipments[f.id].imported,0)
+            local audits=0;for _,event in ipairs(c.store.data.history) do if event.kind=="OPERATOR_ZERO_IMPORT" then audits=audits+1 end end
+            Test.equal(audits,stage-1)
+            w.grant(2,f.deliveries);Test.equal(f.calls(),1);Test.equal(#w.callsFor("import",false),0)
+            Test.equal(w.count(w.channels.D2,f.rice),1)
+        end
+    end
+end)
 return true

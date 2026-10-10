@@ -418,4 +418,59 @@ Test.case("one transient phantom craft-output snapshot does not release its craf
     Test.equal(job.outputReads,0,"disappearing phantom output remained a stable sample")
     Test.equal(#w.callsFor("craft",true),1,"transient phantom stock allowed a duplicate craft")
 end)
+
+Test.case("operator zero recovery retains the master's original rice shipment and imports all six staged items once without exporting replacement stock",function()
+    local w,m=fixture(1);local c=w.computers[2];local rice={name="farmersdelight:rice"}
+    local items={rice,{name="minecraft:stone"},{name="minecraft:cobblestone"},{name="minecraft:oak_planks"},
+        {name="minecraft:dirt"},{name="minecraft:glass"}}
+    c.integrator.requests={}
+    for index,item in ipairs(items) do
+        local id=index==1 and "000-rice" or "Z"..index
+        c.integrator.requests[#c.integrator.requests+1]=S.request(id,item.name,1);m.rs.add(item,8)
+    end
+    local api=w.devices[2].crs.api;local originalImport=api.importItemFromPeripheral;local attempts=0
+    api.importItemFromPeripheral=function() attempts=attempts+1;return nil,"NOT_CONNECTED" end
+    api.isConnected=function() return false,"NOT_CONNECTED" end
+    w.untilTrue(function()
+        local state=c.store.data.client;local cs=m.store.data.master.colonies["2"]
+        return state.intent and state.turn.phase=="finished" and cs and cs.turn==nil
+    end,"the disconnected client did not close its retained error turn",260)
+    m.config.automationEnabled=false
+    local intent=c.store.data.client.intent;Test.equal(intent.item.name,rice.name);Test.equal(intent.beforeChest,1)
+    Test.equal(intent.count,1);Test.equal(intent.callError,"NOT_CONNECTED");assert(intent.reported==nil)
+    local shipmentId=intent.shipmentId;local cs=m.store.data.master.colonies["2"]
+    Test.equal(#cs.shipments,6);Test.equal(#w.callsFor("export",true),6);Test.equal(attempts,1)
+    for _,item in ipairs(items) do Test.equal(w.count(w.channels.D2,item),1) end
+    local source=textutils.serialize(w.channels.D2.slots)
+    api.isConnected=function() return true end
+    api.importItemFromPeripheral=function(...) attempts=attempts+1;return originalImport(...) end
+    local recovery=require("colony.network.client").zeroImportRecovery(c.config,c.store,c.io,c.matcher)
+    assert(w.at(2,recovery.previewZeroImport,shipmentId))
+    assert(w.at(2,recovery.reconcileZeroImport,shipmentId,"ZERO "..shipmentId))
+    Test.equal(textutils.serialize(w.channels.D2.slots),source);Test.equal(attempts,1)
+    Test.equal(c.store.data.client.shipments[shipmentId].imported,0)
+    c.restart();m.restart();m.config.automationEnabled=true
+    w.untilTrue(function()
+        local state=m.store.data.master.colonies["2"]
+        if not state or #state.shipments~=6 then return false end
+        for _,shipment in ipairs(state.shipments) do if shipment.imported~=1 then return false end end
+        return true
+    end,"the original staged shipments were not acknowledged after zero recovery",260)
+    for _=1,20 do w.step() end
+    Test.equal(#w.callsFor("export",true),6,"the master exported replacement items for existing verified shipments")
+    Test.equal(#w.callsFor("import",false),6);Test.equal(attempts,7)
+    for _,item in ipairs(items) do
+        Test.equal(c.rs.items[w.identity(item)].amount,1);Test.equal(m.rs.items[w.identity(item)].amount,7)
+        Test.equal(w.count(w.channels.D2,item),0)
+    end
+    Test.equal(c.store.data.client.shipments[shipmentId].imported,1)
+    Test.equal(m.store.data.master.colonies["2"].requests["000-rice"].status,"in progress")
+    for _,call in ipairs(w.callsFor(nil,true)) do Test.equal(call.computer,1) end
+    c.integrator.requests={}
+    w.untilTrue(function()
+        local state=m.store.data.master.colonies["2"]
+        return state.requests["000-rice"].status=="delivered" and #state.shipments==0
+    end,"completed MC requests did not release the old shipments")
+    Test.equal(#w.callsFor("export",true),6);Test.equal(#w.callsFor("import",false),6)
+end)
 return true

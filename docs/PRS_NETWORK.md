@@ -579,6 +579,39 @@ the physical chest and warehouse against the retained ledger before deciding on
 recovery. Repair and diagnostics do not clear that intent or guarantee that
 automatic reconciliation will succeed.
 
+#### Operator-confirmed zero colony import
+
+`colony_supply reconcile-zero <shipment ID>` is a local Supply recovery for an
+unknown import that you can confirm moved **no items**, with none subsequently
+replaced in the source chest. An unchanged stack alone cannot prove that; a
+false zero confirmation can cause excess deliveries when normal imports resume.
+Ordinary reconciliation still blocks an unknown return.
+
+Keep master automation paused and repair the affected Supply computer to obtain
+the command. If its original turn is still waiting for the master result, run
+both normal programs while paused until that handshake finishes, then stop the
+colony application and startup launcher again. For Stardust's held rice import:
+
+```lua
+install_colony --repair
+colony_supply reconcile-zero shipment-27
+```
+
+Before confirming, inspect the delivery chest and warehouse: the original one
+rice must still be present, the other five delivery items must remain in their
+recorded quantities, and the failed call must have moved nothing. Do not move or
+replace items to make the check pass. The preview requires a finished turn, a
+connected colony RS Bridge, readable stock, the original chest and exact item/NBT,
+unchanged source/imported quantities, and coverage of every retained shipment.
+
+Check the preview, then type the literal `ZERO shipment-27` only if those facts
+are certain. Any other input cancels. The command durably records
+**OPERATOR_ZERO_IMPORT** before clearing that selected intent and its fault; it
+moves no items and preserves all shipment/imported quantities and other deliveries.
+Only after an **OK:** result, reboot the colony and resume master automation.
+For **BLOCKED:** or uncertain physical history, leave automation paused and inspect
+the reported cause; do not clear the journal to bypass the guard.
+
 ### Recovering from a full computer disk
 
 1. Pause **Run supply automation** on the master, then stop the server or leave

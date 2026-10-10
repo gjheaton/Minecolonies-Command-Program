@@ -40,6 +40,172 @@ local BUILDING_PATTERNS = {
     "_blackstone$", "^netherrack$", "^end_stone$", "_slab$", "_stairs$", "_wall$",
 }
 
+-- Explicit operator recovery is separate from engine startup: inspecting or
+-- cancelling a preview must not rewrite a held intent or its fault.
+function M.zeroImportRecovery(config, store, io, matcher)
+    local self, previewGuard = {}, nil
+    local allowedFaults = { IMPORT_UNCERTAIN = true, TRANSFER_DESYNC = true, TRANSFER_UNCERTAIN = true }
+    local function quantity(value, minimum)
+        return type(value) == "number" and value == value
+            and value ~= math.huge and value ~= -math.huge
+            and value % 1 == 0 and value >= (minimum or 0)
+    end
+    local function equal(a, b, seen)
+        if type(a) ~= type(b) then return false end
+        if type(a) ~= "table" then return a == b end
+        seen = seen or {}
+        if seen[a] and seen[a][b] then return true end
+        seen[a] = seen[a] or {}; seen[a][b] = true
+        for key, value in pairs(a) do if not equal(value, b[key], seen) then return false end end
+        for key in pairs(b) do if a[key] == nil then return false end end
+        return true
+    end
+    local function inspect(shipmentId)
+        if config.role ~= "supply" then return nil, "Zero-import acknowledgment is only available on colony supply computers" end
+        if (type(shipmentId) ~= "string" and type(shipmentId) ~= "number") or tostring(shipmentId) == "" then
+            return nil, "Supply the exact held shipment ID"
+        end
+        local id, data = tostring(shipmentId), store.data.client
+        if #id > 256 then return nil, "The held shipment ID exceeds the recovery limit" end
+        if type(data) ~= "table" or type(data.intent) ~= "table" then return nil, "No interrupted colony import is held" end
+        local intent, fault = data.intent, data.fault
+        if intent.kind ~= "import" or intent.reported ~= nil or tostring(intent.shipmentId) ~= id then
+            return nil, "Only the exact held import with an unknown bridge return can receive this acknowledgment"
+        end
+        if type(fault) ~= "table" or not allowedFaults[fault.code] then
+            return nil, "The active fault is not this interrupted import; reconcile it separately"
+        end
+        if type(data.turn) ~= "table" or data.turn.phase ~= "finished" then
+            return nil, "Wait for the master result to close the reserved turn before repairing"
+        end
+        if type(config.deliveryChestName) ~= "string" or config.deliveryChestName == ""
+            or intent.chest ~= config.deliveryChestName then
+            return nil, "The configured delivery chest differs from the original import chest"
+        end
+        if not quantity(intent.count, 1) or not quantity(intent.beforeChest)
+            or intent.beforeChest < intent.count or not quantity(intent.beforeImported) then
+            return nil, "The interrupted import has invalid original quantities"
+        end
+        local shipments = data.shipments
+        local shipment = type(shipments) == "table" and shipments[id]
+        if type(shipment) ~= "table" or type(shipment.id) ~= "string" or shipment.id ~= id or shipment.verified ~= true
+            or type(shipment.requestId) ~= "string" or shipment.requestId == ""
+            or not quantity(shipment.count, 1) or not quantity(shipment.imported)
+            or shipment.imported ~= intent.beforeImported or intent.count > shipment.count - shipment.imported then
+            return nil, "The retained shipment ledger no longer agrees with the original import"
+        end
+        if type(intent.item) ~= "table" or type(intent.item.name) ~= "string" or intent.item.name == ""
+            or type(shipment.item) ~= "table" or type(shipment.item.name) ~= "string"
+            or matcher.itemIdentity(intent.item) ~= matcher.itemIdentity(shipment.item) then
+            return nil, "The interrupted import does not match the verified shipment's exact item and NBT"
+        end
+        if type(io.bridgeStatus) ~= "function" then return nil, "Cannot verify the colony RS connection" end
+        local bridge = io.bridgeStatus()
+        if type(bridge) ~= "table" or bridge.connected ~= true then
+            return nil, "Restore the colony RS connection first: " .. tostring(type(bridge) == "table" and bridge.error or "connection unknown")
+        end
+        local stock, stockError = io.colonyStock()
+        if type(stock) ~= "table" then return nil, "Cannot read the restored colony warehouse: " .. tostring(stockError) end
+        local items, chestError = io.snapshot(intent.chest)
+        if type(items) ~= "table" then return nil, "Cannot inspect the original delivery chest: " .. tostring(chestError) end
+        local current = io.count(items, intent.item)
+        if not quantity(current) or current ~= intent.beforeChest then
+            return nil, "The exact source item quantity changed; a zero-movement acknowledgment is unsafe"
+        end
+        local outstanding = {}
+        for key, delivery in pairs(shipments) do
+            if type(delivery) ~= "table" or delivery.verified ~= true
+                or type(key) ~= "string" or type(delivery.id) ~= "string" or key ~= delivery.id
+                or type(delivery.requestId) ~= "string" or delivery.requestId == ""
+                or not quantity(delivery.count, 1) or not quantity(delivery.imported)
+                or delivery.imported > delivery.count or type(delivery.item) ~= "table"
+                or type(delivery.item.name) ~= "string" or delivery.item.name == "" then
+                return nil, "A retained shipment has an invalid item or quantity; inspect its ledger separately"
+            end
+            local key = matcher.itemIdentity(delivery.item)
+            local required = outstanding[key] or { item = delivery.item, count = 0 }
+            required.count = required.count + delivery.count - delivery.imported
+            outstanding[key] = required
+        end
+        for _, required in pairs(outstanding) do
+            local present = io.count(items, required.item)
+            if not quantity(present) or not quantity(required.count) or present < required.count then
+                return nil, "A verified shipment is missing from the delivery chest; restore it before acknowledging zero movement"
+            end
+        end
+        local preview = {
+            shipmentId = id, requestId = shipment.requestId, chest = intent.chest,
+            item = { name = intent.item.name, displayName = intent.item.displayName, nbt = copy(intent.item.nbt) },
+            count = intent.count, beforeChest = intent.beforeChest, currentChest = current,
+            beforeImported = intent.beforeImported, imported = shipment.imported,
+            bridgeName = bridge.name, session = intent.session, turn = intent.turn,
+            confirmation = "ZERO " .. id,
+        }
+        local guard = { intent = copy(intent), shipment = copy(shipment), fault = copy(fault),
+            chest = config.deliveryChestName, configuredBridge = config.colonyBridgeName, bridgeName = bridge.name }
+        return preview, guard
+    end
+    local function checkedInspect(shipmentId)
+        local ok, preview, guard = pcall(inspect, shipmentId)
+        if not ok then return nil, "Cannot verify the held import: " .. tostring(preview) end
+        return preview, guard
+    end
+    local function persist()
+        local ok, result, err = pcall(store.save)
+        if not ok then return false, tostring(result) end
+        if result ~= true then return false, tostring(err or "Journal save did not confirm durability") end
+        return true
+    end
+    function self.previewZeroImport(shipmentId)
+        previewGuard = nil
+        local preview, guard = checkedInspect(shipmentId)
+        if not preview then return nil, guard end
+        previewGuard = guard
+        return preview
+    end
+    function self.reconcileZeroImport(shipmentId, confirmation)
+        if not previewGuard or type(confirmation) ~= "string" or confirmation ~= "ZERO " .. tostring(shipmentId) then
+            return false, "Preview the exact held shipment and enter its zero-movement confirmation first"
+        end
+        local preview, guard = checkedInspect(shipmentId)
+        if not preview then return false, guard end
+        if not equal(guard, previewGuard) then return false, "The held import changed after preview; inspect a fresh preview" end
+        local data, history = store.data.client, store.data.history
+        if type(history) ~= "table" then return false, "The audit history is invalid; restore persistence before repairing" end
+        local function auditValue(value)
+            if type(value) == "string" then return value:sub(1, 256) end
+            if type(value) == "number" or type(value) == "boolean" then return value end
+        end
+        local identity = matcher.itemIdentity(preview.item)
+        local nextHistory = copy(history)
+        nextHistory[#nextHistory + 1] = {
+            time = io.now(), kind = "OPERATOR_ZERO_IMPORT",
+            message = "Operator acknowledged zero movement for a held colony import; no imported quantity credited",
+            context = { shipmentId = preview.shipmentId, requestId = auditValue(preview.requestId), chest = auditValue(preview.chest),
+                item = { name = auditValue(preview.item.name) }, itemIdentity = identity:sub(1, 256),
+                itemIdentityLength = #identity, itemIdentityTruncated = #identity > 256,
+                count = preview.count, beforeChest = preview.beforeChest,
+                currentChest = preview.currentChest, beforeImported = preview.beforeImported,
+                session = auditValue(preview.session), turn = auditValue(preview.turn), bridgeName = auditValue(preview.bridgeName),
+                operatorConfirmation = confirmation },
+        }
+        while #nextHistory > math.max(1, amount(config.maxHistoryEntries or 400)) do table.remove(nextHistory, 1) end
+        store.data.history = nextHistory
+        local audited, auditError = persist()
+        if not audited then store.data.history = history; return false, "Cannot persist the operator acknowledgment: " .. auditError end
+        local intent, fault = data.intent, data.fault
+        data.intent, data.fault = nil, nil
+        local cleared, clearError = persist()
+        if not cleared then
+            data.intent, data.fault = intent, fault
+            return false, "Operator acknowledgment saved; import remains held because clearing it could not be persisted: " .. clearError
+        end
+        previewGuard = nil
+        return true, "Zero movement acknowledged; shipment quantities unchanged and the next normal turn may import the retained items"
+    end
+    return self
+end
+
 function M.new(config, store, io, matcher)
     local self = {}
     store.data.client = type(store.data.client) == "table" and store.data.client or {}

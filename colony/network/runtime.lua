@@ -45,6 +45,28 @@ function M.run(role,...)
     local matcher=Matcher.new(config,store)
     local io=IO.new(config,store,matcher)
     if mode=="diag" or mode=="diagnostics" then Diagnostics.printReport(config,io,store); return end
+    if mode=="reconcile-zero" then
+        if role~="supply" or type(arg2)~="string" or arg2=="" or arg3~=nil then
+            error("Usage: colony_supply reconcile-zero <shipment ID>",0)
+        end
+        -- Preview before constructing the engine: boot recovery would rewrite
+        -- the held fault. This command only records an operator-confirmed zero.
+        local recovery=require("colony.network.client").zeroImportRecovery(config,store,io,matcher)
+        local preview,reason=recovery.previewZeroImport(arg2)
+        if not preview then print("BLOCKED: "..tostring(reason));return end
+        print("HELD DELIVERY IMPORT: "..preview.shipmentId)
+        print("Item: "..preview.item.name.." x"..preview.count)
+        print("Chest: "..preview.chest)
+        print("Original/current chest quantity: "..preview.beforeChest.." / "..preview.currentChest)
+        print("Imported ledger stays: "..preview.imported)
+        print("Confirm only if NO items moved in that failed call and none were replaced.")
+        print("Other deliveries remain unchanged; this command moves no items.")
+        print("Type "..preview.confirmation.." to record zero, or anything else to cancel:")
+        local confirmation=read()
+        if confirmation~=preview.confirmation then print("CANCELLED: Held transfer unchanged");return end
+        local ok,detail=recovery.reconcileZeroImport(arg2,confirmation)
+        print((ok and "OK: " or "BLOCKED: ")..tostring(detail));return
+    end
     if mode=="monitors" then
         print("All supply monitors: 5 blocks wide x 3 high, scale 0.5 (100 x 38 characters).")
         for _,monitor in ipairs(io.monitors()) do
@@ -116,7 +138,7 @@ function M.run(role,...)
         end
         print((ok and "OK: " or "BLOCKED: ")..tostring(err)); return
     end
-    if mode and mode~="" then error("Usage: "..(role=="master" and "colony_master" or "colony_supply").." [setup | diag | monitors | reconcile | set key value"..(role=="master" and " | monitor ID name | chesttest ID [item]" or "").."]",0) end
+    if mode and mode~="" then error("Usage: "..(role=="master" and "colony_master" or "colony_supply").." [setup | diag | monitors | reconcile | set key value"..(role=="master" and " | monitor ID name | chesttest ID [item]" or " | reconcile-zero shipmentID").."]",0) end
     local inbox,action={},nil
     local processorFault
     local telemetryFault

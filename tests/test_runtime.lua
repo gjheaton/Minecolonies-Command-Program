@@ -109,4 +109,177 @@ Test.case("CLI reconciliation waits a bounded interval for offline colony withou
     local state=w.reloaded();assert(state.pendingTransfer and state.quarantine)
     Test.equal(#state.colonies["2"].shipments,0)
 end)
+
+local function zeroRecoveryFixture()
+    -- Generate the retained intent with the real supply engine, including its
+    -- UNKNOWN bridge result and the master's closing RESULT, before the CLI.
+    local w,c=S.clientFixture()
+    local rice={name="farmersdelight:rice",displayName="Rice",nbt={batch="reserved"}}
+    local deliveries={
+        {id="D-RICE",requestId="R1",item=rice,count=1,verified=true,createdAt=99},
+        {id="D-STONE",requestId="R2",item={name="minecraft:stone"},count=3,verified=true,createdAt=100},
+    }
+    c.integrator.requests={S.request("R1",rice.name,1),S.request("R2","minecraft:stone",3)}
+    w.insert(w.channels.D2,rice,1);w.insert(w.channels.D2,{name="minecraft:stone"},3)
+    local api=w.devices[2].crs.api;local originalImport=api.importItemFromPeripheral;local attempts=0
+    api.importItemFromPeripheral=function() attempts=attempts+1;return nil,"NOT_CONNECTED" end
+    assert(w.grant(1,deliveries));assert(w.result(1,deliveries,{{id="R1",status="error"},{id="R2",status="error"}}))
+    Test.equal(attempts,1)
+    local held=c.store.data.client
+    assert(held.intent and held.intent.reported==nil and held.fault)
+    Test.equal(held.intent.beforeChest,1);Test.equal(held.intent.beforeImported,0)
+    Test.equal(held.turn.phase,"finished");Test.equal(held.shipments["D-RICE"].imported,0)
+    api.importItemFromPeripheral=originalImport;api.isConnected=function() return true end
+    Config.save(c.config)
+    local path="/colony/supply_v4_state"
+    local persisted=Store.new(path,c.config);persisted.data=S.copy(c.store.data);persisted.save()
+    local f={w=w,c=c,rice=rice,api=api,path=path,before=S.copy(persisted.data),configBefore=w.files[Config.PATH]}
+    w.calls={};w.sent={};w.queue={}
+    w.devices[2].modem=nil -- Local operator recovery must work without rednet.
+    function f.loaded()
+        local saved=Store.new(path,c.config);saved.load();return saved.data
+    end
+    function f.run(id,answer,duringPrompt,role)
+        local Runtime=require("colony.network.runtime")
+        local Client=require("colony.network.client")
+        local originalNew,originalOpen=Client.new,fs.open
+        local originalPrint,originalWrite,originalRead=print,write,read
+        local out={lines={},prompts=0,writes=0,engineNews=0,journals={}}
+        Client.new=function() out.engineNews=out.engineNews+1;error("reconcile-zero constructed the supply engine",0) end
+        fs.open=function(name,mode)
+            local handle=originalOpen(name,mode)
+            if mode=="w" then
+                out.writes=out.writes+1
+                if handle and name:sub(1,#path)==path then
+                    local originalHandleWrite=handle.write
+                    handle.write=function(source)
+                        out.journals[#out.journals+1]=assert(textutils.unserialize(source))
+                        return originalHandleWrite(source)
+                    end
+                end
+            end
+            return handle
+        end
+        print=function(...)
+            local pieces={};for index=1,select("#",...) do pieces[index]=tostring(select(index,...)) end
+            out.lines[#out.lines+1]=table.concat(pieces," ")
+        end
+        write=function(value) out.lines[#out.lines+1]=tostring(value) end
+        read=function()
+            out.prompts=out.prompts+1
+            Test.equal(out.writes,0,"recovery wrote state before the operator's confirmation")
+            if duringPrompt then duringPrompt(f) end
+            return answer or ""
+        end
+        out.ok,out.err=pcall(w.at,2,Runtime.run,role or "supply","reconcile-zero",id)
+        Client.new,fs.open=originalNew,originalOpen
+        _G.print,_G.write,_G.read=originalPrint,originalWrite,originalRead
+        out.text=table.concat(out.lines,"\n")
+        Test.equal(out.engineNews,0,"preview/confirmation constructed an engine and could append boot faults")
+        for _,call in ipairs(w.calls) do
+            assert(call.method~="import" and call.method~="export" and call.method~="craft","reconcile-zero mutated an RS bridge")
+            assert(not call.prs,"reconcile-zero touched player RS")
+        end
+        Test.equal(#w.sent,0,"local operator recovery sent a network handoff")
+        Test.equal(w.files[Config.PATH],f.configBefore,"operator recovery changed transfer configuration")
+        return out
+    end
+    return f
+end
+
+Test.case("reconcile-zero previews the real unknown rice import and cancellation writes no journal or boot fault",function()
+    for _,answer in ipairs({"","cancel","ZERO D-STONE"}) do
+        local f=zeroRecoveryFixture();local files=textutils.serialize(f.w.files,{compact=true})
+        local out=f.run("D-RICE",answer)
+        assert(out.ok,tostring(out.err));Test.equal(out.prompts,1);Test.equal(out.writes,0)
+        assert(out.text:find("ZERO D-RICE",1,true),"CLI did not print the exact shipment-bound confirmation")
+        assert(out.text:find("farmersdelight:rice",1,true),"preview omitted the retained item's identity")
+        assert(out.text:find("delivery",1,true),"preview omitted the retained chest")
+        assert(out.text:find("Original/current chest quantity: 1 / 1",1,true))
+        assert(out.text:find("Imported ledger stays: 0",1,true))
+        assert(out.text:find("CANCELLED",1,true))
+        Test.equal(textutils.serialize(f.w.files,{compact=true}),files,"cancelled preview changed persisted state")
+        Test.equal(f.w.count(f.w.channels.D2,f.rice),1)
+        local saved=f.loaded();assert(saved.client.intent and saved.client.fault)
+        Test.equal(#saved.errors,#f.before.errors,"cancelled command appended an engine boot fault")
+    end
+end)
+
+Test.case("reconcile-zero exact confirmation durably audits while held then clears without credit or transfers",function()
+    local f=zeroRecoveryFixture();local out=f.run("D-RICE","ZERO D-RICE")
+    assert(out.ok,tostring(out.err));Test.equal(out.prompts,1);Test.equal(out.writes,2);Test.equal(#out.journals,2)
+    local audited,cleared=out.journals[1],out.journals[2]
+    assert(audited.client.intent and audited.client.fault,"operator audit was not persisted before releasing the hold")
+    assert(cleared.client.intent==nil and cleared.client.fault==nil)
+    local event=audited.history[#audited.history]
+    Test.equal(event.kind,"OPERATOR_ZERO_IMPORT");Test.equal(event.context.shipmentId,"D-RICE")
+    Test.equal(event.context.operatorConfirmation,"ZERO D-RICE")
+    Test.equal(event.context.beforeChest,1);Test.equal(event.context.currentChest,1)
+    Test.equal(event.context.beforeImported,0)
+    Test.equal(event.context.session,f.before.client.intent.session)
+    Test.equal(event.context.turn,f.before.client.intent.turn)
+    Test.equal(event.context.item.name,f.rice.name)
+    Test.equal(event.context.item.nbt,nil)
+    local identity=f.c.matcher.itemIdentity(f.rice)
+    Test.equal(event.context.itemIdentity,identity:sub(1,256))
+    Test.equal(event.context.itemIdentityLength,#identity)
+    Test.equal(event.context.itemIdentityTruncated,#identity>256)
+    local saved=f.loaded();assert(saved.client.intent==nil and saved.client.fault==nil)
+    Test.equal(#saved.history,#f.before.history+1);Test.equal(#saved.errors,#f.before.errors)
+    Test.equal(saved.revision,f.before.revision+2)
+    local expected=S.copy(f.before.client);expected.intent=nil;expected.fault=nil
+    Test.equal(textutils.serialize(saved.client,{compact=true}),textutils.serialize(expected,{compact=true}),"confirmed zero changed the delivery/request ledger")
+    Test.equal(f.w.count(f.w.channels.D2,f.rice),1)
+    Test.equal(f.w.count(f.w.channels.D2,{name="minecraft:stone"}),3)
+    Test.equal(saved.client.shipments["D-RICE"].imported,0)
+end)
+
+Test.case("reconcile-zero rechecks the physical source after the operator prompt and refuses a removed rice item",function()
+    local f=zeroRecoveryFixture();local files=textutils.serialize(f.w.files,{compact=true})
+    local out=f.run("D-RICE","ZERO D-RICE",function(current) current.w.take(current.w.channels.D2,current.rice,1) end)
+    assert(out.ok,tostring(out.err));Test.equal(out.prompts,1);Test.equal(out.writes,0)
+    assert(out.text:find("BLOCKED",1,true),"changed physical evidence was not reported as blocked")
+    Test.equal(textutils.serialize(f.w.files,{compact=true}),files)
+    local saved=f.loaded();assert(saved.client.intent and saved.client.fault)
+    Test.equal(saved.client.shipments["D-RICE"].imported,0)
+end)
+
+Test.case("reconcile-zero rechecks bridge connection after prompting and retains the hold on disconnect",function()
+    local f=zeroRecoveryFixture();local files=textutils.serialize(f.w.files,{compact=true})
+    local out=f.run("D-RICE","ZERO D-RICE",function(current) current.api.isConnected=function() return false end end)
+    assert(out.ok,tostring(out.err));Test.equal(out.prompts,1);Test.equal(out.writes,0)
+    assert(out.text:find("BLOCKED",1,true))
+    Test.equal(textutils.serialize(f.w.files,{compact=true}),files)
+    local saved=f.loaded();assert(saved.client.intent and saved.client.fault)
+end)
+
+Test.case("reconcile-zero missing or different shipment IDs fail before prompting without journal changes",function()
+    for _,id in ipairs({false,"D-STONE","missing"}) do
+        local f=zeroRecoveryFixture();local files=textutils.serialize(f.w.files,{compact=true})
+        local out=f.run(id or nil,"ZERO D-RICE")
+        Test.equal(out.prompts,0);Test.equal(out.writes,0)
+        if id==false then assert(not out.ok and tostring(out.err):find("Usage:",1,true))
+        else assert(out.ok and out.text:find("BLOCKED",1,true),"different shipment argument was not rejected") end
+        Test.equal(textutils.serialize(f.w.files,{compact=true}),files)
+        local saved=f.loaded();assert(saved.client.intent and saved.client.fault)
+    end
+    local f=zeroRecoveryFixture();Config.save(Config.defaults("master"));f.configBefore=f.w.files[Config.PATH]
+    local files=textutils.serialize(f.w.files,{compact=true})
+    local out=f.run("D-RICE","ZERO D-RICE",nil,"master")
+    assert(not out.ok and tostring(out.err):find("Usage:",1,true));Test.equal(out.prompts,0);Test.equal(out.writes,0)
+    Test.equal(textutils.serialize(f.w.files,{compact=true}),files)
+end)
+
+Test.case("reconcile-zero disconnected or unreadable RS preview never asks for confirmation or writes state",function()
+    for _,mode in ipairs({"disconnected","stock unreadable"}) do
+        local f=zeroRecoveryFixture();local files=textutils.serialize(f.w.files,{compact=true})
+        if mode=="disconnected" then f.api.isConnected=function() return false end
+        else f.api.listItems=function() return nil,"NOT_CONNECTED" end end
+        local out=f.run("D-RICE","ZERO D-RICE")
+        assert(out.ok,tostring(out.err));Test.equal(out.prompts,0);Test.equal(out.writes,0)
+        assert(out.text:find("BLOCKED",1,true))
+        Test.equal(textutils.serialize(f.w.files,{compact=true}),files)
+        local saved=f.loaded();assert(saved.client.intent and saved.client.fault)
+    end
+end)
 return true
