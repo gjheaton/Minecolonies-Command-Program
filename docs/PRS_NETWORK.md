@@ -540,6 +540,15 @@ exception does not authorize that retry. Unprovable quantities stay blocked for
 inventory inspection. A processor crash requires restart after recovery; a storage
 failure must be repaired before restarting.
 
+For **PROCESSOR_ERROR: Cannot serialize table with repeated entries**, run
+`install_colony --repair` and reboot the master and colony computers. This code
+fix preserves configuration and request/transfer journals and allows shared
+request tables to be saved. Requests marked **timed out** can receive updated
+statuses when their next turn completes. If restart reports **TURN_INTERRUPTED**,
+**IMPORT_UNCERTAIN**, or a transfer verification fault, let the original turn
+close and use the corresponding reconciliation command or action described
+above; retained transfer safeguards still apply.
+
 For updates, pause the master, let turns finish, then use the shared update control
 or the same installer:
 

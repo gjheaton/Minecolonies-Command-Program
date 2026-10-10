@@ -6,13 +6,37 @@ function S.copy(value)
     local out = {}; for key, child in pairs(value) do out[S.copy(key)] = S.copy(child) end
     return out
 end
-local function encoded(value)
-    if type(value) == "string" then return string.format("%q", value) end
-    if type(value) ~= "table" then return tostring(value) end
-    local keys = {}; for key in pairs(value) do keys[#keys+1] = key end
-    table.sort(keys, function(a,b) return tostring(a)<tostring(b) end)
-    local entries = {}; for _, key in ipairs(keys) do entries[#entries+1] = "["..encoded(key).."]="..encoded(value[key]) end
-    return "{"..table.concat(entries,",").."}"
+local function encoded(value,options)
+    -- Match CC:Tweaked textutils.serialize's tracking semantics. The official
+    -- mc-1.20.x textutils.lua serialize_impl keeps completed tables as false
+    -- by default, or clears them only when allow_repetitions is enabled.
+    -- Both modes reject a table reached while its ancestor is still active.
+    assert(options==nil or type(options)=="table","bad serialization options")
+    options=options or {}
+    for _,key in ipairs({"compact","allow_repetitions"}) do assert(options[key]==nil or type(options[key])=="boolean","bad serialization option "..key) end
+    local tracking={}
+    local function encode(current)
+        local kind=type(current)
+        if kind=="string" then return string.format("%q",current) end
+        if kind=="number" then
+            if current~=current then return "0/0" end
+            if current==math.huge then return "1/0" end
+            if current==-math.huge then return "-1/0" end
+            return tostring(current)
+        end
+        if kind=="nil" or kind=="boolean" then return tostring(current) end
+        if kind~="table" then error("Cannot serialize type "..kind,0) end
+        if tracking[current]~=nil then
+            error(tracking[current] and "Cannot serialize table with recursive entries" or "Cannot serialize table with repeated entries",0)
+        end
+        tracking[current]=true
+        local keys={};for key in pairs(current) do keys[#keys+1]=key end
+        table.sort(keys,function(a,b) return tostring(a)<tostring(b) end)
+        local entries={};for _,key in ipairs(keys) do entries[#entries+1]="["..encode(key).."]="..encode(current[key]) end
+        if options.allow_repetitions then tracking[current]=nil else tracking[current]=false end
+        return "{"..table.concat(entries,",").."}"
+    end
+    return encode(value)
 end
 local function json(value)
     if type(value)=="string" then return '"'..value:gsub('\\','\\\\'):gsub('"','\\"')..'"' end

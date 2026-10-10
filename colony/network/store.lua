@@ -22,18 +22,23 @@ function M.new(path,config)
     end
     function self.save()
         if self.fault then error(self.fault,0) end
-        local directory=fs.getDir(path); if directory~="" and not fs.exists(directory) then fs.makeDir(directory) end
         local revision=(self.data.revision or 0)+1
-        self.data.schema=4; self.data.revision=revision
+        local pending={}; for key,value in pairs(self.data) do pending[key]=value end
+        pending.schema=4; pending.revision=revision
         local target=path..(revision%2==0 and ".a" or ".b")
-        local source=textutils.serialize(self.data)
         local ok,err=pcall(function()
+            -- CC:Tweaked stores shared tables by value with this option, while
+            -- still rejecting cycles. Serialize before touching either slot.
+            local source=textutils.serialize(pending,{allow_repetitions=true})
+            assert(type(source)=="string","Persistent journal serialization returned no text")
+            local directory=fs.getDir(path); if directory~="" and not fs.exists(directory) then fs.makeDir(directory) end
             local h=assert(fs.open(target,"w"),"Cannot write persistent journal")
             h.write(source); h.close()
             local verify=assert(fs.open(target,"r")); local saved=verify.readAll(); verify.close()
             assert(saved==source,"Persistent journal verification failed")
         end)
         if not ok then self.fault="Persistence failure: "..tostring(err); error(self.fault,0) end
+        self.data.schema=4; self.data.revision=revision
         return true
     end
     function self.event(kind,message,context)
