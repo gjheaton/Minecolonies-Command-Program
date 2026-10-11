@@ -35,7 +35,8 @@ local function run(role,options,scenario)
         parallel=parallel,sleep=sleep,pull=os.pullEvent,print=print}
     local f={w=w,c=c,surface=surface,checks=0,installs=0,ticks=0,messages=0,reconciles=0,updateGuards=0,
         outcome="current",terminal={},held=held}
-    Engine.new=function(_,runtimeStore)
+    Engine.new=function(runtimeConfig,runtimeStore)
+        f.config=runtimeConfig
         f.store=runtimeStore
         f.busy=true
         f.engine={snapshot=function() return {role=role,health={ok=true,detail="Connected"},requests={},colonies={}} end,
@@ -49,7 +50,25 @@ local function run(role,options,scenario)
                 if options.updatable and message.kind=="result" then f.busy=false end
                 if options.updatable and message.kind=="turn" and not f.holding then f.busy=true end
             end,
-            reconcile=function() f.reconciles=f.reconciles+1;return false,"Original receipt stays held" end}
+            reconcile=function()
+                f.reconciles=f.reconciles+1
+                assert(coroutine.running()==f.processor,"recovery ran in receiver")
+                if role=="master" then
+                    Test.equal(runtimeConfig.automationEnabled,false)
+                    Test.equal(Config.load("master").automationEnabled,false,"recovery started before pause was saved")
+                end
+                return options.recoverable==true,"Original receipt stays held"
+            end,
+            verifyHeldTransfer=function()
+                f.verifications=(f.verifications or 0)+1
+                if f.verified then
+                    runtimeStore.data.master.pendingTransfer=nil
+                    runtimeStore.data.master.quarantine=nil
+                    runtimeStore.save()
+                    return true,"Held transfer verified from physical chest quantities"
+                end
+                return false,"Transfer verification pending; existing intent retained"
+            end}
         return f.engine
     end
     Updater.new=function()
@@ -119,6 +138,68 @@ local function run(role,options,scenario)
     _G.parallel,_G.sleep,os.pullEvent,_G.print=saved.parallel,saved.sleep,saved.pull,saved.print
     assert(ok,err);return f
 end
+
+Test.case("master recovery button serializes pause, verifies a single probe and reports completion without reboot",function()
+    run("master",{recoverable=true},function(f)
+        f.boot();f.config.automationEnabled=true;f.config.transferVerifyTimeoutSeconds=5;Config.save(f.config)
+        f.ui.view="health";f.manager.draw();f.click("RECOVER TRANSFER")
+        Test.equal(f.reconciles,0);f.click("RUN RECOVERY")
+        Test.equal(f.reconciles,0,"click performed recovery inline")
+        f.step();Test.equal(f.reconciles,1);Test.equal(f.verifications,1)
+        assert(f.engine.requestReconcile()==false,"concurrent recovery accepted")
+        assert(f.proxy.install()==false,"installation overlapped recovery")
+        f.step();Test.equal(f.reconciles,1,"recovery submitted a second probe")
+        f.verified=true;f.step()
+        assert(f.surface.dump():find("RECOVERED",1,true),"recovery result absent: "..f.surface.dump().." / "..tostring(f.ui.recoveryResult))
+        assert(not f.store.data.master.pendingTransfer and not f.store.data.master.quarantine)
+        Test.equal(f.config.automationEnabled,false);Test.equal(Config.load("master").automationEnabled,false)
+        Test.equal(f.installs,0)
+    end)
+end)
+
+Test.case("blocked and expired recovery preserve the original hold and report BLOCKED with automation paused",function()
+    for _,probe in ipairs({false,true}) do run("master",{recoverable=probe},function(f)
+        f.boot();f.config.automationEnabled=true;Config.save(f.config)
+        local completed,result
+        assert(f.engine.requestReconcile(function(ok,detail) completed=ok;result=detail end))
+        f.step()
+        if probe then
+            assert(completed==nil);f.w.advance(f.c.config.transferVerifyTimeoutSeconds+1);f.step()
+        end
+        Test.equal(completed,false);assert(result:find(probe and "remains held" or "Original receipt",1,true))
+        Test.equal(f.reconciles,1);Test.equal(payload(f.store.data),f.held)
+        Test.equal(Config.load("master").automationEnabled,false)
+    end) end
+end)
+
+Test.case("recovery reports a reserved chest test without starting a transfer or clearing its journal",function()
+    run("master",{reserved=true},function(f)
+        f.boot();local completed,result
+        assert(f.engine.requestReconcile(function(ok,detail) completed=ok;result=detail end));f.step()
+        Test.equal(completed,false);assert(result:find("chest test",1,true));Test.equal(f.reconciles,0);f.unchanged()
+    end)
+end)
+
+Test.case("failure to save the recovery pause prevents bridge work and reports a stopped processor",function()
+    run("master",{recoverable=true},function(f)
+        f.boot();local completed,result
+        assert(f.engine.requestReconcile(function(ok,detail) completed=ok;result=detail end))
+        local save=Config.save
+        Config.save=function() error("Injected disk write failure",0) end
+        local ok,err=pcall(f.step);Config.save=save;assert(ok,err)
+        Test.equal(completed,false);assert(result:find("Injected disk write failure",1,true))
+        Test.equal(f.reconciles,0);Test.equal(payload(f.store.data),f.held)
+    end)
+end)
+
+Test.case("monitor recovery does not restart a stopped processor or clear its retained transfer",function()
+    run("master",{stopped=true,recoverable=true},function(f)
+        f.boot();local completed,result
+        assert(f.engine.requestReconcile(function(ok,detail) completed=ok;result=detail end));f.step()
+        Test.equal(completed,false);assert(result:find("Restart the stopped processor",1,true))
+        Test.equal(f.reconciles,0);Test.equal(payload(f.store.data),f.held)
+    end)
+end)
 
 Test.case("manual CHECK UPDATE queues through the real receiver while busy and displays the current version source and completion time",function()
     for _,role in ipairs({"master","supply"}) do run(role,nil,function(f)

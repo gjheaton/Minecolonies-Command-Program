@@ -232,6 +232,7 @@ function M.run(role,...)
     local Displays=require("colony.network.displays")
     local inbox,action={},nil
     local processorFault
+    local recovery
     local telemetryFault
     local originalSnapshot=engine.snapshot
     function engine.snapshot()
@@ -260,10 +261,15 @@ function M.run(role,...)
         return true
     end
     local function queueAction(pending)
+        if recovery and pending=="update" then return false,"Finish recovery before installing an update" end
         if action~=nil then return false,"Another action is queued; try again" end
         action=pending;return true
     end
-    function engine.requestReconcile() return queueAction("reconcile") end
+    function engine.requestReconcile(callback)
+        if callback~=nil and type(callback)~="function" then return false,"Invalid completion callback" end
+        if recovery then return false,"Recovery is already running" end
+        return queueAction({kind="reconcile",callback=callback})
+    end
     function engine.requestClearErrors(callback)
         if callback~=nil and type(callback)~="function" then return false,"Invalid completion callback" end
         local queued,reason=queueAction({kind="clear_errors",callback=callback})
@@ -290,6 +296,12 @@ function M.run(role,...)
     local telemetry=Telemetry.new(config,store,io,engine)
     local ui=Displays.new(config,store,engine,io,updater,telemetry)
     local nextCheck=io.now()
+    local function finishRecovery(success,detail)
+        local completed=recovery
+        store.event(success and "RECOVERY" or "WARNING",detail or "Reconciliation finished")
+        recovery=nil
+        if completed and completed.callback then pcall(completed.callback,success,detail) end
+    end
     local function processor()
         while true do
             local ok,err=pcall(function()
@@ -317,9 +329,30 @@ function M.run(role,...)
                         actualUpdater.checking=false
                         actualUpdater.checkQueued=false
                         if not checked then actualUpdater.checkError=tostring(checkError) end
-                    elseif pending=="reconcile" and not store.data.chestTest then
-                        local recovered,detail=engine.reconcile()
-                        store.event(recovered and "RECOVERY" or "WARNING",detail or "Reconciliation finished")
+                    elseif type(pending)=="table" and pending.kind=="reconcile" then
+                        recovery=pending
+                        if processorFault or store.data.chestTest then
+                            finishRecovery(false,processorFault and "Restart the stopped processor before recovery" or "Finish the chest test before recovery")
+                        else
+                            -- Persist the pause before any recovery RPC. A
+                            -- completed check never silently resumes supply.
+                            local previous=config.automationEnabled
+                            local saved,reason=true,nil
+                            if role=="master" then
+                                config.automationEnabled=false
+                                saved,reason=Config.save(config)
+                                if saved==false then config.automationEnabled=previous end
+                            end
+                            if saved==false then finishRecovery(false,"Could not pause automation: "..tostring(reason))
+                            else
+                                local recovered,detail=engine.reconcile()
+                                local held=store.data.master and store.data.master.pendingTransfer
+                                if recovered and role=="master" and held and engine.verifyHeldTransfer then
+                                    recovery.deadline=io.now()+(held.verifySeconds or config.transferVerifyTimeoutSeconds)
+                                    recovery.nextRead=io.now()
+                                else finishRecovery(recovered,detail) end
+                            end
+                        end
                     elseif pending=="update" then
                         local allowed,reason=engine.canUpdate()
                         if allowed and not store.data.chestTest then
@@ -344,6 +377,13 @@ function M.run(role,...)
                         end
                     end
                 end
+                if recovery and io.now()>=recovery.nextRead then
+                    local held=store.data.master and store.data.master.pendingTransfer
+                    local recovered,detail=engine.verifyHeldTransfer()
+                    if recovered then finishRecovery(true,detail)
+                    elseif io.now()>=recovery.deadline then finishRecovery(false,detail.."; transfer remains held")
+                    else recovery.nextRead=io.now()+(held and held.pollSeconds or config.transferPollSeconds) end
+                end
                 if not processorFault and not store.data.chestTest then engine.tick() end
                 if io.now()>=nextCheck then
                     if action==nil then updater.check() end
@@ -353,6 +393,10 @@ function M.run(role,...)
             if not ok then
                 processorFault="Processor stopped; restart after recovery: "..tostring(err)
                 pcall(store.error,"PROCESSOR_ERROR",processorFault)
+                if recovery then
+                    local completed=recovery;recovery=nil
+                    if completed.callback then pcall(completed.callback,false,processorFault) end
+                end
             end
             -- Display traffic remains available while automation is paused,
             -- a chest test is reserved, or a transfer needs recovery.

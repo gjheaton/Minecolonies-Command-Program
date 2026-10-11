@@ -557,7 +557,8 @@ Two alternating, verified journal slots retain request, craft, and transfer stat
 stops further mutations. Retain these files when diagnosing a problem. Do not delete
 them to force a retry while there may be items in transit or accepted crafts.
 
-The **HEALTH / RECONCILE** action, or `colony_master --reconcile` /
+The master **HEALTH → RECOVER TRANSFER → RUN RECOVERY** action, the colony
+**HEALTH / RECONCILE** action, or `colony_master --reconcile` /
 `colony_supply --reconcile`, checks recorded transfers. It credits existing physical
 proof rather than blindly reissuing a movement. A definitely reported zero PRS
 export with an unchanged chest may use an explicitly requested, journaled one-item
@@ -842,7 +843,7 @@ install_colony --update supply
 ```
 
 Run the appropriate command on each role; do not update two processes concurrently
-on one computer. Update the master and every colony supply computer to 4.0.6 before
+on one computer. Update the master and every colony supply computer to 4.0.7 before
 resuming automation, and update both roles together for protocol-changing releases.
 An older v3 installation must use the first clean v4 installation instead of an
 in-place update.
@@ -887,7 +888,7 @@ hardware wizard; do not use `CLEAN` to obtain an update or repair.
 
 Versions follow **MAJOR.MINOR.PATCH**. The first number changes for incompatible
 behavior or migrations, the second for compatible new features, and the third
-for fixes and maintenance. This release is **4.0.6**; later fixes increase the
+for fixes and maintenance. This release is **4.0.7**; later fixes increase the
 third number. A minor release resets the patch number (`4.1.0`), and a major
 release resets both later numbers (`5.0.0`). The update control compares all three
 numbers and offers installation when the published version is greater.
@@ -941,3 +942,26 @@ let reserved turns finish, then press UPDATE again on each colony. Alternatively
 stop the program and startup launcher and use `install_colony --repair`, followed
 by `reboot`. Resume master automation after the updates finish. Future colony
 updates can be queued while ordinary turns are active.
+
+### Master recovery from the monitor
+
+In 4.0.7, correct the connection or storage problem, leave the affected colony
+computer running, then select **HEALTH → RECOVER TRANSFER** on the master. Review
+the explanation and select **RUN RECOVERY**. The processor saves an automation
+pause before checking the original transfer. It may submit one guarded recovery
+item for a definitely reported zero export with unchanged chest evidence; it
+never blindly repeats an uncertain transfer. Repeated clicks do not queue
+additional recovery probes.
+
+The screen displays **RECOVERED** only after the engine verifies the transfer,
+or **BLOCKED** with the reason. Verification has a bounded wait using the configured
+transfer verification timeout; a timeout retains the journal and safety hold.
+A blocked result may require the colony to acknowledge its existing turn before
+you try again. A chest test or stopped processor blocks monitor recovery until
+the test finishes or the processor is restarted.
+
+Automation remains paused after the check. Review **HEALTH**, then enable
+**SETTINGS → Run supply automation** when ready. There is no reboot requirement
+for an ordinary transfer hold recovered by this button. Recorded errors remain
+in **ERRORS**; **CLEAR HISTORY** removes the archive without changing active faults.
+Remote colony dashboards remain read-only.

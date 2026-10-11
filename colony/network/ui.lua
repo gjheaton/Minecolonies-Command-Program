@@ -635,10 +635,49 @@ function M.new(config, store, engine, io, updater, options)
         end
         if self.notice then row(h-2,self.notice,C.warn) end
         local reconcile=not options.readOnly and type(engine.requestReconcile)=="function" and function()
-            local ok,result,err=pcall(engine.requestReconcile)
-            self.notice=(ok and result~=false) and "Reconciliation queued; uncertain transfers remain reserved." or tostring(err or result)
+            self.view="recovery"
+            self.notice=nil
+            if not self.recoveryRunning then self.recoveryResult=nil end
         end or nil
-        footer("health",page,pages,reconcile and "RECONCILE" or nil,reconcile)
+        footer("health",page,pages,reconcile and (role()=="master" and "RECOVER TRANSFER" or "RECONCILE") or nil,reconcile)
+    end
+
+    local function drawRecovery()
+        local w,h=screen.size()
+        frame("TRANSFER RECOVERY","Verify the held transfer before releasing its safety hold.",C.dim)
+        local message
+        if self.recoveryRunning then
+            message="Recovery queued / checking chest inventory.\nThe transfer stays reserved until verification succeeds."
+        elseif self.recoveryResult then message=self.recoveryResult
+        elseif role()=="master" then
+            message="Fix storage / connections first.\nLeave colony computers running.\n"
+                .."This check saves an automation pause.\nRecorded zero export may send:\n"
+                .."ONE recovery item, verified in the chest.\nUncertain transfers are never blindly repeated.\n"
+                .."Automation stays paused afterward.\nCheck HEALTH before enabling it in SETTINGS.\n"
+                .."Error history is kept; clearing it is separate."
+        else message="Check the held colony transfer. Uncertain transfers remain reserved unless verification succeeds." end
+        for index,line in ipairs(Util.wrapText(message,math.max(1,w-4))) do
+            if index+4<h-3 then row(index+4,line,self.recoveryResult and (self.recoverySuccess and C.good or C.warn) or C.text) end
+        end
+        row(h-3,"BACK TO HEALTH",C.accent,function() self.view="health" end)
+        local run=not self.recoveryRunning and function()
+            if self.recoveryResult then self.recoveryResult=nil;return end
+            self.recoveryRunning=true
+            local ok,accepted,reason=pcall(engine.requestReconcile,function(success,detail)
+                self.recoveryRunning=false
+                self.recoverySuccess=success==true
+                self.recoveryResult=(success and "RECOVERED: " or "BLOCKED: ")..tostring(detail or "Reconciliation finished")
+                    ..(role()=="master" and "\nAutomation remains paused. Check HEALTH, then enable it in SETTINGS when ready." or "")
+                self.notice=self.recoveryResult
+                draw()
+            end)
+            if not ok or accepted~=true then
+                self.recoveryRunning=false
+                self.recoverySuccess=false
+                self.recoveryResult="BLOCKED: "..tostring(reason or accepted)
+            end
+        end or nil
+        footer("health",1,1,self.recoveryRunning and "CHECKING..." or (self.recoveryResult and "REVIEW / RETRY" or "RUN RECOVERY"),run)
     end
 
     local function drawRequests()
@@ -1011,10 +1050,12 @@ function M.new(config, store, engine, io, updater, options)
             screen.writeAt(1,4,"CLI: --setup / --help",C.dim)
             return
         end
+        if options.readOnly and self.view=="recovery" then self.view="health" end
         if options.readOnly and (self.view=="routes" or self.view=="route" or self.view=="overrides") then self.view="settings" end
         if self.edit then drawEdit()
         elseif self.view=="home" then drawHome()
         elseif self.view=="health" then drawHealth()
+        elseif self.view=="recovery" then drawRecovery()
         elseif self.view=="requests" then drawRequests()
         elseif self.view=="history" then drawHistory()
         elseif self.view=="errors" then drawErrors()
@@ -1036,6 +1077,11 @@ function M.new(config, store, engine, io, updater, options)
             return
         end
         local lines={}
+        if self.recoveryRunning then
+            lines[#lines+1]={text="Recovery: checking held transfer; automation paused.",color=C.warn}
+        elseif self.recoveryResult and self.view=="recovery" then
+            lines[#lines+1]={text=self.recoveryResult,color=self.recoverySuccess and C.good or C.warn}
+        end
         local health=type(snapshot.health)=="table" and snapshot.health or {}
         if role()=="supply" and not options.readOnly and health.ok~=false and snapshot.statusMessage then
             lines[#lines+1]={text="Supply: "..textOf(snapshot.statusMessage),color=C.good}

@@ -150,8 +150,39 @@ Test.case("UI shows effective master policy and paused automation",function()
     assert(f.ui.notice:find("Effective policy",1,true))
     local master=fixture();master.config.automationEnabled=false;master.ui.draw()
     assert(master.monitor.dump():find("AUTOMATION PAUSED",1,true))
-    local reconciles=0;master.engine.requestReconcile=function() reconciles=reconciles+1;return true end
-    master.ui.view="health";master.ui.draw();master.touch(40,23);Test.equal(reconciles,1)
+    local reconciles,completed=0,nil;master.engine.requestReconcile=function(callback) reconciles=reconciles+1;completed=callback;return true end
+    master.ui.view="health";master.ui.draw();master.touch(40,23);Test.equal(reconciles,0)
+    assert(master.monitor.dump():find("ONE recovery item",1,true))
+    master.touch(40,23);Test.equal(reconciles,1)
+    master.touch(40,23);Test.equal(reconciles,1,"duplicate recovery queued")
+    completed(false,"Original receipt stays held")
+    assert(master.monitor.dump():find("BLOCKED: Original receipt stays held",1,true))
+    master.touch(40,23);Test.equal(reconciles,1,"review bypassed recovery disclosure")
+    master.touch(40,23);Test.equal(reconciles,2)
+    completed(true,"Held transfer verified")
+    assert(master.monitor.dump():find("RECOVERED: Held transfer verified",1,true))
+    assert(master.monitor.dump():find("Automation remains paused",1,true))
+end)
+
+Test.case("recovery disclosure and button fit the computer terminal and read-only dashboards cannot invoke them",function()
+    local f=fixture("master",false)
+    local calls=0;f.engine.requestReconcile=function() calls=calls+1;return true end
+    f.ui.view="health";f.ui.draw()
+    local function click(label)
+        for y=1,f.screen.height do
+            local x=(f.screen.lines[y] or ""):find(label,1,true)
+            if x then f.touch(x,y);return end
+        end
+        error("Missing terminal button: "..label.." / "..f.screen.dump())
+    end
+    click("RECOVER TRANSFER");Test.equal(calls,0)
+    assert(f.screen.dump():find("ONE recovery item",1,true))
+    click("RUN RECOVERY");Test.equal(calls,1)
+    local remote=fixture("supply",true,100,38,{readOnly=true,displayOnly=true})
+    remote.engine.requestReconcile=function() error("remote invoked recovery") end
+    remote.ui.view="recovery";remote.ui.draw()
+    Test.equal(remote.ui.view,"health")
+    assert(not remote.screen.dump():find("RUN RECOVERY",1,true))
 end)
 
 Test.case("UI queues read-only update checks during active work and keeps installation guarded",function()
