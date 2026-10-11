@@ -712,4 +712,32 @@ Test.case("plain-name physical verification rejects a tagged same-name gain whil
     local plain=assert(m.io.exportEvidence(baseline,{[1]={name=item.name,count=1}},item,1,"plain-name"))
     Test.equal(plain.name,item.name);Test.equal(plain.nbt,nil)
 end)
+
+Test.case("clock and compass Quark calculated tags use a guarded name selector while every other NBT variant stays exact",function()
+    for _,case in ipairs({
+        {name="minecraft:clock",tag="quark:clock_calculated"},
+        {name="minecraft:compass",tag="quark:compass_calculated"},
+    }) do
+        local _,m=targetFixture()
+        local request=S.request("R",case.name,1)
+        local candidate=m.matcher.requestCandidates(request)[1]
+        local tagged={name=case.name,nbt={[case.tag]=1},amount=9,fingerprint=case.name.."-tagged"}
+        local plain={name=case.name,amount=1,fingerprint=case.name.."-plain"}
+        assert(m.matcher.exactlyMatches(candidate.raw,tagged),"sole calculated tag did not satisfy the generic request")
+        local filter,kind=m.io.exportSelection(candidate,tagged,{tagged,plain})
+        Test.equal(kind,"transient-name");Test.equal(filter.name,case.name);Test.equal(filter.fingerprint,nil)
+        local physical=assert(m.io.exportEvidence(assert(m.io.exportBaseline({})),
+            {[1]={name=case.name,nbt=string.rep("a",32),count=1}},tagged,1,kind))
+        Test.equal(physical.name,case.name)
+
+        local unsafe={name=case.name,nbt={display={Name="Named"}},amount=1,fingerprint=case.name.."-named"}
+        if case.name=="minecraft:compass" then
+            unsafe={name=case.name,nbt={LodestonePos={X=1,Y=64,Z=2},LodestoneDimension="minecraft:overworld"},
+                amount=1,fingerprint=case.name.."-lodestone"}
+        end
+        assert(not m.matcher.exactlyMatches(candidate.raw,unsafe),"meaningful variant became a generic transport item")
+        filter,kind=m.io.exportSelection(candidate,tagged,{tagged,plain,unsafe})
+        Test.equal(kind,"fingerprint");Test.equal(filter.fingerprint,tagged.fingerprint);Test.equal(filter.name,nil)
+    end
+end)
 return true

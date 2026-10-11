@@ -86,6 +86,27 @@ local function canonicalNBT(nbt)
     return canonical(nbt)
 end
 
+-- Quark writes these client-style calculated flags after a vanilla clock or
+-- compass leaves autocrafting and re-enters RS. They do not change which item
+-- MineColonies requested. Keep the exception exact: a lodestone compass,
+-- renamed item, enchantment, or any additional tag remains a distinct variant.
+local TRANSIENT_CALCULATED_TAGS = {
+    ["minecraft:clock"] = "quark:clock_calculated",
+    ["minecraft:compass"] = "quark:compass_calculated",
+}
+local function isTransientTransportName(name)
+    return TRANSIENT_CALCULATED_TAGS[tostring(name or "")] ~= nil
+end
+local function isTransientComputedVariant(item)
+    if type(item) ~= "table" or type(item.nbt) ~= "table" then return false end
+    local key = TRANSIENT_CALCULATED_TAGS[item.name]
+    if not key then return false end
+    local value = item.nbt[key]
+    if value ~= 1 and value ~= true then return false end
+    for current in pairs(item.nbt) do if current ~= key then return false end end
+    return true
+end
+
 local function isOpaqueNBTHash(nbt)
     if type(nbt) ~= "string" then return false end
     local s = tostring(nbt):lower()
@@ -98,6 +119,7 @@ end
 
 local function hasMeaningfulNBT(item)
     if type(item) ~= "table" then return false end
+    if isTransientComputedVariant(item) then return false end
     local nbt = item.nbt
     if nbt == nil then return false end
     if type(nbt) == "table" then return next(nbt) ~= nil end
@@ -194,6 +216,14 @@ function M.new(config, store)
 
     function self.canonicalNBT(nbt)
         return canonicalNBT(nbt)
+    end
+
+    function self.isTransientTransportName(name)
+        return isTransientTransportName(name)
+    end
+
+    function self.isTransientComputedVariant(item)
+        return isTransientComputedVariant(item)
     end
 
     function self.requestIdentity(item)

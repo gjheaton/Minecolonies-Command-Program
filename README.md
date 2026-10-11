@@ -1,6 +1,6 @@
 # MineColonies Control Suite
 
-The `supply-master-colony` branch provides Supply 4.0.16: one dedicated computer owns
+The `supply-master-colony` branch provides Supply 4.0.17: one dedicated computer owns
 Player Refined Storage (PRS), and colony supply computers communicate with it over
 rednet. Each colony has a delivery and a return Ender Chest channel. Command Center
 is also available through the same installer.
@@ -101,7 +101,7 @@ Versions use **MAJOR.MINOR.PATCH**:
 - **Minor**, the second number, changes for compatible new features.
 - **Patch**, the third number, changes for fixes and maintenance updates.
 
-This update is **4.0.16**. Future fixes increase the patch number so **CHECK UPDATE**
+This update is **4.0.17**. Future fixes increase the patch number so **CHECK UPDATE**
 can detect them. A minor release resets the patch number, such as `4.1.0`; a major
 release resets both later numbers, such as `5.0.0`.
 
@@ -131,7 +131,7 @@ It saves an automation pause, verifies the held transfer, and displays RECOVERED
 or BLOCKED without stopping the application. A recorded zero export may send one
 guarded recovery item. Automation stays paused afterward; error history is kept.
 
-Command Center is now **4.0.1**, packaged in suite **4.0.16**. Its monitor header
+Command Center is now **4.0.1**, packaged in suite **4.0.17**. Its monitor header
 and installer metadata use the same application version. Existing V4 Command
 installations can update without resetting their settings.
 
@@ -201,3 +201,12 @@ cache. If a zero export persists while source stock is visible, keep automation
 paused and inspect the diagnostic. Refreshing the PRS network can test a cache
 problem, then use explicit guarded recovery; this does not authorize automatic
 retries or prove that the requested items were absent.
+
+Suite 4.0.17 handles Quark's sole `quark:clock_calculated` and
+`quark:compass_calculated` transport tags as ordinary vanilla clocks and
+compasses. When the complete PRS snapshot contains only untagged and calculated
+variants, the master avoids AP 0.7.48r's live-cache fingerprint mutation, verifies
+the physical chest increase, and tells the colony to import that exact chest slot.
+Lodestone compasses, renamed items, enchantments, and every additional NBT field
+remain exact variants. Existing held clock exports can use the guarded recovery
+after both master and colony are updated; no chest or ledger should be cleared.

@@ -889,6 +889,39 @@ Test.case("ordinary kelp avoids AP fingerprint cache mutation and journals its s
     w.untilTrue(function() return record.status=="delivered" end)
 end)
 
+Test.case("mixed fresh and Quark-calculated clocks and compasses export by guarded name and import their verified physical slot",function()
+    for _,case in ipairs({
+        {name="minecraft:clock",tag="quark:clock_calculated"},
+        {name="minecraft:compass",tag="quark:compass_calculated"},
+    }) do
+        local w,m=fixture(1,{asymmetricNBT=true});local c=w.computers[2]
+        c.integrator.requests={S.request("R2",case.name,1)}
+        m.rs.add({name=case.name,nbt={[case.tag]=1}},9)
+        m.rs.add({name=case.name},1)
+        local api=w.devices[1].prs.api;local original=api.exportItemToPeripheral
+        api.exportItemToPeripheral=function(filter,chest)
+            local pending=m.store.data.master.pendingTransfer
+            assert(pending and pending.intent and pending.selectionMode=="transient-name")
+            if filter.fingerprint then return 0,"simulated AP live-cache mismatch" end
+            Test.equal(filter.name,case.name)
+            return original(filter,chest)
+        end
+        w.untilTrue(function()
+            for _,entry in pairs(c.rs.items) do if entry.name==case.name and entry.amount==1 then return true end end
+            return false
+        end,"transient "..case.name.." did not reach colony storage")
+        assert(not m.store.data.master.quarantine and not c.store.data.client.fault)
+        local shipment=m.store.data.master.colonies["2"].shipments[1]
+        assert(shipment and shipment.item.transientNameImport==true)
+        Test.equal(shipment.item.fingerprint,nil)
+        local exports=w.callsFor("export",true);Test.equal(#exports,1)
+        Test.equal(exports[1].filter.name,case.name);Test.equal(exports[1].filter.fingerprint,nil)
+        local imports=w.callsFor("import",false);Test.equal(#imports,1)
+        Test.equal(imports[1].filter.name,case.name);Test.equal(imports[1].filter.fingerprint,nil)
+        assert(type(imports[1].filter.fromSlot)=="number","verified physical slot was not bound")
+    end
+end)
+
 Test.case("unexpected tagged item during a plain-name export is held across reboot without shipment credit or automatic retry",function()
     local w,m=fixture(1);local kelp={name="minecraft:kelp"};m.rs.add(kelp,8)
     w.computers[2].integrator.requests={S.request("R2",kelp.name,1)}
@@ -931,5 +964,35 @@ Test.case("a retained legacy zero export recovers with one explicit plain-name p
     m.config.automationEnabled=true
     w.untilTrue(function() local entry=w.computers[2].rs.items[w.identity(kelp)];return entry and entry.amount==4 end)
     Test.equal(m.rs.items[w.identity(kelp)].amount,4)
+end)
+
+Test.case("a retained fingerprint-zero clock recovers once after Quark-calculated stock appears",function()
+    local w,m=fixture(1,{asymmetricNBT=true});local c=w.computers[2]
+    local clock={name="minecraft:clock"};c.integrator.requests={S.request("R2",clock.name,1)}
+    local original=m.rs.add(clock,1);m.rs.zeroExport=true
+    w.untilTrue(function()
+        local state=m.store.data.master;return state.quarantine and state.colonies["2"].turn==nil
+    end)
+    m.config.automationEnabled=false
+    local pending=m.store.data.master.pendingTransfer
+    pending.selectionMode="fingerprint" -- The selector retained by suite 4.0.16.
+    Test.equal(pending.item.fingerprint,original.fingerprint)
+    m.rs.add({name=clock.name,nbt={["quark:clock_calculated"]=1}},9)
+    m.store.save();m.rs.zeroExport=false
+    assert(w.at(1,m.engine.reconcile))
+    local probe=m.store.data.master.pendingTransfer
+    assert(probe.recoveryProbe);Test.equal(probe.count,1);Test.equal(probe.selectionMode,"transient-name")
+    local exports=w.callsFor("export",true);Test.equal(#exports,2)
+    Test.equal(exports[2].filter.name,clock.name);Test.equal(exports[2].filter.fingerprint,nil)
+    assert(w.at(1,m.engine.verifyHeldTransfer))
+    local shipment=m.store.data.master.colonies["2"].shipments[1]
+    assert(shipment.item.transientNameImport==true);Test.equal(shipment.item.fingerprint,nil)
+    m.config.automationEnabled=true
+    w.untilTrue(function()
+        for _,entry in pairs(c.rs.items) do if entry.name==clock.name and entry.amount==1 then return true end end
+        return false
+    end,"recovered clock did not import exactly once")
+    Test.equal(#w.callsFor("export",true),2);Test.equal(#w.callsFor("import",false),1)
+    assert(not m.store.data.master.quarantine and not c.store.data.client.fault)
 end)
 return true

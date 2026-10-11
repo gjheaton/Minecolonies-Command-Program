@@ -324,16 +324,24 @@ function M.new(config,store,matcher)
     local function importFilter(item,chest,importing)
         if type(item.name)~="string" or item.name=="" then return nil,"Import has no item name" end
         local nbt=matcher.canonicalNBT(item.nbt)
+        local transientNameImport=item.transientNameImport==true
+        if item.transientNameImport~=nil and not transientNameImport then
+            return nil,"Invalid transient-name import marker"
+        end
+        if transientNameImport and (type(matcher.isTransientTransportName)~="function"
+            or not matcher.isTransientTransportName(item.name) or item.fingerprint~=nil) then
+            return nil,"Transient-name import is only valid for an unbound vanilla clock or compass"
+        end
         -- AP fingerprints describe the stack, not its RS network. AP tests
         -- this signature on the source chest stack before extracting it.
         local filter={name=item.name}
-        if item.fingerprint~=nil then
+        if item.fingerprint~=nil and not transientNameImport then
             if type(item.fingerprint)~="string" or item.fingerprint=="" or #item.fingerprint>256 then
                 return nil,"Invalid exact AP item fingerprint"
             end
             if not importing or nbt~="" then filter={fingerprint=item.fingerprint} end
         end
-        if nbt~="" and not filter.fingerprint then
+        if nbt~="" and not filter.fingerprint and not transientNameImport then
             return nil,"Exact NBT transfer needs an AP fingerprint; CC inventory hashes are not AP NBT filters"
         end
         if importing then
@@ -380,6 +388,34 @@ function M.new(config,store,matcher)
             end
         end
         if plain and found then return {name=variant.name},"plain-name" end
+
+        -- AP 0.7.48r computes fingerprints by calling getOrCreateTag() on the
+        -- live RS cache stack. A freshly crafted untagged clock/compass can
+        -- therefore become an empty-tag cache entry just before COMPARE_NBT,
+        -- making a valid export return zero. A name selector avoids that bug,
+        -- but only when the complete same-name stock is proven to contain no
+        -- variant except untagged items and Quark's sole calculated flag.
+        local transient=type(items)=="table" and not candidate.toolClass and not candidate.hasNBT
+            and candidate.name==variant.name
+            and type(matcher.isTransientTransportName)=="function"
+            and matcher.isTransientTransportName(variant.name)
+            and (matcher.canonicalNBT(variant.nbt)==""
+                or matcher.isTransientComputedVariant(variant))
+        found=false
+        if transient then
+            for _,entry in pairs(items) do
+                if type(entry)~="table" or type(entry.name)~="string" or not whole(entry.amount,0) then
+                    transient=false;break
+                end
+                if entry.name==variant.name and entry.amount>0 then
+                    if matcher.canonicalNBT(entry.nbt)~="" and not matcher.isTransientComputedVariant(entry) then
+                        transient=false;break
+                    end
+                    found=true
+                end
+            end
+        end
+        if transient and found then return {name=variant.name},"transient-name" end
         return {fingerprint=variant.fingerprint},"fingerprint"
     end
     function self.exportPRS(candidate,variant,count,chest,route,items)

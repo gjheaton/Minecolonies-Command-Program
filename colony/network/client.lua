@@ -387,6 +387,14 @@ function M.new(config, store, io, matcher)
     local function sameItem(a, b)
         return type(a) == "table" and type(b) == "table"
             and matcher.itemIdentity(a) == matcher.itemIdentity(b)
+            and a.transientNameImport == b.transientNameImport
+    end
+
+    local function validTransientNameImport(item)
+        return type(item)=="table" and item.transientNameImport==true
+            and item.fingerprint==nil
+            and type(matcher.isTransientTransportName)=="function"
+            and matcher.isTransientTransportName(item.name)
     end
 
     local function shipmentList(deliveries)
@@ -400,8 +408,10 @@ function M.new(config, store, io, matcher)
                 or shipment.requestId == nil or shipment.verified ~= true
                 or type(shipment.item) ~= "table" or type(shipment.item.name) ~= "string"
                 or shipment.item.name == "" or amount(shipment.count) == 0
+                or (shipment.item.transientNameImport~=nil and not validTransientNameImport(shipment.item))
                 or (shipment.item.fingerprint ~= nil and not validFingerprint(shipment.item.fingerprint))
-                or (shipment.item.fingerprint == nil and matcher.canonicalNBT(shipment.item.nbt) ~= "") then
+                or (shipment.item.fingerprint == nil and matcher.canonicalNBT(shipment.item.nbt) ~= ""
+                    and not validTransientNameImport(shipment.item)) then
                 fault("BAD_DELIVERY", "Master supplied an unverified or incomplete delivery record")
                 return false
             end

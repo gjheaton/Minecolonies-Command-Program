@@ -485,7 +485,8 @@ function M.new(config, store, io, matcher)
             local physical, delta = io.exportEvidence(pending.physicalBefore, items, pending.item, pending.count,pending.selectionMode)
             if not physical then return nil, tostring(delta) end
             if physical.name ~= pending.item.name
-                or matcher.canonicalNBT(physical.nbt) ~= matcher.canonicalNBT(pending.item.nbt) then
+                or (pending.selectionMode~="transient-name"
+                    and matcher.canonicalNBT(physical.nbt) ~= matcher.canonicalNBT(pending.item.nbt)) then
                 return nil, "Unknown transfer result cannot bind a different physical item identity"
             end
             return delta, nil, physical
@@ -501,7 +502,12 @@ function M.new(config, store, io, matcher)
             local shipmentItem = copy(pending.item)
             if physical then
                 shipmentItem.name, shipmentItem.nbt = physical.name, physical.nbt
-                shipmentItem.fingerprint = pending.item.fingerprint
+                if pending.selectionMode=="transient-name" then
+                    shipmentItem.fingerprint=nil
+                    shipmentItem.transientNameImport=true
+                else
+                    shipmentItem.fingerprint = pending.item.fingerprint
+                end
             end
             state.shipmentCounter = state.shipmentCounter + 1
             local shipment = {id="shipment-" .. tostring(state.shipmentCounter),
