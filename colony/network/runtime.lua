@@ -3,7 +3,7 @@
 local M={}
 local commonModes={help=true,setup=true,diag=true,diagnostics=true,monitors=true,reconcile=true,["clear-errors"]=true,set=true}
 local masterModes={monitor=true,chesttest=true,transferdiag=true,["reconcile-bind"]=true}
-local supplyModes={["reconcile-zero"]=true,["reconcile-zero-return"]=true}
+local supplyModes={deliverydiag=true,["reconcile-zero"]=true,["reconcile-zero-return"]=true}
 local function usage(role)
     local program=role=="master" and "colony_master" or "colony_supply"
     local lines={"Usage: "..program.." [option]",
@@ -21,6 +21,7 @@ local function usage(role)
         lines[#lines+1]="  --transferdiag          Inspect a held export"
         lines[#lines+1]="  --reconcile-bind <ID>   Bind an existing export"
     else
+        lines[#lines+1]="  --deliverydiag <shipment ID> Inspect a retained delivery"
         lines[#lines+1]="  --reconcile-zero <shipment ID>"
         lines[#lines+1]="  --reconcile-zero-return  Acknowledge zero overflow movement"
     end
@@ -47,7 +48,7 @@ local function parseOptions(role,...)
     if mode=="set" or mode=="monitor" then
         if type(arg2)~="string" or arg2=="" or type(arg3)~="string"
             or (mode=="monitor" and arg3=="") then invalid() end
-    elseif mode=="reconcile-bind" or mode=="reconcile-zero" then
+    elseif mode=="reconcile-bind" or mode=="reconcile-zero" or mode=="deliverydiag" then
         if type(arg2)~="string" or arg2=="" or arg3~=nil then invalid() end
     elseif mode=="chesttest" then
         if arg2=="--abandon" then arg2="abandon" end
@@ -108,6 +109,9 @@ function M.run(role,...)
     local matcher=Matcher.new(config,store)
     local io=IO.new(config,store,matcher)
     if mode=="diag" or mode=="diagnostics" then Diagnostics.printReport(config,io,store); return end
+    if mode=="deliverydiag" then
+        Diagnostics.printDelivery(config,io,store,arg2);return
+    end
     if mode=="transferdiag" then
         if role~="master" or arg2~=nil or arg3~=nil then error("Usage: colony_master --transferdiag",0) end
         Diagnostics.printHeldMaster(config,io,store);return

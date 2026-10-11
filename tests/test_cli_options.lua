@@ -265,3 +265,17 @@ Test.case("zero-return CLI passes the exact preview confirmation to recovery wit
         {_G,"read",function() return answer end},quiet()},function() w.run("--reconcile-zero-return") end)
     Test.equal(received,answer);Test.equal(#w.calls,0)
 end)
+
+Test.case("deliverydiag inspects the selected shipment without constructing an engine or granting chest access",function()
+    local w=fixture("supply");local files=encode(w.files);local seen
+    patched({{Diagnostics,"printDelivery",function(config,io,store,id) seen=id end},
+        {Client,"new",unexpected("delivery diagnostic engine")},{Protocol,"open",unexpected("delivery diagnostic modem")},quiet()},
+        function() w.run("--deliverydiag","shipment-183") end)
+    Test.equal(seen,"shipment-183");Test.equal(encode(w.files),files);Test.equal(#w.calls,0)
+    patched({quiet()},function()
+        for _,args in ipairs({{"--deliverydiag"},{"--deliverydiag","shipment-183","extra"}}) do
+            local ok=pcall(w.run,table.unpack(args));assert(not ok)
+        end
+        local master=fixture("master");assert(not pcall(master.run,"--deliverydiag","shipment-183"))
+    end)
+end)

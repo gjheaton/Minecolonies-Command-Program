@@ -26,6 +26,77 @@ local function nbtLabel(value)
     local ok,source=pcall(textutils.serialize,value,{compact=true,allow_repetitions=true})
     return type(value)..": "..(ok and type(source)=="string" and source:sub(1,96) or "unavailable")
 end
+-- This inspection deliberately needs no engine, RS stock scan, or write. A
+-- physical count cannot replace the colony's verified import receipts.
+function M.printDelivery(config,io,store,shipmentId)
+    local function blocked(reason)
+        print("BLOCKED: "..reason)
+        print("Inspection only; transfers and ledger unchanged.")
+        return false,reason
+    end
+    if type(config)~="table" or config.role~="supply" then
+        return blocked("Run delivery diagnostics on the colony supply computer.")
+    end
+    if type(shipmentId)~="string" or shipmentId=="" or #shipmentId>256 then
+        return blocked("Supply the exact shipment ID, such as shipment-183.")
+    end
+    local client=store and store.data and store.data.client
+    local shipment=type(client)=="table" and type(client.shipments)=="table" and client.shipments[shipmentId]
+    if type(shipment)~="table" or shipment.id~=shipmentId then
+        return blocked("Shipment "..shipmentId.." is not present in this colony's retained ledger.")
+    end
+    local function quantity(value,minimum)
+        return type(value)=="number" and value==value and value~=math.huge
+            and value%1==0 and value>=(minimum or 0)
+    end
+    local item=shipment.item
+    if shipment.verified~=true or type(item)~="table" or type(item.name)~="string" or item.name==""
+        or not quantity(shipment.count,1) or not quantity(shipment.imported)
+        or shipment.imported>shipment.count then
+        return blocked("Shipment "..shipmentId.." has invalid retained item or quantity data.")
+    end
+    print("DELIVERY: "..shipmentId)
+    print("Item: "..item.name)
+    if item.displayName and item.displayName~=item.name then print("Grid name: "..tostring(item.displayName)) end
+    print("Request: "..tostring(shipment.requestId or "UNKNOWN"))
+    print("Verified quantity: "..shipment.count)
+    print("Imported quantity: "..shipment.imported)
+    print("Outstanding quantity: "..(shipment.count-shipment.imported))
+    print("Configured delivery chest: "..tostring(config.deliveryChestName or "UNKNOWN"))
+    print("Recorded physical NBT: "..nbtLabel(item.nbt))
+    if type(config.deliveryChestName)~="string" or config.deliveryChestName=="" then
+        return blocked("The colony delivery chest is not configured.")
+    end
+    if type(io)~="table" or type(io.snapshot)~="function" or type(io.count)~="function" then
+        return blocked("Physical inventory inspection is unavailable.")
+    end
+    local readOK,items,readError=pcall(io.snapshot,config.deliveryChestName)
+    if not readOK or type(items)~="table" then
+        return blocked("Cannot read the configured delivery chest: "..tostring(readOK and readError or items))
+    end
+    local slots,sameName={},0
+    for slot,entry in pairs(items) do
+        if type(slot)~="number" or not quantity(slot,1) or type(entry)~="table"
+            or type(entry.name)~="string" or not quantity(entry.count,1) then
+            return blocked("The configured delivery chest returned invalid inventory data.")
+        end
+        if entry.name==item.name then slots[#slots+1]=slot;sameName=sameName+entry.count end
+    end
+    local countOK,exact=pcall(io.count,items,item)
+    if not countOK or not quantity(exact) then
+        return blocked("Cannot count the shipment's exact physical item identity.")
+    end
+    print("Exact chest quantity: "..exact)
+    print("Same-name quantity: "..sameName.." (identity unverified)")
+    table.sort(slots)
+    for index,slot in ipairs(slots) do
+        if index>4 then print("Additional matching slots: "..(#slots-4));break end
+        print("Slot "..slot.." x"..items[slot].count.." CC NBT: "..nbtLabel(items[slot].nbt))
+    end
+    print("Physical quantities do not credit imports or prove delivery.")
+    print("Inspection only; transfers and ledger unchanged.")
+    return true
+end
 function M.printHeldMaster(config,io,store,inspectTarget)
     local state=store and store.data and store.data.master
     local pending=type(state)=="table" and state.pendingTransfer

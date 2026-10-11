@@ -888,7 +888,7 @@ hardware wizard; do not use `CLEAN` to obtain an update or repair.
 
 Versions follow **MAJOR.MINOR.PATCH**. The first number changes for incompatible
 behavior or migrations, the second for compatible new features, and the third
-for fixes and maintenance. This release is **4.0.13**; later fixes increase the
+for fixes and maintenance. This release is **4.0.14**; later fixes increase the
 third number. A minor release resets the patch number (`4.1.0`), and a major
 release resets both later numbers (`5.0.0`). The update control compares all three
 numbers and offers installation when the published version is greater.
@@ -1043,3 +1043,14 @@ normal hello interval (five seconds by default) after their program resumes.
 Master-detected faults, transfer quarantine, and recorded error history remain.
 Older journals without fault provenance migrate only the known colony transfer
 error messages; other ambiguous errors still require normal reconciliation.
+
+### Inspecting a missing verified delivery (4.0.14)
+
+Pause master automation and stop the affected colony's supply program. Run
+`colony_supply --deliverydiag shipment-183`, replacing the ID with the one on
+the colony's ERRORS screen. This reads the retained record and original configured
+delivery chest without starting the engine, transferring items, crediting an
+import, or clearing a fault. Compare the expected exact item with both physical
+chests' contents and verify their actual colors match the configured channel.
+Same-name items with different NBT do not establish the shipment's identity.
+Do not remove journal entries or resend stock merely because an item is absent.

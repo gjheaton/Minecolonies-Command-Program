@@ -32,6 +32,7 @@ try:
         lua.execute(f"require('{suite}')")
     lua.execute("require('tests.test_command_waypoints')")
     lua.execute("require('tests.test_zero_return')")
+    lua.execute("require('tests.test_delivery_diagnostics')")
     passed, failed = lua.eval("Test.run()")
 except Exception as error:
     sys.exit(f"Simulation could not run: {error}")

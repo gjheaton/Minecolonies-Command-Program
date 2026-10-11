@@ -722,7 +722,10 @@ function M.new(config, store, io, matcher)
             local available = amount(io.count(items, shipment.item))
             if available == 0 then
                 -- Absence is not proof of import: somebody may have removed it.
-                fault("DELIVERY_MISSING", "A verified delivery is missing from its reserved chest", { shipmentId = shipment.id })
+                fault("DELIVERY_MISSING", "A verified delivery is missing from its reserved chest", {
+                    shipmentId = shipment.id, requestId = shipment.requestId, item = shipment.item.name,
+                    chest = config.deliveryChestName, expected = shipment.count - amount(shipment.imported), observed = available,
+                })
                 return
             end
             local count = math.min(left, amount(setting("maxTransferChunk", 64)), available,
