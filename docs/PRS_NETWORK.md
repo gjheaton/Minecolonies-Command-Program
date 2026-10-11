@@ -605,6 +605,49 @@ and launcher and run `install_colony --repair`, followed by `reboot`, to install
 the diagnostic improvement. Repair preserves the held transfer and its original
 evidence. The fault still needs reconciliation; updating does not clear it.
 
+#### A held export that reported zero
+
+Release 4.0.4 retains the second value returned by the AP bridge, such as
+`0, INVALID_TARGET`, and reports a zero export without assuming desync caused it.
+A zero bridge result with no chest increase means the attempted delivery has
+not been verified; it does not identify the cause by itself.
+
+Advanced Peripherals 0.7.48r can report `INVALID_TARGET` even when CC:Tweaked can
+list the chest's contents. AP must find a compatible inventory handler through
+the selected bridge's transfer method and target. CC inventory visibility alone
+does not prove that path is available.
+
+Keep master automation paused and leave the delivery contents and retained hold
+untouched. Let any current result handshake finish, then stop the master program
+and launcher to reach its shell. Obtain the diagnostic update and restart:
+
+```lua
+install_colony --repair
+reboot
+```
+
+Repair preserves settings, journals, and held transfer evidence. Stop the master
+program and launcher again, then inspect the held transfer:
+
+```lua
+colony_master --transferdiag
+```
+
+For a held export with a definitely recorded zero result, the command checks the
+configured transfer path using the same bridge API and peripheral or direction
+with `{name = <held item ID>, count = 0}`. It supplies no fingerprint and requests
+zero items. This target check moves no items, submits no craft, and leaves the
+transfer journal unchanged. It reports the bridge name, connection state,
+transfer method, selected target, and AP result or error.
+
+An accepted zero-count target check proves that AP can find the handler. It does
+not prove that the held item can be inserted or that a nonzero export will work.
+An item-selection, insertion, or cached-NBT/fingerprint issue remains a possible
+cause to investigate after the target check. Unknown results and held imports
+are inspected without this export target check. Retain the original hold while
+investigating; do not repeatedly retry, clear the journal, change to a name-only
+item filter, or move delivery items to make a check pass.
+
 ### Tools held after an identity mismatch
 
 Earlier 4.0.0 code could export a tool successfully but fail chest verification
@@ -760,7 +803,7 @@ install_colony --update supply
 ```
 
 Run the appropriate command on each role; do not update two processes concurrently
-on one computer. Update the master and every colony supply computer to 4.0.3 before
+on one computer. Update the master and every colony supply computer to 4.0.4 before
 resuming automation, and update both roles together for protocol-changing releases.
 An older v3 installation must use the first clean v4 installation instead of an
 in-place update.
@@ -805,7 +848,7 @@ hardware wizard; do not use `CLEAN` to obtain an update or repair.
 
 Versions follow **MAJOR.MINOR.PATCH**. The first number changes for incompatible
 behavior or migrations, the second for compatible new features, and the third
-for fixes and maintenance. This release is **4.0.3**; later fixes increase the
+for fixes and maintenance. This release is **4.0.4**; later fixes increase the
 third number. A minor release resets the patch number (`4.1.0`), and a major
 release resets both later numbers (`5.0.0`). The update control compares all three
 numbers and offers installation when the published version is greater.

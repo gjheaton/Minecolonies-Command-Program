@@ -93,18 +93,26 @@ Test.case("an existing held master export identifies the grid item and attempted
     state.pendingTransfer={kind="export",colonyId=9,chest="enderchests:ender_chest_tile_10",
         item={name="minecolonies:cheddar_cheese",displayName="Cheddar Cheese",fingerprint="original-exact-selector"},
         count=16,reported=0,lastDelta=0,physicalBefore={totals={}},uncertain=true,definiteZero=true}
+    f.colony.requests.OLD={id="OLD",name="minecolonies:cheddar_cheese",status="error",shipped=0,imported=0,
+        detail=state.quarantine.message,errorCode="PRS_QUARANTINE"}
     local before=textutils.serialize(f.master.store.data)
     f.guard(function()
         f.ui.view="health";f.ui.draw()
         local health=f.monitor.dump()
+        assert(contains(health,"PRS export returned 0; chest unchanged. Transfer held."))
+        assert(not contains(health,"possible desync"),"the old held record still made an unsupported desync diagnosis")
         for _,detail in ipairs({"Item: Cheddar Cheese","ID: minecolonies:cheddar_cheese","Quantity: 16 (PRS export)",
             "Colony: Stardust [9]","Chest: enderchests:ender_chest_tile_10","Reported / chest change: 0 / 0"}) do
             assert(contains(health,detail),"active health omitted "..detail)
         end
         local terminal=f.terminal()
+        assert(not contains(terminal,"possible desync"))
         assert(contains(terminal,"ERROR: Transfer integrity"))
         assert(contains(terminal,"Item: Cheddar Cheese") and contains(terminal,"ID: minecolonies:cheddar_cheese"))
         assert(contains(terminal,"Quantity: 16 (PRS export)"))
+        local snapshot=f.master.engine.snapshot()
+        assert(contains(snapshot.requests[1].detail,"PRS export returned 0; chest unchanged. Transfer held."))
+        assert(not contains(snapshot.requests[1].detail,"possible desync"),"live request kept the unsupported archived diagnosis")
         Test.equal(textutils.serialize(f.master.store.data),before,"displaying the old held transfer changed its durable intent")
     end)
     state.pendingTransfer,state.quarantine=nil,nil;f.colony.error=nil
@@ -128,7 +136,10 @@ Test.case("held master diagnostics identify the display name and colony while in
     assert(text:find("HELD PRS export: colony 9 (Stardust)",1,true))
     assert(text:find("Item: minecolonies:rice x8",1,true) and text:find("Grid name: Rice",1,true))
     assert(text:find("AP fingerprint: original-rice-selector",1,true) and text:find("Reported: 0",1,true))
-    Test.equal(#f.w.calls,0);Test.equal(textutils.serialize(f.master.store.data),before);Test.equal(textutils.serialize(f.w.files),files)
+    for _,call in ipairs(f.w.calls) do
+        if call.filter then Test.equal(call.filter.count,0,"held diagnostics moved an item") end
+    end
+    Test.equal(textutils.serialize(f.master.store.data),before);Test.equal(textutils.serialize(f.w.files),files)
 end)
 
 Test.case("actual retained import details render on the native colony and cached read-only master display without storage discovery or mutation",function()

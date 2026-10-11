@@ -94,7 +94,7 @@ Test.case("positive bridge count without chest delta quarantines PRS and is neve
     assert(m.store.data.master.quarantine~=nil)
 end)
 
-Test.case("reported stock with zero export is a desync error rather than a missing item",function()
+Test.case("reported stock with zero export is held rather than marked missing or automatically retried",function()
     local w,m=fixture(1);m.rs.add({name="minecraft:stone"},8);m.rs.zeroExport=true
     w.untilTrue(function() return m.store.data.master.quarantine~=nil end)
     local pending=m.store.data.master.pendingTransfer
@@ -103,6 +103,34 @@ Test.case("reported stock with zero export is a desync error rather than a missi
     Test.equal(#w.callsFor("export",true),1)
     for _=1,20 do w.step() end
     Test.equal(#w.callsFor("export",true),1,"zero transfer automatically retried")
+end)
+
+Test.case("zero exports preserve AP target and filter failures without claiming storage desync or releasing the held chest",function()
+    for _,reason in ipairs({"INVALID_TARGET","NO_VALID_COUNT"}) do
+        local w,m=fixture(1);local kelp={name="minecraft:kelp"};m.rs.add(kelp,64)
+        w.computers[2].integrator.requests={S.request("R2",kelp.name,53)}
+        local attempts=0
+        w.devices[1].prs.api.exportItemToPeripheral=function(filter,chest)
+            attempts=attempts+1;Test.equal(chest,"delivery-2")
+            return 0,reason
+        end
+        w.untilTrue(function() return m.store.data.master.quarantine~=nil end)
+        local pending=m.store.data.master.pendingTransfer
+        Test.equal(pending.reported,0);Test.equal(pending.callError,reason);Test.equal(pending.lastDelta,0)
+        assert(pending.definiteZero and pending.uncertain)
+        local fault=m.store.data.master.quarantine
+        assert(fault.message:find("PRS export returned 0",1,true) and fault.message:find(reason,1,true))
+        assert(not fault.message:find("desync",1,true),"a target/filter rejection was incorrectly diagnosed as storage desync")
+        Test.equal(fault.context.callError,reason)
+        Test.equal(m.rs.items[w.identity(kelp)].amount,64,"the rejected export changed real available stock")
+        for _=1,20 do w.step() end
+        Test.equal(attempts,1,"reporting the true failure started an automatic retry")
+        assert(m.store.data.master.pendingTransfer==pending and m.store.data.master.quarantine==fault)
+        Test.equal(#m.store.data.master.colonies["2"].shipments,0)
+        local health
+        for _,row in ipairs(m.engine.snapshot().health) do if row.label=="Transfer integrity" then health=row end end
+        assert(health and health.detail:find("Bridge reason: "..reason,1,true))
+    end
 end)
 
 Test.case("restart after uncertain export accounts observed chest contents without new PRS export",function()

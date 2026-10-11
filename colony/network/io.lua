@@ -235,23 +235,60 @@ function M.new(config,store,matcher)
         if config.transferSettleSeconds>0 then sleep(config.transferSettleSeconds) end
         if value==nil then return nil,err or "Transfer result unknown" end
         if type(value)~="number" or value<0 or value%1~=0 then return nil,"Invalid transfer result" end
-        return value
+        return value,err
     end
-    local function move(role,export,filter,count,chest,route)
-        local rs,err=bridge(role); if not rs then return nil,err end
+    local function transferPath(role,export,chest,route)
         local inventory,inventoryErr=self.inventory(chest); if not inventory then return nil,inventoryErr end
         local method=export and "exportItemToPeripheral" or "importItemFromPeripheral"
         local destination=chest
         if config.usePeripheralTransfer==false then
             method=export and "exportItem" or "importItem"
-            destination=role=="master" and (export and route and route.outputDirection or route and route.returnDirection)
-                or (export and config.colonyExportDirection or config.colonyImportDirection)
+            if role=="master" then
+                if export then destination=route and route.outputDirection
+                else destination=route and route.returnDirection end
+            elseif export then destination=config.colonyExportDirection
+            else destination=config.colonyImportDirection end
             if type(destination)~="string" or destination=="" then return nil,"Directional transfer path is not configured" end
         end
+        return method,destination
+    end
+    local function move(role,export,filter,count,chest,route)
+        local rs,err=bridge(role); if not rs then return nil,err end
+        local method,destination=transferPath(role,export,chest,route)
+        if not method then return nil,destination end
         filter.count=integer(count)
         if filter.count<1 then return 0 end
         local value,transferErr=call(rs,method,filter,destination)
         return settled(value,transferErr)
+    end
+    -- Explicit operator inspection only. AP validates its target handler
+    -- before a count-zero name filter performs no item extraction/insertion.
+    function self.inspectExportTarget(chest,route,itemName)
+        if config.role~="master" then return nil,"Only the master may inspect PRS export targets" end
+        if type(itemName)~="string" or itemName=="" or #itemName>256 or itemName:find("%c") then
+            return nil,"Export target inspection requires the held item name"
+        end
+        if type(route)=="table" and route.deliveryChest~=nil and route.deliveryChest~=chest then
+            return nil,"Held export chest does not match its configured colony route"
+        end
+        local rs,bridgeName=bridge("master"); if not rs then return nil,bridgeName end
+        local method,destination=transferPath("master",true,chest,route)
+        if not method then return nil,destination end
+        local report={bridge=bridgeName,method=method,destination=destination,accepted=false}
+        local connected,connectionError=call(rs,"isConnected")
+        if type(connected)=="boolean" then
+            report.connected=connected
+            report.connectionError=connectionError or (not connected and "NOT_CONNECTED" or nil)
+        else
+            report.connectionError=connectionError or "Invalid RS Bridge connection status; connection unknown"
+        end
+        local value,err=call(rs,method,{name=itemName,count=0},destination)
+        if value==0 then
+            report.value=0;report.error=err;report.accepted=err==nil
+        else
+            report.error=err or (value==nil and "Export target result unknown" or "Invalid zero-count export target result: "..tostring(value))
+        end
+        return report
     end
     local function importFilter(item,chest,importing)
         if type(item.name)~="string" or item.name=="" then return nil,"Import has no item name" end

@@ -26,14 +26,14 @@ local function nbtLabel(value)
     local ok,source=pcall(textutils.serialize,value,{compact=true,allow_repetitions=true})
     return type(value)..": "..(ok and type(source)=="string" and source:sub(1,96) or "unavailable")
 end
-function M.printHeldMaster(config,io,store)
+function M.printHeldMaster(config,io,store,inspectTarget)
     local state=store and store.data and store.data.master
     local pending=type(state)=="table" and state.pendingTransfer
     if type(pending)~="table" then print("No held master transfer.");return end
     local item=type(pending.item)=="table" and pending.item or {}
-    local label
+    local label,route
     for _,colony in ipairs(config.colonies or {}) do
-        if tostring(colony.id)==tostring(pending.colonyId) then label=colony.label;break end
+        if tostring(colony.id)==tostring(pending.colonyId) then label=colony.label;route=colony;break end
     end
     label=label or (state.colonies and state.colonies[tostring(pending.colonyId)] or {}).colonyName
     print("HELD PRS "..tostring(pending.kind)..": colony "..tostring(pending.colonyId)..(label and " ("..label..")" or ""))
@@ -45,17 +45,39 @@ function M.printHeldMaster(config,io,store)
     print("AP item NBT: "..nbtLabel(item.nbt))
     print("AP fingerprint: "..tostring(item.fingerprint or (pending.variant and pending.variant.fingerprint) or "NONE"))
     local items,err=io.snapshot(pending.chest)
-    if type(items)~="table" then print("FAIL chest read: "..tostring(err));return end
-    local count=io.count(items,item)
-    print("Original/current AP identity count: "..tostring(pending.before).." / "..tostring(count))
-    print("Physical baseline saved: "..tostring(type(pending.physicalBefore)=="table"))
-    local slots,total={},0
-    for slot,entry in pairs(items) do if entry.name==item.name then slots[#slots+1]=slot;total=total+entry.count end end
-    table.sort(slots)
-    print("Same-name quantity: "..total.." (identity unverified)")
-    for index,slot in ipairs(slots) do
-        if index>4 then print("Additional matching slots: "..(#slots-4));break end
-        print("Slot "..slot.." x"..items[slot].count.." CC NBT: "..nbtLabel(items[slot].nbt))
+    if type(items)~="table" then print("FAIL chest read: "..tostring(err))
+    else
+        local count=io.count(items,item)
+        print("Original/current AP identity count: "..tostring(pending.before).." / "..tostring(count))
+        print("Physical baseline saved: "..tostring(type(pending.physicalBefore)=="table"))
+        local slots,total={},0
+        for slot,entry in pairs(items) do if entry.name==item.name then slots[#slots+1]=slot;total=total+entry.count end end
+        table.sort(slots)
+        print("Same-name quantity: "..total.." (identity unverified)")
+        for index,slot in ipairs(slots) do
+            if index>4 then print("Additional matching slots: "..(#slots-4));break end
+            print("Slot "..slot.." x"..items[slot].count.." CC NBT: "..nbtLabel(items[slot].nbt))
+        end
+    end
+    print("Original bridge error: "..tostring(pending.callError or "none recorded"))
+    if inspectTarget~=false and config.role=="master" and pending.kind=="export" and pending.reported==0 then
+        local report,targetError
+        if not route or route.deliveryChest~=pending.chest then
+            targetError="Held export chest does not match its configured colony route"
+        elseif type(io.inspectExportTarget)~="function" then targetError="Export target inspection is unavailable"
+        else
+            local ok,value,detail=pcall(io.inspectExportTarget,pending.chest,route,item.name)
+            if ok then report,targetError=value,detail else targetError=tostring(value) end
+        end
+        if type(report)~="table" then report={error=targetError or "Export target result unknown"} end
+        print("PRS connected: "..(type(report.connected)=="boolean" and tostring(report.connected) or "UNKNOWN")
+            ..(report.connectionError and (" - "..tostring(report.connectionError)) or ""))
+        print("Zero-count target: "..tostring(report.bridge or config.playerBridgeName or "UNKNOWN").." / "
+            ..tostring(report.method or "UNKNOWN").." / "..tostring(report.destination or pending.chest or "UNKNOWN"))
+        print("Zero-count result: "..tostring(report.value==0 and 0 or "UNKNOWN")
+            ..(report.error and (" - "..tostring(report.error)) or ""))
+        print("Target handler: "..(report.value~=0 and "UNKNOWN" or report.accepted and "ACCEPTED" or "REJECTED"))
+        print("Accepted handler only; insertion/export untested.")
     end
     print("Inspection only; transfer and ledger unchanged.")
 end
@@ -115,7 +137,7 @@ function M.printReport(config,io,store)
         print("Inspection only; the transfer and its ledger remain unchanged.")
     end
     if config.role=="master" and data and data.master and data.master.pendingTransfer then
-        M.printHeldMaster(config,io,store)
+        M.printHeldMaster(config,io,store,false)
     end
 end
 function M.handleClient(config,store,io,message,canProbe)

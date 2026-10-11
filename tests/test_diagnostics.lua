@@ -274,4 +274,94 @@ Test.case("actual diagnostic CLI inspects a retained unknown import without cons
     Test.equal(reloaded.data.client.shipments.D1.imported,0);Test.equal(reloaded.data.client.fault.code,"TRANSFER_DESYNC")
     assert(reloaded.data.client.intent and reloaded.data.client.intent.reported==nil)
 end)
+
+local function heldTargetFixture(reported)
+    local w,m=fixture()
+    local source=m.rs.items[w.identity({name="minecraft:cobblestone"})]
+    m.store.data.master.pendingTransfer={kind="export",colonyId=2,requestId="R2",generation=1,chest="out",
+        item={name=source.name,fingerprint=source.fingerprint,nbt={Private="original AP metadata"}},
+        count=1,before=0,reported=reported,callError="ORIGINAL_EXPORT_ERROR",session="master-1",turn=1,
+        startedAt=90,verifySeconds=1,pollSeconds=.1,uncertain=true}
+    m.store.data.master.quarantine={code="TRANSFER_VERIFY",message="Original transfer remains held"}
+    m.store.save()
+    w.insert(w.channels.delivery,{name="minecraft:dirt"},3)
+    local f={w=w,m=m,calls={}}
+    local function encode(value) return textutils.serialize(value,{compact=true,allow_repetitions=true}) end
+    function f.capture(ordinaryReport)
+        local before={data=encode(m.store.data),fault=m.store.fault,inventory=encode(w.channels),stock=encode(m.rs.items)}
+        local report=captureReport(w,m,function()
+            if ordinaryReport then Diagnostics.printReport(m.config,m.io,m.store)
+            else Diagnostics.printHeldMaster(m.config,m.io,m.store) end
+        end)
+        Test.equal(encode(m.store.data),before.data,"held-target inspection changed a fault or write-ahead intent")
+        Test.equal(m.store.fault,before.fault);Test.equal(encode(w.channels),before.inventory,"zero-count inspection moved inventory")
+        Test.equal(encode(m.rs.items),before.stock,"zero-count inspection changed PRS stock")
+        return report
+    end
+    function f.spy(method,result)
+        local api=w.devices[1].prs.api
+        api[method]=function(filter,destination)
+            f.calls[#f.calls+1]={method=method,filter=S.copy(filter),destination=destination}
+            return result()
+        end
+        local other=method=="exportItem" and "exportItemToPeripheral" or "exportItem"
+        api[other]=function() error("inspection selected the unconfigured export path",0) end
+        api.importItemFromPeripheral=function() error("held export inspection imported an item",0) end
+        api.craftItem=function() error("held export inspection crafted an item",0) end
+    end
+    function f.exactCall(method,destination)
+        Test.equal(#f.calls,1)
+        local call=f.calls[1];Test.equal(call.method,method);Test.equal(call.destination,destination)
+        Test.equal(call.filter.name,"minecraft:cobblestone");Test.equal(call.filter.count,0)
+        Test.equal(call.filter.fingerprint,nil);Test.equal(call.filter.nbt,nil)
+        local fields=0;for _ in pairs(call.filter) do fields=fields+1 end
+        Test.equal(fields,2,"target inspection sent fields beyond the zero-count registry-name filter")
+    end
+    return f
+end
+
+Test.case("held zero export diagnostics preserve original and zero-target errors with an exact zero-count name filter and no state changes",function()
+    for _,mode in ipairs({"invalid target","zero with error","accepted","unknown","throw","malformed"}) do
+        local f=heldTargetFixture(0)
+        f.spy("exportItemToPeripheral",function()
+            if mode=="invalid target" then return nil,"INVALID_TARGET" end
+            if mode=="zero with error" then return 0,"INVALID_TARGET" end
+            if mode=="accepted" then return 0 end
+            if mode=="unknown" then return nil end
+            if mode=="throw" then error("TARGET_CALL_THROWN",0) end
+            return "malformed"
+        end)
+        local report=f.capture();f.exactCall("exportItemToPeripheral","out")
+        assert(report:find("PRS connected: true",1,true),"diagnostic omitted the resolved PRS connection status")
+        assert(report:find("ORIGINAL_EXPORT_ERROR",1,true),"diagnostic omitted the original held call error")
+        if mode=="invalid target" or mode=="zero with error" then
+            assert(report:find("INVALID_TARGET",1,true),"zero-count target inspection lost the API rejection")
+        elseif mode=="accepted" then
+            assert(report:lower():find("accepted",1,true),"valid zero-count target handler was not reported")
+            assert(report:lower():find("insertion",1,true),"report did not limit the target acceptance conclusion")
+        elseif mode=="throw" then assert(report:find("TARGET_CALL_THROWN",1,true)) end
+    end
+end)
+
+Test.case("held zero export diagnostics use the configured directional method and output direction without peripheral fallback",function()
+    local f=heldTargetFixture(0)
+    f.m.config.usePeripheralTransfer=false;f.m.config.colonies[1].outputDirection="east"
+    f.spy("exportItem",function() return 0 end)
+    local report=f.capture();f.exactCall("exportItem","east")
+    assert(report:find("exportItem",1,true) and report:find("east",1,true),"target report hid the configured directional path")
+end)
+
+Test.case("ordinary diagnostics and held positive unknown return or mismatched routes never submit a zero-target RPC",function()
+    for _,mode in ipairs({"ordinary diag","positive","unknown","return","changed chest","wrong colony"}) do
+        local f=heldTargetFixture(mode=="positive" and 1 or mode=="unknown" and nil or 0)
+        local pending=f.m.store.data.master.pendingTransfer
+        if mode=="unknown" then pending.reported=nil end
+        if mode=="return" then pending.kind="import" end
+        if mode=="changed chest" then f.m.config.colonies[1].deliveryChest="changed" end
+        if mode=="wrong colony" then f.m.config.colonies[1].id=3 end
+        f.spy("exportItemToPeripheral",function() error("nonzero/unknown or unmatched route submitted an inspection RPC",0) end)
+        local report=f.capture(mode=="ordinary diag");Test.equal(#f.calls,0)
+        assert(report:find("ORIGINAL_EXPORT_ERROR",1,true))
+    end
+end)
 return true

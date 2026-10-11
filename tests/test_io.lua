@@ -105,8 +105,8 @@ Test.case("real bridge IO preserves returned failure reasons and thrown errors w
         if mode=="reason" then Test.equal(count,nil);Test.equal(err,"NOT_CONNECTED")
         elseif mode=="unknown" then Test.equal(count,nil);Test.equal(err,"Transfer result unknown")
         elseif mode=="throw" then Test.equal(count,nil);Test.equal(err,"Bridge disconnected during import")
-        elseif mode=="zero" then Test.equal(count,0);Test.equal(err,nil)
-        else Test.equal(count,4);Test.equal(err,nil) end
+        elseif mode=="zero" then Test.equal(count,0);Test.equal(err,"INVALID_TARGET")
+        else Test.equal(count,4);Test.equal(err,"successful import detail") end
         Test.equal(w.count(w.channels.D2,{name="minecraft:stone"}),mode=="positive" and 0 or 4)
     end
 end)
@@ -484,6 +484,163 @@ Test.case("partial imports of an untagged physical stack keep its remainder unta
             Test.equal(call.filter.fingerprint,nil,"plain import invoked a tag-mutating fingerprint predicate")
             Test.equal(call.filter.nbt,nil)
         end
+    end
+end)
+local function targetFixture()
+    local w=S.world();local m=S.computer(w,1,"master")
+    m.rs=w.bridge(1,"prs",true);w.chest(1,"out","target-delivery")
+    local route={id=2,deliveryChest="out",returnChest="back",outputDirection="east",returnDirection="west"}
+    m.config.colonies={route}
+    local source=m.rs.add({name="minecraft:kelp"},8)
+    local candidate=m.matcher.requestCandidates(S.request("R",source.name,1))[1]
+    return w,m,route,source,candidate
+end
+
+Test.case("numeric PRS export results retain INVALID_TARGET filter errors and positive diagnostic details",function()
+    for _,mode in ipairs({"invalid","filter","positive"}) do
+        local w,m,route,source,candidate=targetFixture();local api=w.devices[1].prs.api
+        local original=api.exportItemToPeripheral
+        api.exportItemToPeripheral=function(filter,chest)
+            if mode=="invalid" then return 0,"INVALID_TARGET" end
+            if mode=="filter" then return 0,"NO_VALID_ITEM" end
+            return original(filter,chest),"successful export detail"
+        end
+        w.at(1,function()
+            local result,err=m.io.exportPRS(candidate,source,1,"out",route)
+            Test.equal(result,mode=="positive" and 1 or 0)
+            Test.equal(err,mode=="invalid" and "INVALID_TARGET" or mode=="filter" and "NO_VALID_ITEM" or "successful export detail")
+        end)
+        Test.equal(w.count(w.channels["target-delivery"],source),mode=="positive" and 1 or 0)
+        Test.equal(m.rs.items[w.identity(source)].amount,mode=="positive" and 7 or 8)
+    end
+end)
+
+Test.case("explicit zero-count target inspection uses the same configured PRS export method and destination without item selectors or movement",function()
+    for _,directional in ipairs({false,true}) do
+        local w,m,route,source,candidate=targetFixture();m.config.usePeripheralTransfer=not directional
+        local api=w.devices[1].prs.api;local calls={}
+        local wanted=directional and "exportItem" or "exportItemToPeripheral"
+        local other=directional and "exportItemToPeripheral" or "exportItem"
+        api[other]=function() error("target inspection switched transfer paths",0) end
+        api[wanted]=function(filter,destination)
+            calls[#calls+1]={filter=S.copy(filter),destination=destination}
+            return 0,"INVALID_TARGET"
+        end
+        local before=textutils.serialize({files=w.files,data=m.store.data,items=m.rs.items,slots=w.channels["target-delivery"].slots})
+        w.at(1,function()
+            local report=assert(m.io.inspectExportTarget("out",route,source.name))
+            Test.equal(report.bridge,"prs");Test.equal(report.method,wanted)
+            Test.equal(report.connected,true);Test.equal(report.connectionError,nil)
+            Test.equal(report.destination,directional and "east" or "out")
+            Test.equal(report.value,0);Test.equal(report.error,"INVALID_TARGET");Test.equal(report.accepted,false)
+        end)
+        Test.equal(#calls,1);Test.equal(calls[1].filter.name,source.name);Test.equal(calls[1].filter.count,0)
+        Test.equal(calls[1].filter.fingerprint,nil);Test.equal(calls[1].filter.nbt,nil)
+        local fields=0;for _ in pairs(calls[1].filter) do fields=fields+1 end;Test.equal(fields,2)
+        Test.equal(textutils.serialize({files=w.files,data=m.store.data,items=m.rs.items,slots=w.channels["target-delivery"].slots}),before)
+        -- The ordinary transfer must choose exactly the inspected path.
+        w.at(1,function()
+            local result,err=m.io.exportPRS(candidate,source,1,"out",route)
+            Test.equal(result,0);Test.equal(err,"INVALID_TARGET")
+        end)
+        Test.equal(#calls,2);Test.equal(calls[2].destination,calls[1].destination)
+        Test.equal(calls[2].filter.count,1);Test.equal(calls[2].filter.fingerprint,source.fingerprint)
+    end
+end)
+
+Test.case("zero-target reports distinguish an accepted handler rejected target disconnected bridge malformed result and thrown call",function()
+    for _,mode in ipairs({"accepted","invalid","filter","unknown","disconnected","positive","negative","fraction","nan","infinite","throw","missing"}) do
+        local w,m,route,source=targetFixture();local api=w.devices[1].prs.api;local calls=0
+        api.exportItemToPeripheral=function(filter)
+            calls=calls+1;Test.equal(filter.count,0)
+            if mode=="accepted" then return 0 end
+            if mode=="invalid" then return 0,"INVALID_TARGET" end
+            if mode=="filter" then return 0,"ITEM_NOT_FOUND" end
+            if mode=="unknown" then return nil end
+            if mode=="disconnected" then return nil,"NOT_CONNECTED" end
+            if mode=="positive" then return 1 end
+            if mode=="negative" then return -1 end
+            if mode=="fraction" then return .5 end
+            if mode=="nan" then return 0/0 end
+            if mode=="infinite" then return math.huge end
+            error("Bridge target lookup threw",0)
+        end
+        if mode=="missing" then api.exportItemToPeripheral=nil end
+        w.at(1,function()
+            local report=assert(m.io.inspectExportTarget("out",route,source.name))
+            Test.equal(report.accepted,mode=="accepted")
+            if mode=="accepted" then Test.equal(report.value,0);Test.equal(report.error,nil)
+            elseif mode=="invalid" or mode=="filter" then
+                Test.equal(report.value,0);Test.equal(report.error,mode=="invalid" and "INVALID_TARGET" or "ITEM_NOT_FOUND")
+            else
+                Test.equal(report.value,nil);assert(type(report.error)=="string" and #report.error>0)
+                if mode=="disconnected" then Test.equal(report.error,"NOT_CONNECTED") end
+                if mode=="throw" then Test.equal(report.error,"Bridge target lookup threw") end
+            end
+        end)
+        Test.equal(calls,mode=="missing" and 0 or 1);Test.equal(m.rs.items[w.identity(source)].amount,8)
+        Test.equal(next(w.channels["target-delivery"].slots),nil)
+    end
+end)
+
+Test.case("zero-count target inspection refuses colony roles invalid names mismatched route paths and missing directions before a bridge call",function()
+    local w,c=S.clientFixture();w.bridge(2,"prs",true)
+    local count=0
+    w.devices[2].prs.api.exportItemToPeripheral=function() count=count+1;error("colony accessed PRS",0) end
+    w.at(2,function()
+        local result,err=c.io.inspectExportTarget("delivery",{deliveryChest="delivery"},"minecraft:kelp")
+        Test.equal(result,nil);assert(err:find("Only the master",1,true))
+    end)
+    Test.equal(count,0)
+    for _,mode in ipairs({"invalid-name","long-name","changed-route","missing-chest","missing-direction"}) do
+        local world,m,route,source=targetFixture();local calls=0
+        world.devices[1].prs.api.exportItemToPeripheral=function() calls=calls+1;return 0 end
+        world.devices[1].prs.api.exportItem=function() calls=calls+1;return 0 end
+        local chest,name="out",source.name
+        if mode=="invalid-name" then name=false end
+        if mode=="long-name" then name=string.rep("n",257) end
+        if mode=="changed-route" then route.deliveryChest="another-chest" end
+        if mode=="missing-chest" then world.devices[1].out=nil end
+        if mode=="missing-direction" then m.config.usePeripheralTransfer=false;route.outputDirection=nil end
+        world.at(1,function()
+            local report,reason=m.io.inspectExportTarget(chest,route,name)
+            Test.equal(report,nil);assert(type(reason)=="string" and reason~="")
+        end)
+        Test.equal(calls,0)
+        Test.equal(m.rs.items[world.identity(source)].amount,8)
+    end
+end)
+Test.case("zero-target inspection reads connection status from its configured PRS without suppressing target calls or reading stock",function()
+    for _,mode in ipairs({"true","false","nil","invalid","throw","missing"}) do
+        local w,m,route,source=targetFixture();local api=w.devices[1].prs.api;local statusCalls,targetCalls=0,0
+        api.isConnected=function()
+            statusCalls=statusCalls+1
+            if mode=="true" then return true end
+            if mode=="false" then return false,"RS_NETWORK_OFFLINE" end
+            if mode=="nil" then return nil,"STATUS_UNAVAILABLE" end
+            if mode=="invalid" then return "connected" end
+            error("Status query threw",0)
+        end
+        if mode=="missing" then api.isConnected=nil end
+        api.listItems=function() error("target inspection queried PRS stock",0) end
+        api.exportItemToPeripheral=function(filter,destination)
+            targetCalls=targetCalls+1;Test.equal(filter.count,0);Test.equal(destination,"out");return 0
+        end
+        w.bridge(1,"other-prs",true)
+        w.devices[1]["other-prs"].api.isConnected=function() error("inspected another bridge",0) end
+        w.at(1,function()
+            local report=assert(m.io.inspectExportTarget("out",route,source.name))
+            Test.equal(report.bridge,"prs");Test.equal(report.value,0);Test.equal(report.accepted,true)
+            if mode=="true" then Test.equal(report.connected,true);Test.equal(report.connectionError,nil)
+            elseif mode=="false" then Test.equal(report.connected,false);Test.equal(report.connectionError,"RS_NETWORK_OFFLINE")
+            else
+                Test.equal(report.connected,nil);assert(type(report.connectionError)=="string" and #report.connectionError>0)
+                if mode=="nil" then Test.equal(report.connectionError,"STATUS_UNAVAILABLE") end
+                if mode=="throw" then Test.equal(report.connectionError,"Status query threw") end
+            end
+        end)
+        Test.equal(statusCalls,mode=="missing" and 0 or 1);Test.equal(targetCalls,1)
+        Test.equal(m.rs.items[w.identity(source)].amount,8);Test.equal(next(w.channels["target-delivery"].slots),nil)
     end
 end)
 return true

@@ -169,16 +169,38 @@ function M.new(config, store, io, matcher)
         return tostring(item.displayName or item.name or "UNKNOWN")
     end
 
+    local function zeroTransferReason(pending)
+        local operation = pending.kind == "export" and "export" or "import"
+        local reason = "PRS " .. operation .. " returned 0; chest unchanged. Transfer held."
+        if pending.callError ~= nil and tostring(pending.callError) ~= "" then
+            reason = reason .. " Bridge reason: " .. tostring(pending.callError)
+        end
+        return reason
+    end
+
+    local function currentTransferReason()
+        local fault, pending = state.quarantine, state.pendingTransfer
+        if not fault then return "No uncertain transfer" end
+        -- Older journals labelled every zero as a possible storage desync.
+        -- Present the evidence accurately without changing those durable holds.
+        if fault.code == "TRANSFER_VERIFY" and type(pending) == "table"
+            and pending.reported == 0 and pending.lastDelta == 0 then
+            return zeroTransferReason(pending)
+        end
+        return tostring(fault.message)
+    end
+
     local function transferFaultDetail()
         local fault, pending = state.quarantine, state.pendingTransfer
         if not fault then return "No uncertain transfer" end
-        local detail = tostring(fault.message)
+        local detail = currentTransferReason()
         if type(pending) ~= "table" then return detail end
         local item = type(pending.item) == "table" and pending.item or {}
         local function value(raw) return raw == nil and "UNKNOWN" or tostring(raw) end
         return detail .. "\nItem: " .. transferItemLabel(pending)
             .. "\nID: " .. value(item.name)
             .. "\nQuantity: " .. value(pending.count) .. " (PRS " .. value(pending.kind) .. ")"
+            .. "\nBridge reason: " .. (pending.callError ~= nil and value(pending.callError) or "not recorded")
             .. "\nColony: " .. transferColonyLabel(pending) .. " [" .. value(pending.colonyId) .. "]"
             .. "\nChest: " .. value(pending.chest)
             .. "\nReported / chest change: " .. value(pending.reported) .. " / " .. value(pending.lastDelta)
@@ -249,6 +271,9 @@ function M.new(config, store, io, matcher)
             "requested","shipped","imported","detail","createdAt","lastSeenAt",
             "firstShipmentAt","completedAt","craftIdentity"}) do
             if record[key] ~= nil then result[key] = copy(record[key]) end
+        end
+        if record.errorCode == "PRS_QUARANTINE" and state.quarantine then
+            result.detail = currentTransferReason()
         end
         return result
     end
@@ -332,7 +357,7 @@ function M.new(config, store, io, matcher)
         table.sort(rows, function(a,b) return tostring(a.id) < tostring(b.id) end)
         turn.result = {kind="result", session=turn.session, turn=turn.id,
             requests=rows, deliveries=shipmentsFor(cs),
-            masterError=cs.error or cs.routeError or (state.quarantine and state.quarantine.message) or nil}
+            masterError=cs.error or cs.routeError or (state.quarantine and currentTransferReason()) or nil}
         turn.phase, turn.finishedAt = "RESULT", io.now()
         save()
         sendTurn(colony, cs)
@@ -516,15 +541,14 @@ function M.new(config, store, io, matcher)
         local reason = err and "Cannot verify transfer inventory: " .. err
             or "Transfer inventory delta does not agree with the export/import outcome"
         if pending.reported == 0 and delta == 0 then
-            reason = pending.kind == "export" and "PRS reported stock but exported zero; possible desync"
-                or "PRS accepted no return items; check storage capacity or possible desync"
+            reason = zeroTransferReason(pending)
             pending.definiteZero = true
         end
         quarantine("TRANSFER_VERIFY", reason, {colonyId=pending.colonyId,
             colonyLabel=transferColonyLabel(pending), chest=pending.chest,
             requestId=pending.requestId, item=pending.item.name, displayName=pending.item.displayName,
             expected=pending.count,
-            reported=pending.reported, actual=delta, error=err})
+            reported=pending.reported, actual=delta, error=err, callError=pending.callError})
         local cs = state.colonies[tostring(pending.colonyId)]
         local record = cs and cs.requests[pending.requestId]
         if record then record.status, record.detail, record.errorCode = "error", reason, "PRS_QUARANTINE" end
@@ -972,7 +996,7 @@ function M.new(config, store, io, matcher)
                     if record and record.status ~= "delivered" then
                         record.status, record.detail = "error", cs.error or cs.routeError
                             or (cs.turn.batch and cs.turn.batch.clientError)
-                            or (state.quarantine and state.quarantine.message) or "Colony transfer paused"
+                            or (state.quarantine and currentTransferReason()) or "Colony transfer paused"
                         record.errorCode = state.quarantine and "PRS_QUARANTINE" or "CLIENT"
                     end
                 end
@@ -1199,7 +1223,7 @@ function M.new(config, store, io, matcher)
         table.sort(requests, function(a,b) return tostring(a.colonyId) .. ":" .. a.id < tostring(b.colonyId) .. ":" .. b.id end)
         local heldItem = state.quarantine and state.pendingTransfer
             and transferItemLabel(state.pendingTransfer) .. " x" .. tostring(state.pendingTransfer.count) .. "; " or ""
-        local status = state.quarantine and "PRS quarantined: " .. heldItem .. state.quarantine.message
+        local status = state.quarantine and "PRS transfer held: " .. heldItem .. currentTransferReason()
             or work and "Processing colony " .. tostring(work.colony.id)
             or #colonies == 0 and "Configure colony routes in Settings"
             or "Polling colonies; dedicated PRS owner"

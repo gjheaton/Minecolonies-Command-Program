@@ -1,6 +1,6 @@
 # MineColonies Control Suite
 
-The `supply-master-colony` branch provides Supply 4.0.3: one dedicated computer owns
+The `supply-master-colony` branch provides Supply 4.0.4: one dedicated computer owns
 Player Refined Storage (PRS), and colony supply computers communicate with it over
 rednet. Each colony has a delivery and a return Ender Chest channel. Command Center
 is also available through the same installer.
@@ -58,7 +58,7 @@ install_colony --update master
 ```
 
 Use `supply` or `command` instead of `master` on those computers. The stored update
-source remains this development branch until explicitly changed. For 4.0.3, pause
+source remains this development branch until explicitly changed. For 4.0.4, pause
 master automation, let current handshakes finish, then use **CHECK UPDATE → UPDATE**
 on the master and every colony supply computer. Settings and request/transfer
 journals are preserved. Resume automation after all computers have restarted with
@@ -100,7 +100,7 @@ Versions use **MAJOR.MINOR.PATCH**:
 - **Minor**, the second number, changes for compatible new features.
 - **Patch**, the third number, changes for fixes and maintenance updates.
 
-This update is **4.0.3**. Future fixes increase the patch number so **CHECK UPDATE**
+This update is **4.0.4**. Future fixes increase the patch number so **CHECK UPDATE**
 can detect them. A minor release resets the patch number, such as `4.1.0`; a major
 release resets both later numbers, such as `5.0.0`.
 
@@ -109,6 +109,11 @@ and chest on **HEALTH**. To inspect the exact registry ID and item variant witho
 moving anything, stop the master application and launcher to reach its shell and
 run `colony_master --transferdiag`. Keep delivery chest contents and transfer
 records intact while investigating.
+
+Release 4.0.4 preserves the bridge's error reason for a held zero export.
+For that case, `colony_master --transferdiag` also validates the configured
+target with a zero-count call that moves no items. A readable CC inventory
+alone does not establish that Advanced Peripherals can transfer into it.
 
 ## Development checks
 
