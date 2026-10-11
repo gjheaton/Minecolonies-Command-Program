@@ -299,6 +299,21 @@ handoff, with a session and turn ID:
 6. The colony durably stores those results and acknowledges them. It drains the new
    deliveries only at the beginning of a later turn.
 
+Advanced Peripherals reports item NBT data differently from CC:Tweaked's inventory
+NBT hash. The master saves the entire chest baseline before exporting the selected
+AP `fingerprint`. Binding a new physical identity requires a positive bridge
+return, exactly one identity gaining that quantity, and all other quantities
+unchanged. A verified
+shipment retains both the physical NBT hash and the original AP fingerprint;
+colony imports and overflow returns preserve that binding. AP fingerprints describe
+the item stack and remain usable across RS networks. An NBT import without a valid
+AP selector is blocked; the program never substitutes a CC hash as an AP NBT filter
+or falls back to importing any item with the same name.
+Plain, untagged imports use the matching physical source slot. This prevents AP
+fingerprint matching from adding an empty tag to a partially imported stack and
+changing the remaining stack's CC identity. Ender Chest round-trip tests use the
+same physical export evidence and preserve the original AP item for PRS accounting.
+
 Timeouts never revoke permission to drain a chest already handed to a colony. An
 offline colony retains its original turn; other colonies can be serviced after its
 response deadline. The master cannot write to that colony's delivery chest until
@@ -548,6 +563,39 @@ statuses when their next turn completes. If restart reports **TURN_INTERRUPTED**
 **IMPORT_UNCERTAIN**, or a transfer verification fault, let the original turn
 close and use the corresponding reconciliation command or action described
 above; retained transfer safeguards still apply.
+
+### Tools held after an identity mismatch
+
+Earlier 4.0.0 code could export a tool successfully but fail chest verification
+because it compared AP NBT data directly with a CC inventory hash. Leave those
+items untouched and pause master automation. Repair the **master and every Supply
+computer** before resuming transfers: the fix changes how exact item selectors
+are carried between them. Repair keeps their configuration and journals.
+
+If the original Stardust turn is still open, leave both normal programs running
+with automation paused until its batch/result/acknowledgment handshake closes.
+Then stop the applications and startup launchers to reach their shells. Run
+`install_colony --repair` on each computer. On the **master**, for Stardust at
+colony computer ID `4`, run:
+
+```lua
+colony_master transferdiag
+colony_master reconcile-bind 4
+```
+
+`transferdiag` is read-only and shows the held AP selection beside the physical
+CC identity. `reconcile-bind` previews an older, single-item export with a known
+reported count of one, an original count of zero, and no complete saved chest
+baseline. It requires restored PRS access, a finished handshake, one unambiguous
+physical identity, and the other retained deliveries still present.
+
+Type the literal `BIND 4` only after confirming the shears were **absent before
+that export** and the delivered pair has remained untouched and unreplaced. The
+command durably records **OPERATOR_BIND_EXPORT** and creates one verified shipment
+for the existing item without exporting again. A false confirmation can credit
+an unrelated item; any other input cancels. Only after **OK:** and repairs on all
+computers, reboot the master and clients, then resume master automation. If
+**BLOCKED:** appears, retain the items and journals and inspect the reported cause.
 
 ### Unknown colony transfer result
 

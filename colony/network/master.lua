@@ -56,6 +56,58 @@ local function craftIdentity(candidate)
     return candidate.hasNBT and candidate.identity or candidate.name .. "|NBT|"
 end
 
+local function equal(a, b)
+    if type(a) ~= type(b) then return false end
+    if type(a) ~= "table" then return a == b end
+    for key, value in pairs(a) do if not equal(value, b[key]) then return false end end
+    for key in pairs(b) do if a[key] == nil then return false end end
+    return true
+end
+
+local function restore(target, saved)
+    for key in pairs(target) do if saved[key] == nil then target[key] = nil end end
+    for key, value in pairs(saved) do
+        if type(value) == "table" and type(target[key]) == "table" then restore(target[key], value)
+        else target[key] = copy(value) end
+    end
+end
+
+local function validFingerprint(value)
+    return type(value) == "string" and value ~= "" and #value <= 256
+end
+
+local function denseArray(value)
+    if type(value) ~= "table" then return false end
+    local length = #value
+    for key in pairs(value) do
+        if type(key) ~= "number" or key % 1 ~= 0 or key < 1 or key > length then return false end
+    end
+    for index=1,length do if value[index] == nil then return false end end
+    return true
+end
+
+local function validateReturnSelectors(selectors)
+    if selectors == nil then return {} end -- Older clients may return plain items.
+    if not denseArray(selectors) then return nil, "Return selectors are not a dense array" end
+    local result, seen, length = {}, {}, #selectors
+    if length > 1024 then return nil, "Too many return selectors" end
+    for _, selector in ipairs(selectors) do
+        local item = type(selector) == "table" and selector.item
+        local nbt = type(item) == "table" and item.nbt
+        if type(nbt) == "table" and next(nbt) == nil then nbt = nil end
+        if type(item) ~= "table" or type(item.name) ~= "string" or item.name == "" or #item.name > 256
+            or (nbt ~= nil and (type(nbt) ~= "string" or #nbt > 256))
+            or not validFingerprint(selector.fingerprint) then
+            return nil, "Invalid physical return selector"
+        end
+        local identity = item.name .. "\n" .. tostring(nbt or "")
+        if seen[identity] then return nil, "Duplicate physical return selector" end
+        seen[identity] = true
+        result[#result + 1] = {item={name=item.name, nbt=nbt}, fingerprint=selector.fingerprint}
+    end
+    return result
+end
+
 function M.new(config, store, io, matcher)
     local self = {}
     local d = store.data
@@ -340,18 +392,46 @@ function M.new(config, store, io, matcher)
     local function matchingPendingChest(pending)
         local items, err = io.snapshot(pending.chest)
         if type(items) ~= "table" then return nil, tostring(err) end
+        if pending.kind == "export" and pending.physicalBefore then
+            if type(io.exportEvidence) ~= "function" or type(io.exportBaseline) ~= "function" then
+                return nil, "Physical export verification is unavailable"
+            end
+            if type(pending.reported) == "number" and pending.reported > 0 then
+                local physical, delta = io.exportEvidence(pending.physicalBefore, items, pending.item, pending.reported)
+                if not physical then return nil, tostring(delta) end
+                return delta, nil, physical
+            end
+            -- An unknown/zero result cannot establish a new physical identity.
+            -- Still accept the old exact-identity/full-count proof, checking the
+            -- complete chest to reject concurrent inventory changes.
+            local current, baselineError = io.exportBaseline(items)
+            if not current then return nil, tostring(baselineError) end
+            if equal(current, pending.physicalBefore) then return 0, nil end
+            local physical, delta = io.exportEvidence(pending.physicalBefore, items, pending.item, pending.count)
+            if not physical then return nil, tostring(delta) end
+            if physical.name ~= pending.item.name
+                or matcher.canonicalNBT(physical.nbt) ~= matcher.canonicalNBT(pending.item.nbt) then
+                return nil, "Unknown transfer result cannot bind a different physical item identity"
+            end
+            return delta, nil, physical
+        end
         local count = integer(io.count(items, pending.item))
         local delta = pending.kind == "export" and count - pending.before or pending.before - count
         return delta, nil
     end
 
-    local function creditTransfer(pending, count)
+    local function creditTransfer(pending, count, physical)
         local cs = state.colonies[tostring(pending.colonyId)]
         if pending.kind == "export" then
+            local shipmentItem = copy(pending.item)
+            if physical then
+                shipmentItem.name, shipmentItem.nbt = physical.name, physical.nbt
+                shipmentItem.fingerprint = pending.item.fingerprint
+            end
             state.shipmentCounter = state.shipmentCounter + 1
             local shipment = {id="shipment-" .. tostring(state.shipmentCounter),
                 requestId=pending.requestId, generation=pending.generation,
-                item=copy(pending.item), count=count, imported=0, verified=true,
+                item=shipmentItem, count=count, imported=0, verified=true,
                 createdAt=io.now(), turn=pending.turn, session=pending.session}
             cs.shipments[#cs.shipments + 1] = shipment
             local record = cs.requests[pending.requestId]
@@ -385,7 +465,7 @@ function M.new(config, store, io, matcher)
         local pending = state.pendingTransfer
         if not pending then return true end
         if not manual and io.now() < (pending.nextReadAt or 0) then return false end
-        local delta, err = matchingPendingChest(pending)
+        local delta, err, physical = matchingPendingChest(pending)
         pending.nextReadAt = io.now() + (pending.pollSeconds or 0.25)
         if delta and delta > 0 and delta <= pending.count then
             -- The chest proves actual movement. A nonzero API result must agree
@@ -393,7 +473,7 @@ function M.new(config, store, io, matcher)
             if (pending.reported == nil and delta == pending.count)
                 or (pending.reported ~= nil and pending.reported > 0 and delta == integer(pending.reported))
                 or (pending.reported == 0 and delta == pending.count) then
-                creditTransfer(pending, delta)
+                creditTransfer(pending, delta, physical)
                 if pending.uncertain or pending.recoveryProbe then
                     clearQuarantine()
                     store.event("PRS_RECOVERED", "Held transfer verified from physical chest delta", {colonyId=pending.colonyId})
@@ -424,13 +504,33 @@ function M.new(config, store, io, matcher)
         return false
     end
 
-    local function beginTransfer(kind, colony, cs, item, candidate, variant, count, before, record, recovery)
+    local function beginTransfer(kind, colony, cs, item, candidate, variant, count, before, record, recovery, chestSnapshot)
         local p = cs.turn.policy
+        local physicalBefore
+        if kind == "export" then
+            local err
+            if not validFingerprint(item.fingerprint) then
+                err = "Exact export has no valid Advanced Peripherals fingerprint"
+            elseif type(io.exportBaseline) ~= "function" then
+                err = "Physical export verification is unavailable"
+            else
+                physicalBefore, err = io.exportBaseline(chestSnapshot)
+            end
+            if not physicalBefore then
+                if record then
+                    record.status, record.detail = "error", tostring(err)
+                    record.retryAt = io.now() + p.retryCooldownSeconds
+                end
+                errorEvent("EXPORT_BASELINE", tostring(err), {colonyId=colony.id, requestId=record and record.id})
+                save()
+                return false
+            end
+        end
         state.pendingTransfer = {kind=kind, colonyId=colony.id,
             requestId=record and record.id or nil, generation=record and record.generation or nil,
             chest=kind == "export" and colony.deliveryChest or colony.returnChest,
             item=copy(item), candidate=candidate and copy(candidate) or nil,
-            variant=variant and copy(variant) or nil, count=count, before=before,
+            variant=variant and copy(variant) or nil, count=count, before=before, physicalBefore=physicalBefore,
             session=cs.turn.session, turn=cs.turn.id, startedAt=io.now(),
             verifySeconds=p.transferVerifyTimeoutSeconds, pollSeconds=p.transferPollSeconds,
             nextReadAt=io.now() + p.transferSettleSeconds, intent=true,
@@ -448,6 +548,7 @@ function M.new(config, store, io, matcher)
         state.pendingTransfer.callError = err
         state.pendingTransfer.intent = nil
         save()
+        return true
     end
 
     local function processReturns(colony, cs)
@@ -466,7 +567,14 @@ function M.new(config, store, io, matcher)
         end
         table.sort(slots, function(a,b) return tostring(a) < tostring(b) end)
         if #slots == 0 then work.returnDone = true; return end
-        local item = items[slots[1]]
+        local item = copy(items[slots[1]])
+        item.fingerprint = nil
+        for _, selector in ipairs(cs.turn.batch.returnSelectors or {}) do
+            if selector.item.name == item.name and selector.item.nbt == item.nbt then
+                item.fingerprint = selector.fingerprint
+                break
+            end
+        end
         local count = math.min(integer(item.count or item.amount), p.maxTransferChunk,
             p.maxReturnItemsPerTurn - work.returned)
         if count <= 0 then work.returnDone = true; return end
@@ -543,7 +651,7 @@ function M.new(config, store, io, matcher)
             end
             record.selectedItem = copy(item)
             beginTransfer("export", colony, cs, item, candidate, variant, count,
-                integer(io.count(chest, item)), record, false)
+                integer(io.count(chest, item)), record, false, chest)
             return
         end
 
@@ -633,11 +741,51 @@ function M.new(config, store, io, matcher)
         if message.session ~= turn.session or message.turn ~= turn.id then return false end
         if turn.phase == "RESULT" then sendTurn(colony, cs); return true end
         if turn.phase ~= "WAIT_BATCH" then return true end
+        local selectors, selectorError = validateReturnSelectors(message.returnSelectors)
+        if not selectors then
+            errorEvent("BAD_BATCH", selectorError, {colonyId=colony.id})
+            return false
+        end
+        local selectorMap, changed = {}, {}
+        for _, selector in ipairs(selectors) do
+            local identity = matcher.itemIdentity(selector.item)
+            selectorMap[identity] = copy(selector)
+        end
+        for identity, previous in pairs(cs.returnSelectors or {}) do
+            local incoming = selectorMap[identity]
+            if not incoming or previous.fingerprint ~= incoming.fingerprint then
+                changed[#changed + 1] = {previous=previous, incoming=incoming, identity=identity}
+            end
+        end
+        if #changed > 0 then
+            local items, err = io.snapshot(colony.returnChest)
+            if type(items) ~= "table" then
+                errorEvent("BAD_BATCH", "Cannot verify changed return selector: " .. tostring(err), {colonyId=colony.id})
+                return false
+            end
+            for _, change in ipairs(changed) do
+                if io.count(items, change.previous.item) > 0 then
+                    if change.incoming then
+                        errorEvent("BAD_BATCH", "Return selector changed while its physical item remains present", {colonyId=colony.id})
+                        return false
+                    end
+                    -- Omitted metadata cannot discard a still-present binding.
+                    selectorMap[change.identity] = copy(change.previous)
+                    selectors[#selectors + 1] = copy(change.previous)
+                end
+            end
+            if #selectors > 1024 then
+                errorEvent("BAD_BATCH", "Retained return selectors exceed the safe bound", {colonyId=colony.id})
+                return false
+            end
+        end
         if message.authoritative == false or (message.clientError and type(message.activeIds) ~= "table") then
-            turn.batch = {requests={}, clientError=tostring(message.clientError or "MineColonies request snapshot unavailable")}
+            turn.batch = {requests={}, returnSelectors=selectors,
+                clientError=tostring(message.clientError or "MineColonies request snapshot unavailable")}
             local imported, importError = acknowledgeImports(cs, message.imports)
             if not imported then turn.batch.clientError = turn.batch.clientError .. "; " .. importError end
             cs.error = turn.batch.clientError
+            cs.returnSelectors = selectorMap
             turn.phase = "READY"
             save()
             return true
@@ -672,6 +820,8 @@ function M.new(config, store, io, matcher)
             return true
         end
         turn.batch = copy(message)
+        turn.batch.returnSelectors = selectors
+        cs.returnSelectors = selectorMap
         cs.colonyName = message.colonyName or cs.colonyName
         cs.error = message.clientError and tostring(message.clientError) or nil
         if message.authoritative ~= false then
@@ -922,6 +1072,7 @@ function M.new(config, store, io, matcher)
             local record = cs.requests[pending.requestId]
             local candidate
             local variant
+            local exportChest
             if pending.kind == "export" then
                 local items = stock()
                 if not items then cs.turn=nil; save(); return false, "PRS stock remains unreadable" end
@@ -935,6 +1086,11 @@ function M.new(config, store, io, matcher)
                 if not candidate or not variant then cs.turn=nil; save(); return false, "Original exact item unavailable for recovery" end
                 local filter = matcher.exportFilterForVariant(candidate, variant, 1)
                 if not filter then cs.turn=nil; save(); return false, "Original exact export filter unavailable for recovery" end
+                local chest, err = io.snapshot(pending.chest)
+                if type(chest) ~= "table" then
+                    cs.turn=nil; save(); return false, "Cannot inspect original delivery chest: " .. tostring(err)
+                end
+                exportChest = chest
             else
                 local chest, err = io.snapshot(pending.chest)
                 if not chest or integer(io.count(chest, pending.item)) < 1 then
@@ -943,7 +1099,9 @@ function M.new(config, store, io, matcher)
             end
             local item = copy(pending.item)
             state.lastRecoveryProbeAt = io.now()
-            beginTransfer(pending.kind, colony, cs, item, candidate, variant, 1, pending.before, record, true)
+            if not beginTransfer(pending.kind, colony, cs, item, candidate, variant, 1, pending.before, record, true, exportChest) then
+                cs.turn=nil; save(); return false, "Recovery transfer could not establish its physical baseline"
+            end
             store.event("PRS_PROBE", "Explicit guarded recovery transfer started", {colonyId=colony.id, item=item.name, direction=pending.kind})
             return true, "Guarded recovery probe started; chest verification must succeed"
         end
@@ -1013,6 +1171,234 @@ function M.new(config, store, io, matcher)
         state.pendingTransfer.reported = nil
     end
     save()
+    return self
+end
+
+-- This factory deliberately does not start the processor or change sessions.
+-- It binds one already-present legacy export after explicit operator review;
+-- none of its paths calls an inventory/PRS mutation or sends a turn grant.
+function M.legacyExportRecovery(config, store, io, matcher)
+    local self, reviewed = {}, nil
+
+    local function inspect(colonyId)
+        if config.role ~= "master" then return nil, "Only the master can bind a held PRS export" end
+        local data, colony = store.data
+        local state = type(data) == "table" and data.master
+        if type(state) ~= "table" then return nil, "No master journal exists" end
+        local pending = state.pendingTransfer
+        if type(pending) ~= "table" or pending.kind ~= "export" or pending.physicalBefore ~= nil
+            or pending.count ~= 1 or pending.reported ~= 1 or pending.before ~= 0
+            or pending.intent or not pending.uncertain then
+            return nil, "Only a held legacy single-item export with a known result can be bound"
+        end
+        if tostring(pending.colonyId) ~= tostring(colonyId) then return nil, "The held export belongs to another colony" end
+        if type(pending.item) ~= "table" or type(pending.item.name) ~= "string" or pending.item.name == "" or #pending.item.name > 256
+            or not validFingerprint(pending.item.fingerprint) then
+            return nil, "The held export has no exact Advanced Peripherals fingerprint"
+        end
+        if type(pending.requestId) ~= "string" or pending.requestId == "" or #pending.requestId > 256 then
+            return nil, "The held export request ID cannot be recorded safely"
+        end
+        for _, entry in ipairs(config.colonies or {}) do
+            if tostring(entry.id) == tostring(colonyId) then
+                if colony then return nil, "Colony route ID is ambiguous" end
+                colony = entry
+            end
+        end
+        if not colony or type(colony.deliveryChest) ~= "string" or colony.deliveryChest == ""
+            or #colony.deliveryChest > 256
+            or type(colony.returnChest) ~= "string" or colony.returnChest == ""
+            or #colony.returnChest > 256
+            or colony.deliveryChest == colony.returnChest or colony.deliveryChest ~= pending.chest
+            or channel(colony.deliveryChannel) == "" or channel(colony.returnChannel) == ""
+            or channel(colony.deliveryChannel) == channel(colony.returnChannel) then
+            return nil, "The configured route does not match the held delivery chest"
+        end
+        if (type(colony.id) ~= "string" and type(colony.id) ~= "number")
+            or #tostring(colony.id) > 256 or #("BIND " .. tostring(colony.id)) > 256 then
+            return nil, "The colony ID cannot be recorded safely"
+        end
+        if data.chestTest then return nil, "Finish the retained chest test before binding a delivery" end
+        local cs = state.colonies and state.colonies[tostring(colonyId)]
+        if type(cs) ~= "table" or cs.turn then return nil, "Wait for the colony's outstanding handoff to finish" end
+        if cs.routeError then return nil, "Correct the colony route error before binding: " .. tostring(cs.routeError) end
+        local record = cs.requests and cs.requests[pending.requestId]
+        if type(record) ~= "table" or record.status == "delivered" or record.generation ~= pending.generation
+            or record.errorCode ~= "PRS_QUARANTINE" then
+            return nil, "The held export no longer matches its blocked request generation"
+        end
+        local quarantine = state.quarantine
+        local context = type(quarantine) == "table" and quarantine.context
+        if type(quarantine) ~= "table" or quarantine.code ~= "TRANSFER_VERIFY" or type(context) ~= "table"
+            or tostring(context.colonyId) ~= tostring(colonyId) or context.requestId ~= pending.requestId
+            or context.item ~= pending.item.name or context.expected ~= 1 or context.reported ~= 1 then
+            return nil, "The active quarantine does not belong to this single-item export"
+        end
+        if type(io.bridgeStatus) ~= "function" then return nil, "PRS connection verification is unavailable" end
+        local status = io.bridgeStatus()
+        if type(status) ~= "table" or status.connected ~= true then
+            return nil, "PRS connection is not confirmed: " .. tostring(type(status) == "table" and status.error or "unknown")
+        end
+        if type(status.name) ~= "string" or status.name == "" or #status.name > 256 then
+            return nil, "The connected PRS bridge identity is unavailable"
+        end
+        local stock, stockError = io.stock()
+        if type(stock) ~= "table" then return nil, "PRS stock is unreadable: " .. tostring(stockError) end
+        local items, chestError = io.snapshot(pending.chest)
+        if type(items) ~= "table" then return nil, "Delivery chest is unreadable: " .. tostring(chestError) end
+        if type(io.exportBaseline) ~= "function" then return nil, "Physical inventory verification is unavailable" end
+        local physicalInventory, inventoryError = io.exportBaseline(items)
+        if not physicalInventory then return nil, "Invalid physical chest inventory: " .. tostring(inventoryError) end
+        local physical, nameCount = nil, 0
+        for _, total in pairs(physicalInventory.totals) do
+            if total.item.name == pending.item.name then
+                if physical then return nil, "The chest contains multiple variants of the held item" end
+                physical, nameCount = copy(total.item), total.count
+            end
+        end
+        if not physical or nameCount ~= 1 or (physical.nbt ~= nil and (type(physical.nbt) ~= "string" or #physical.nbt > 256)) then
+            return nil, "The chest must contain exactly one physical item with the held name"
+        end
+        local required = {}
+        if not denseArray(cs.shipments or {}) then return nil, "Existing shipments are not a complete array" end
+        for _, shipment in ipairs(cs.shipments or {}) do
+            if type(shipment) ~= "table" or shipment.verified ~= true or type(shipment.item) ~= "table"
+                or type(shipment.count) ~= "number" or shipment.count < 1 or shipment.count % 1 ~= 0
+                or type(shipment.imported) ~= "number" or shipment.imported < 0 or shipment.imported % 1 ~= 0
+                or shipment.imported > shipment.count then
+                return nil, "An existing shipment cannot be accounted for safely"
+            end
+            local remaining = shipment.count - shipment.imported
+            if remaining > 0 then
+                local identity = matcher.itemIdentity(shipment.item)
+                if not identity then return nil, "An outstanding shipment has no exact item identity" end
+                local total = required[identity] or {item=shipment.item, count=0}
+                total.count = total.count + remaining
+                required[identity] = total
+            end
+        end
+        for identity, total in pairs(required) do
+            local present = physicalInventory.totals[identity]
+            if not present or present.count < total.count then return nil, "An older outstanding shipment is not covered by the chest" end
+            if total.item.name == physical.name and total.item.nbt == physical.nbt then
+                return nil, "The physical item is already needed by an outstanding shipment"
+            end
+        end
+        if type(state.shipmentCounter) ~= "number" or state.shipmentCounter < 0 or state.shipmentCounter % 1 ~= 0
+            or state.shipmentCounter == math.huge then return nil, "The shipment safety counter is invalid" end
+        local nextId = "shipment-" .. tostring(state.shipmentCounter + 1)
+        for _, other in pairs(state.colonies or {}) do
+            if not denseArray(other.shipments or {}) then return nil, "Existing shipments are not a complete array" end
+            for _, shipment in ipairs(other.shipments or {}) do
+                if shipment.id == nextId then return nil, "The next shipment ID already exists" end
+            end
+        end
+        local review = {colonyId=colony.id, item=physical,
+            sourceItem={name=pending.item.name,nbt=copy(pending.item.nbt),fingerprint=pending.item.fingerprint},
+            chest=pending.chest,count=1,before=0,reported=1,currentNameCount=nameCount,
+            confirmation="BIND " .. tostring(colony.id)}
+        -- Keep durable state, routes and the physical chest fixed throughout
+        -- confirmation. Other PRS stock may change, but this exact bridge must
+        -- remain connected and its inventory must still be readable.
+        local guard = {master=copy(state),config=copy(config),chestTest=copy(data.chestTest),
+            revision=data.revision,inventory=physicalInventory,
+            bridge={name=status.name,connected=true,readable=true}}
+        return {review=review,guard=guard}
+    end
+
+    function self.previewBindExport(colonyId)
+        reviewed = nil
+        local ok, result, err = pcall(inspect, colonyId)
+        if not ok then return false, "Cannot review held export: " .. tostring(result) end
+        if not result then return false, err end
+        reviewed = result
+        return true, copy(result.review)
+    end
+
+    function self.reconcileBindExport(colonyId, confirmation)
+        if not reviewed or tostring(reviewed.review.colonyId) ~= tostring(colonyId)
+            or confirmation ~= reviewed.review.confirmation then
+            return false, "Review the held export and type its exact BIND confirmation"
+        end
+        local ok, fresh, err = pcall(inspect, colonyId)
+        if not ok then return false, "Cannot recheck held export: " .. tostring(fresh) end
+        if not fresh then reviewed=nil; return false, err end
+        if not equal(fresh.guard, reviewed.guard) then
+            reviewed=nil
+            return false, "The journal, route, PRS bridge or chest changed after review; review the export again"
+        end
+        reviewed=nil
+        local data = store.data
+        local state = data.master
+        local pending = state.pendingTransfer
+        local physical = fresh.review.item
+        local cs = state.colonies[tostring(colonyId)]
+        local held = copy(state)
+        local previousHistory = copy(data.history or {})
+        local previousRevision = data.revision
+        local function persist()
+            local saved, saveError = store.save()
+            if saved ~= true then error("Operator binding could not be saved: " .. tostring(saveError), 0) end
+        end
+        local audited, auditError = pcall(function()
+            data.history = data.history or {}
+            data.history[#data.history + 1] = {time=io.now(),kind="OPERATOR_BIND_EXPORT",
+                message="Operator confirmed one existing legacy export; no additional item moved",
+                context={colonyId=fresh.review.colonyId,requestId=pending.requestId,item=pending.item.name,count=1,
+                    chest=pending.chest,sourceFingerprint=pending.item.fingerprint,physicalNBT=physical.nbt,
+                    confirmation=confirmation}}
+            local maximum = math.max(1, integer(config.maxHistoryEntries or 400))
+            while #data.history > maximum do table.remove(data.history, 1) end
+            persist()
+        end)
+        if not audited then
+            restore(state, held)
+            data.history, data.revision = previousHistory, previousRevision
+            return false, "Binding audit could not be saved; export remains held: " .. tostring(auditError)
+        end
+        local auditedRevision = data.revision
+        local saved, saveError = pcall(function()
+            state.shipmentCounter = state.shipmentCounter + 1
+            local shipmentItem = copy(pending.item)
+            shipmentItem.name, shipmentItem.nbt = physical.name, physical.nbt
+            cs.shipments = cs.shipments or {}
+            cs.shipments[#cs.shipments + 1] = {id="shipment-" .. tostring(state.shipmentCounter),
+                requestId=pending.requestId,generation=pending.generation,item=shipmentItem,
+                count=1,imported=0,verified=true,createdAt=io.now(),turn=pending.turn,session=pending.session,
+                operatorBound=true}
+            -- Clear the global quarantine exactly as ordinary recovery does.
+            -- Other requests can have different details while sharing this
+            -- error code; retaining any of them would prevent future service.
+            local heldReason = state.quarantine.message
+            for _, other in pairs(state.colonies) do
+                for _, blocked in pairs(other.requests or {}) do
+                    if blocked.errorCode == "PRS_QUARANTINE" then
+                        blocked.status,blocked.detail,blocked.errorCode = "requested",
+                            "PRS recovery verified; resuming outstanding quantity",nil
+                    end
+                end
+                if other.error == heldReason then other.error=nil end
+            end
+            local record = cs.requests[pending.requestId]
+            record.firstShipmentAt = record.firstShipmentAt or io.now()
+            record.status,record.detail,record.errorCode = "in progress",
+                "Operator-bound existing delivery; awaiting colony import",nil
+            for _, job in pairs(state.craftJobs or {}) do
+                if activeCraft(job) and matcher.exactlyMatches(job.item, pending.item) then
+                    job.exported = integer(job.exported) + 1
+                end
+            end
+            state.pendingTransfer, state.quarantine = nil,nil
+            persist()
+        end)
+        if not saved then
+            restore(state, held)
+            data.revision = auditedRevision
+            return false, "Binding could not be saved; audited export remains held: " .. tostring(saveError)
+        end
+        return true, "Existing item bound as one verified shipment; no additional PRS transfer was made"
+    end
+
     return self
 end
 

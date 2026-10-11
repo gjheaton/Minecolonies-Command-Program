@@ -68,8 +68,10 @@ function Test.run()
 end
 _G.Test=Test
 
-function S.world()
-    local w={now=100,id=1,computers={},devices={},channels={},files={},dirs={},queue={},sent={},calls={},events={},drop={},masterId=1}
+function S.world(options)
+    options=options or {}
+    local w={now=100,id=1,computers={},devices={},channels={},files={},dirs={},queue={},sent={},calls={},events={},drop={},masterId=1,
+        asymmetricNBT=options.asymmetricNBT==true,stackPrivate=setmetatable({},{__mode="k"}),apCatalog={}}
     _G.textutils={serialize=encoded,unserialize=function(source)
         local chunk=load("return "..source,"journal","t",{}); if chunk then local ok,value=pcall(chunk); if ok then return value end end
     end,serializeJSON=json}
@@ -145,16 +147,51 @@ function S.world()
         return inventory,api
     end
     function w.identity(item) return item.name.."|"..encoded(item.nbt or "") end
+    local function opaque(value)
+        -- Controlled opaque identities, not a production NBT hash algorithm.
+        local hashes={2166136261,1315423911,5381,2654435761}
+        for index=1,#value do for i=1,4 do hashes[i]=(hashes[i]*(127+i*2)+value:byte(index)+i)%4294967296 end end
+        return string.format("%08x%08x%08x%08x",table.unpack(hashes))
+    end
+    function w.ccNBT(tag)
+        if tag==nil then return nil end
+        if type(tag)~="table" then return tag end
+        if next(tag)==nil then return "41883520c3071f5f4a4a4613fb005e0c" end
+        local onlyDamage=true;for key in pairs(tag) do if key~="Damage" then onlyDamage=false end end
+        if tag.Damage==0 and onlyDamage then return "552887824c43124013fd24f6edcde0fb" end
+        if tag.Damage==42 and onlyDamage then return "02c06ecf0eda564a1aa1f1a1f23e36be" end
+        return opaque(encoded(tag,{compact=true}))
+    end
+    function w.fingerprint(item)
+        local metadata=w.stackPrivate[item] or item
+        return metadata.fingerprint or opaque(metadata.name.."|"..encoded(metadata.nbt or {},{compact=true}).."|"..tostring(metadata.displayName or metadata.name))
+    end
+    function w.apMetadata(item)
+        return S.copy(w.stackPrivate[item] or (item.fingerprint and w.apCatalog[item.fingerprint]) or item)
+    end
+    local function physical(item)
+        local metadata=w.apMetadata(item)
+        metadata.fingerprint=w.fingerprint(metadata);metadata.amount=nil;metadata.count=nil
+        local entry=S.copy(item)
+        if w.asymmetricNBT then
+            entry.nbt=w.ccNBT(metadata.nbt)
+            if type(metadata.nbt)=="table" and type(metadata.nbt.Damage)=="number" then entry.damage=metadata.nbt.Damage end
+        end
+        entry.amount=nil;entry.fingerprint=nil
+        return entry,metadata
+    end
     function w.count(inventory,item)
         local n=0;for _,current in pairs(inventory.slots) do if w.identity(current)==w.identity(item) then n=n+current.count end end;return n
     end
     function w.insert(inventory,item,count)
-        local left=count;local max=item.maxCount or 64
+        local source,metadata=physical(item)
+        local left=count;local max=source.maxCount or 64
         for _,current in pairs(inventory.slots) do
-            if w.identity(current)==w.identity(item) then local moved=math.min(left,max-current.count);current.count=current.count+moved;left=left-moved end
+            if w.identity(current)==w.identity(source) then local moved=math.min(left,max-current.count);current.count=current.count+moved;left=left-moved end
         end
         for slot=1,inventory.size do if left>0 and not inventory.slots[slot] then
-            local moved=math.min(left,max);local entry=S.copy(item);entry.count=moved;entry.amount=nil;entry.fingerprint=nil;inventory.slots[slot]=entry;left=left-moved
+            local moved=math.min(left,max);local entry=S.copy(source);entry.count=moved
+            w.stackPrivate[entry]=S.copy(metadata);inventory.slots[slot]=entry;left=left-moved
         end end
         return count-left
     end
@@ -167,20 +204,37 @@ function S.world()
         return count-left
     end
     function w.bridge(id,name,isPRS)
-        local rs={items={},recipes={},crafts={},exportLimit=math.huge,importLimit=math.huge,craftDelay=2,visibilityDelay=0}
+        local rs={items={},recipes={},crafts={},exportLimit=math.huge,importLimit=math.huge,craftDelay=2,visibilityDelay=0,connected=true}
         local function record(method,filter,chest)
             if isPRS then assert(w.id==w.masterId,"PRS touched by a colony computer") end
             w.calls[#w.calls+1]={computer=w.id,prs=isPRS,method=method,filter=S.copy(filter),chest=chest,time=w.now}
         end
         function rs.add(item,count)
-            local identity=w.identity(item)
-            local current=rs.items[identity] or S.copy(item);current.fingerprint=current.fingerprint or "fp:"..identity
+            local metadata=w.apMetadata(item);local identity=w.identity(metadata)
+            local current=rs.items[identity]
+            if not current then current=S.copy(metadata);current.amount=0 end
+            current.fingerprint=current.fingerprint or w.fingerprint(metadata)
             current.amount=(current.amount or 0)+count;current.count=nil;rs.items[identity]=current;return current
         end
         local function matches(item,filter)
-            if filter.fingerprint then return item.fingerprint==filter.fingerprint end
-            if filter.name~=item.name then return false end
-            if filter.nbt then return filter.nbt==(type(item.nbt)=="table" and json(item.nbt) or item.nbt) end
+            local metadata=w.stackPrivate[item] or item
+            if filter.fingerprint then
+                -- AP fingerprint matching calls getOrCreateTag on the actual
+                -- source stack. A partial import may otherwise retag its
+                -- untagged remainder, changing the CC inventory identity.
+                if w.asymmetricNBT and w.stackPrivate[item] and item.nbt==nil then
+                    metadata.nbt={};w.stackPrivate[item].nbt={};item.nbt=w.ccNBT({})
+                end
+                return w.fingerprint(metadata)==filter.fingerprint
+            end
+            if filter.name~=metadata.name then return false end
+            -- AP treats an invalid SNBT string, including a CC hash, as null
+            -- NBT and falls back to name-only matching. Fixtures must expose
+            -- that dangerous hardware behavior rather than silently reject it.
+            if filter.nbt then
+                if type(filter.nbt)=="string" and filter.nbt:match("^[0-9a-fA-F]+$") and #filter.nbt==32 then return true end
+                return filter.nbt==(type(metadata.nbt)=="table" and json(metadata.nbt) or metadata.nbt)
+            end
             return true
         end
         local function inventory(chest) local device=(w.devices[w.id] or {})[chest];assert(device and device.channel,"bridge inventory not connected");return device.channel end
@@ -188,7 +242,16 @@ function S.world()
             if rs.visibilityDelay>0 then chest.oldSlots=S.copy(chest.slots);chest.hiddenUntil=w.now+rs.visibilityDelay end
         end
         local api={}
-        function api.listItems() record("listItems");local out={};for _,item in pairs(rs.items) do if item.amount>0 then out[#out+1]=S.copy(item) end end;return out end
+        function api.isConnected() return rs.connected end
+        function api.listItems()
+            record("listItems");local out={}
+            for _,item in pairs(rs.items) do if item.amount>0 then
+                local metadata=S.copy(item)
+                if w.asymmetricNBT and metadata.nbt==nil then metadata.nbt={} end
+                w.apCatalog[item.fingerprint]=metadata;out[#out+1]=S.copy(item)
+            end end
+            return out
+        end
         function api.exportItemToPeripheral(filter,name)
             record("export",filter,name);if rs.zeroExport then return 0 end
             local chest=inventory(name);hide(chest)
@@ -205,11 +268,19 @@ function S.world()
         function api.importItemFromPeripheral(filter,name)
             record("import",filter,name);local chest=inventory(name);hide(chest)
             local left=math.min(filter.count,rs.importLimit);local moved=0
-            for slot,item in pairs(S.copy(chest.slots)) do if matches(item,filter) and left>0 then
-                local q=math.min(left,item.count);local n=rs.phantomImport and q or w.take(chest,item,q)
-                if not rs.phantomImport then rs.add(item,n) end
-                moved=moved+n;left=left-n
-            end end
+            if filter.fromSlot~=nil and (type(filter.fromSlot)~="number" or filter.fromSlot%1~=0) then return 0,"NO_VALID_FROMSLOT" end
+            if filter.fromSlot~=nil and filter.fromSlot~=-1 then assert(filter.fromSlot>=0 and filter.fromSlot<chest.size,"source slot out of range") end
+            for slot=1,chest.size do
+                local item=chest.slots[slot]
+                if item and (filter.fromSlot==nil or filter.fromSlot==-1 or filter.fromSlot==slot-1) and matches(item,filter) and left>0 then
+                    local q=math.min(left,item.count);local metadata=w.apMetadata(item)
+                    local n=q
+                    if not rs.phantomImport then
+                        item.count=item.count-n;if item.count==0 then chest.slots[slot]=nil end;rs.add(metadata,n)
+                    end
+                    moved=moved+n;left=left-n
+                end
+            end
             return moved
         end
         api.exportItem=api.exportItemToPeripheral;api.importItem=api.importItemFromPeripheral

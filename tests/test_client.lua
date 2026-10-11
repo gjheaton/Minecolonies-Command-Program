@@ -237,6 +237,7 @@ end)
 
 local function zeroFixture(nbt)
     local w,c=S.clientFixture();local rice={name="farmersdelight:rice",nbt=nbt}
+    if nbt ~= nil then rice.fingerprint=w.fingerprint(rice) end
     local deliveries={{id="shipment-27",requestId="rice-request",item=rice,count=1,verified=true,createdAt=99}}
     c.integrator.requests={S.request("rice-request",rice.name,1,nbt)}
     w.insert(w.channels.D2,rice,1)
@@ -452,5 +453,128 @@ Test.case("failed operator audit or hold-clear persistence restores the hold and
             Test.equal(w.count(w.channels.D2,f.rice),1)
         end
     end
+end)
+
+Test.case("a physical NBT shipment imports only its AP fingerprint and rejects changed or malformed selectors before another mutation",function()
+    local w,c=S.clientFixture();w.asymmetricNBT=true
+    local source={name="minecraft:shears",nbt={Damage=0},maxCount=1}
+    local physical={name=source.name,nbt=w.ccNBT(source.nbt),fingerprint=w.fingerprint(source)}
+    local delivery=shipment("D-TOOL",1,physical)
+    w.insert(w.channels.D2,source,1);c.integrator.requests={S.request("R1",source.name,1,source.nbt)}
+    w.grant(1,{delivery});Test.equal(w.packet("batch").message.imports[delivery.id],1)
+    Test.equal(c.rs.items[w.identity(source)].amount,1);Test.equal(#w.callsFor("import",false),1)
+    local imported=w.callsFor("import",false)[1]
+    Test.equal(imported.filter.fingerprint,w.fingerprint(source));assert(imported.filter.name==nil and imported.filter.nbt==nil)
+    w.result(1,{delivery},response("in progress"))
+    local changed=S.copy(delivery);changed.item.fingerprint=string.rep("b",32)
+    w.grant(2,{changed});assert(c.store.data.client.fault)
+    Test.equal(c.store.data.client.shipments[delivery.id].item.fingerprint,w.fingerprint(source))
+    Test.equal(#w.callsFor("import",false),1,"a changed immutable selector caused another import")
+    c.restart();w.tick(2);Test.equal(#w.callsFor("import",false),1)
+    for _,fingerprint in ipairs({false,"",string.rep("f",257)}) do
+        local badWorld,badClient=S.clientFixture();badWorld.asymmetricNBT=true
+        local bad=shipment("BAD",1,{name=source.name,nbt=w.ccNBT(source.nbt),fingerprint=fingerprint})
+        badWorld.insert(badWorld.channels.D2,source,1);badWorld.grant(1,{bad})
+        assert(badClient.store.data.client.fault);Test.equal(#badWorld.callsFor("import",false),0)
+    end
+    local legacyWorld,legacyClient=S.clientFixture();legacyWorld.asymmetricNBT=true
+    legacyWorld.insert(legacyWorld.channels.D2,source,1)
+    legacyWorld.grant(1,{shipment("OLD",1,{name=source.name,nbt=w.ccNBT(source.nbt)})})
+    assert(legacyClient.store.data.client.fault);Test.equal(#legacyWorld.callsFor("import",false),0)
+end)
+
+local function overflowIdentityFixture()
+    local w,c=S.clientFixture();w.asymmetricNBT=true
+    c.config.overflowEnabled=true;c.config.defaultItemKeep=0;c.config.buildingItemKeep=0
+    c.config.maxReturnItemsPerTurn=16;c.config.maxTransferChunk=16;c.integrator.requests={}
+    local damaged={name="minecraft:shears",nbt={Damage=42},maxCount=1}
+    local enchanted={name="minecraft:shears",nbt={Damage=0,Enchantments={{id="minecraft:mending",lvl=1}}},maxCount=1}
+    c.rs.add(damaged,2);c.rs.add(enchanted,1)
+    return w,c,damaged,enchanted
+end
+
+Test.case("overflow persists physical-to-AP selectors across restart and prunes only proven absent return identities",function()
+    local w,c,damaged,enchanted=overflowIdentityFixture();w.grant(1)
+    local batch=w.packet("batch").message;Test.equal(#batch.returnSelectors,2)
+    for _,source in ipairs({damaged,enchanted}) do
+        local physical={name=source.name,nbt=w.ccNBT(source.nbt)};local identity=c.matcher.itemIdentity(physical)
+        local binding=c.store.data.client.returnSelectors[identity]
+        Test.equal(binding.item.nbt,physical.nbt);Test.equal(binding.fingerprint,w.fingerprint(source))
+        Test.equal(w.count(w.channels.R2,physical),source==damaged and 2 or 1)
+        for _,entry in pairs(w.channels.R2.slots) do assert(entry.fingerprint==nil,"AP private selector leaked into a CC inventory snapshot") end
+    end
+    Test.equal(#w.callsFor("export",false),2);w.result(1);c.restart();w.grant(2)
+    Test.equal(#w.packet("batch").message.returnSelectors,2);Test.equal(#w.callsFor("export",false),2)
+    w.result(2);w.take(w.channels.R2,{name=damaged.name,nbt=w.ccNBT(damaged.nbt)},2);w.grant(3)
+    local retained=w.packet("batch").message.returnSelectors;Test.equal(#retained,1)
+    Test.equal(retained[1].fingerprint,w.fingerprint(enchanted));Test.equal(retained[1].item.nbt,w.ccNBT(enchanted.nbt))
+    Test.equal(#w.callsFor("export",false),2)
+end)
+
+Test.case("failed return-chest inspection retains every established overflow selector without replaying an export",function()
+    local w,c=overflowIdentityFixture();w.grant(1);w.result(1)
+    local bindings=textutils.serialize(c.store.data.client.returnSelectors)
+    local original=c.io.snapshot
+    c.io.snapshot=function(name) if name=="returns" then return nil,"detached return chest" end;return original(name) end
+    w.grant(2);assert(c.store.data.client.fault)
+    Test.equal(textutils.serialize(c.store.data.client.returnSelectors),bindings)
+    Test.equal(#w.callsFor("export",false),2)
+    c.io.snapshot=original;c.restart();w.tick(2)
+    Test.equal(textutils.serialize(c.store.data.client.returnSelectors),bindings);Test.equal(#w.callsFor("export",false),2)
+end)
+
+Test.case("an overflow accounting-save crash recovers a known physical identity binding without a second export",function()
+    local w,c,source=overflowIdentityFixture()
+    c.rs.items[w.identity(source)].amount=1
+    for key,item in pairs(c.rs.items) do if key~=w.identity(source) then item.amount=0 end end
+    local original=c.store.save
+    c.store.save=function()
+        if c.store.data.client.intent==nil and next(c.store.data.client.returnSelectors)~=nil then w.writeFail=true end
+        return original()
+    end
+    local ok,err=pcall(w.grant,1);assert(not ok and tostring(err):find("Persistence failure",1,true))
+    Test.equal(#w.callsFor("export",false),1)
+    assert(c.store.data.client.intent and c.store.data.client.intent.reported==1)
+    Test.equal(next(c.store.data.client.returnSelectors),nil)
+    w.writeFail=false;c.restart();w.result(1,{},{});assert(w.at(2,c.engine.reconcile))
+    local physical={name=source.name,nbt=w.ccNBT(source.nbt)}
+    local selector=c.store.data.client.returnSelectors[c.matcher.itemIdentity(physical)]
+    assert(selector);Test.equal(selector.fingerprint,w.fingerprint(source));assert(c.store.data.client.intent==nil)
+    Test.equal(w.count(w.channels.R2,physical),1);Test.equal(#w.callsFor("export",false),1)
+    c.restart();w.grant(2);Test.equal(#w.packet("batch").message.returnSelectors,1)
+    Test.equal(#w.callsFor("export",false),1)
+end)
+
+Test.case("unknown and phantom overflow exports never establish an AP selector and remain blocked after restart",function()
+    for _,kind in ipairs({"unknown","phantom"}) do
+        local w,c,source=overflowIdentityFixture()
+        c.rs.items[w.identity(source)].amount=1
+        for key,item in pairs(c.rs.items) do if key~=w.identity(source) then item.amount=0 end end
+        if kind=="unknown" then c.rs.unknownExport=true else c.rs.phantomExport=true end
+        w.grant(1);assert(c.store.data.client.intent and c.store.data.client.fault)
+        Test.equal(next(c.store.data.client.returnSelectors),nil);Test.equal(#w.callsFor("export",false),1)
+        w.result(1,{},{});c.restart();w.tick(2)
+        local cleared=w.at(2,c.engine.reconcile);assert(not cleared)
+        assert(c.store.data.client.intent);Test.equal(next(c.store.data.client.returnSelectors),nil)
+        Test.equal(#w.callsFor("export",false),1)
+    end
+end)
+
+Test.case("a plain partial shipment with a retained AP fingerprint keeps the untagged remainder in its exact source slot",function()
+    local w,c=S.clientFixture();w.asymmetricNBT=true;c.config.maxTransferChunk=2
+    local source={name="farmersdelight:rice"}
+    local delivery=shipment("D-PLAIN",4,{name=source.name,fingerprint=w.fingerprint(source)})
+    w.insert(w.channels.D2,source,4);c.integrator.requests={S.request("R1",source.name,4)}
+    w.grant(1,{delivery})
+    Test.equal(w.packet("batch").message.imports[delivery.id],2)
+    Test.equal(w.count(w.channels.D2,source),2)
+    assert(c.store.data.client.intent==nil and c.store.data.client.fault==nil)
+    local imported=w.callsFor("import",false)[1]
+    Test.equal(imported.filter.name,source.name);Test.equal(imported.filter.fromSlot,0)
+    assert(imported.filter.fingerprint==nil and imported.filter.nbt==nil)
+    w.result(1,{delivery},response("in progress"));w.grant(2,{delivery})
+    Test.equal(w.packet("batch").message.imports[delivery.id],4)
+    Test.equal(c.rs.items[w.identity(source)].amount,4);Test.equal(#w.callsFor("import",false),2)
+    Test.equal(w.count(w.channels.D2,source),0);assert(c.store.data.client.fault==nil)
 end)
 return true

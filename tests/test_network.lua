@@ -1,6 +1,6 @@
 local S=require("tests.support")
-local function fixture(count)
-    local w=S.world();local master=S.computer(w,1,"master")
+local function fixture(count,options)
+    local w=S.world(options);local master=S.computer(w,1,"master")
     master.rs=w.bridge(1,"prs",true);master.config.colonies={}
     for id=2,(count or 2)+1 do
         local c=S.computer(w,id,"supply")
@@ -472,5 +472,204 @@ Test.case("operator zero recovery retains the master's original rice shipment an
         return state.requests["000-rice"].status=="delivered" and #state.shipments==0
     end,"completed MC requests did not release the old shipments")
     Test.equal(#w.callsFor("export",true),6);Test.equal(#w.callsFor("import",false),6)
+end)
+
+Test.case("two colonies receive the exact AP-selected pristine and damaged tools despite different physical CC NBT hashes",function()
+    local w,m=fixture(2,{asymmetricNBT=true})
+    local pristine={name="minecraft:shears",nbt={Damage=0},maxCount=1}
+    local damaged={name="minecraft:shears",nbt={Damage=42},maxCount=1}
+    local enchanted={name="minecraft:shears",nbt={Damage=0,Enchantments={{id="minecraft:unbreaking",lvl=2}}},maxCount=1}
+    local c2,c3=w.computers[2],w.computers[3]
+    c2.integrator.requests={S.request("R2",pristine.name,1,pristine.nbt)}
+    c3.integrator.requests={S.request("R3",damaged.name,1,damaged.nbt)}
+    m.rs.add(pristine,4);m.rs.add(damaged,4);m.rs.add(enchanted,2)
+    w.insert(w.channels.D2,enchanted,1)
+    w.untilTrue(function()
+        local a,b=c2.rs.items[w.identity(pristine)],c3.rs.items[w.identity(damaged)]
+        return a and b and a.amount==1 and b.amount==1
+    end,"AP table NBT did not bind to the actual CC identities")
+    for id,source in pairs({[2]=pristine,[3]=damaged}) do
+        local cs=m.store.data.master.colonies[tostring(id)];local delivery=cs.shipments[1]
+        Test.equal(delivery.item.name,source.name);Test.equal(delivery.item.nbt,w.ccNBT(source.nbt))
+        Test.equal(delivery.item.fingerprint,w.fingerprint(source));Test.equal(delivery.count,1)
+        Test.equal(cs.requests["R"..id].status,"in progress")
+        Test.equal(w.computers[id].store.data.client.requests["R"..id].status,"in progress")
+    end
+    Test.equal(w.count(w.channels.D2,{name=enchanted.name,nbt=w.ccNBT(enchanted.nbt)}),1)
+    Test.equal(m.rs.items[w.identity(enchanted)].amount,2)
+    Test.equal(#w.callsFor("export",true),2);Test.equal(#w.callsFor("import",false),2)
+    for _,call in ipairs(w.callsFor("import",false)) do
+        assert(call.filter.fingerprint and call.filter.name==nil and call.filter.nbt==nil)
+    end
+    for _=1,24 do w.step() end
+    Test.equal(#w.callsFor("export",true),2,"live equipment requests received duplicate tools")
+    c2.integrator.requests={}
+    w.untilTrue(function() return m.store.data.master.colonies["2"].requests.R2.status=="delivered" end)
+    Test.equal(m.store.data.master.colonies["3"].requests.R3.status,"in progress")
+end)
+
+Test.case("restart between an asymmetric tool export and verification retains the full physical baseline and imports once",function()
+    local w,m=fixture(1,{asymmetricNBT=true});local c=w.computers[2]
+    local source={name="minecraft:shears",nbt={Damage=0},maxCount=1}
+    local untouched={name="minecraft:shears",nbt={Damage=42},maxCount=1}
+    local glass={name="minecraft:glass",nbt={}}
+    local physicalGlass={name=glass.name,nbt=w.ccNBT(glass.nbt)}
+    c.integrator.requests={S.request("R2",source.name,1,source.nbt)};m.rs.add(source,2)
+    w.insert(w.channels.D2,untouched,1);w.insert(w.channels.D2,glass,5)
+    m.rs.visibilityDelay=.5
+    w.untilTrue(function() return m.store.data.master.pendingTransfer~=nil end)
+    local held=m.store.data.master.pendingTransfer
+    Test.equal(held.reported,1);assert(held.physicalBefore and held.physicalBefore.version==1)
+    local baseline=held.physicalBefore.totals
+    Test.equal(baseline[m.matcher.itemIdentity({name=untouched.name,nbt=w.ccNBT(untouched.nbt)})].count,1)
+    Test.equal(baseline[m.matcher.itemIdentity(physicalGlass)].count,5)
+    Test.equal(#w.callsFor("export",true),1)
+    m.restart();w.untilTrue(function()
+        local entry=c.rs.items[w.identity(source)];return entry and entry.amount==1
+    end,"restart could not verify the retained table-to-hash export")
+    Test.equal(#w.callsFor("export",true),1);Test.equal(#w.callsFor("import",false),1)
+    Test.equal(w.count(w.channels.D2,{name=untouched.name,nbt=w.ccNBT(untouched.nbt)}),1)
+    Test.equal(w.count(w.channels.D2,physicalGlass),5)
+    local delivery=m.store.data.master.colonies["2"].shipments[1]
+    Test.equal(delivery.item.nbt,w.ccNBT(source.nbt));Test.equal(delivery.item.fingerprint,w.fingerprint(source))
+    c.restart();for _=1,24 do w.step() end
+    Test.equal(#w.callsFor("export",true),1);Test.equal(#w.callsFor("import",false),1)
+end)
+
+Test.case("partial asymmetric tool exports bind each verified quantity without completing a live MineColonies request",function()
+    local w,m=fixture(1,{asymmetricNBT=true});local c=w.computers[2]
+    local source={name="minecraft:shears",nbt={Damage=42},maxCount=1}
+    c.integrator.requests={S.request("R2",source.name,3,source.nbt)};m.rs.add(source,5);m.rs.exportLimit=1
+    w.untilTrue(function() local entry=c.rs.items[w.identity(source)];return entry and entry.amount==3 end)
+    local total=0;for _,shipment in ipairs(m.store.data.master.colonies["2"].shipments) do
+        total=total+shipment.count;Test.equal(shipment.item.nbt,w.ccNBT(source.nbt))
+        Test.equal(shipment.item.fingerprint,w.fingerprint(source));Test.equal(shipment.count,1)
+    end
+    Test.equal(total,3);Test.equal(#w.callsFor("export",true),3);Test.equal(#w.callsFor("import",false),3)
+    for _=1,20 do w.step() end
+    Test.equal(#w.callsFor("export",true),3);Test.equal(c.store.data.client.requests.R2.status,"in progress")
+    Test.equal(m.rs.items[w.identity(source)].amount,2)
+end)
+
+Test.case("an unknown export result cannot bind a new CC tool identity and remains held across restart",function()
+    local w,m=fixture(1,{asymmetricNBT=true});local c=w.computers[2]
+    local source={name="minecraft:shears",nbt={Damage=0},maxCount=1}
+    c.integrator.requests={S.request("R2",source.name,1,source.nbt)};m.rs.add(source,2);m.rs.unknownExport=true
+    w.untilTrue(function() return m.store.data.master.quarantine~=nil end)
+    local held=m.store.data.master.pendingTransfer;assert(held and held.reported==nil and held.physicalBefore)
+    Test.equal(#m.store.data.master.colonies["2"].shipments,0)
+    Test.equal(w.count(w.channels.D2,{name=source.name,nbt=w.ccNBT(source.nbt)}),1)
+    Test.equal(#w.callsFor("export",true),1);Test.equal(#w.callsFor("import",false),0)
+    m.restart();c.restart();for _=1,24 do w.step() end
+    assert(m.store.data.master.pendingTransfer and m.store.data.master.quarantine)
+    Test.equal(#w.callsFor("export",true),1);Test.equal(#w.callsFor("import",false),0)
+end)
+
+Test.case("a positive tool export with any unrelated chest change refuses a physical identity binding and never retries",function()
+    local w,m=fixture(1,{asymmetricNBT=true});local c=w.computers[2]
+    local source={name="minecraft:shears",nbt={Damage=0},maxCount=1}
+    c.integrator.requests={S.request("R2",source.name,1,source.nbt)};m.rs.add(source,2)
+    local api=w.devices[1].prs.api;local original=api.exportItemToPeripheral
+    api.exportItemToPeripheral=function(filter,name)
+        local moved=original(filter,name);w.insert(w.channels.D2,{name="minecraft:glass"},1);return moved
+    end
+    w.untilTrue(function() return m.store.data.master.quarantine~=nil end)
+    Test.equal(#m.store.data.master.colonies["2"].shipments,0)
+    Test.equal(#w.callsFor("export",true),1);Test.equal(#w.callsFor("import",false),0)
+    m.restart();for _=1,20 do w.step() end
+    Test.equal(#w.callsFor("export",true),1);assert(m.store.data.master.pendingTransfer)
+end)
+
+Test.case("asymmetric damaged and enchanted overflow returns import by their original AP fingerprints on the master only",function()
+    local w,m=fixture(1,{asymmetricNBT=true});local c=w.computers[2]
+    c.integrator.requests={};c.config.overflowEnabled=true;c.config.defaultItemKeep=0;c.config.buildingItemKeep=0
+    local damaged={name="minecraft:shears",nbt={Damage=42},maxCount=1}
+    local enchanted={name="minecraft:shears",nbt={Damage=0,Enchantments={{id="minecraft:unbreaking",lvl=3}}},maxCount=1}
+    c.rs.add(damaged,2);c.rs.add(enchanted,1)
+    w.untilTrue(function()
+        local a,b=m.rs.items[w.identity(damaged)],m.rs.items[w.identity(enchanted)]
+        return a and b and a.amount==2 and b.amount==1
+    end,"master did not import exact AP selectors from the physical overflow hashes")
+    Test.equal(c.rs.items[w.identity(damaged)].amount,0);Test.equal(c.rs.items[w.identity(enchanted)].amount,0)
+    Test.equal(#w.callsFor("export",false),2);Test.equal(#w.callsFor("import",true),3)
+    Test.equal(#w.callsFor("export",true),0);Test.equal(#w.callsFor("import",false),0)
+    local found=false
+    for _,packet in ipairs(w.sent) do if packet.message.kind=="batch" and #(packet.message.returnSelectors or {})==2 then
+        found=true
+        for _,selector in ipairs(packet.message.returnSelectors) do
+            assert(type(selector.item.nbt)=="string" and #selector.item.nbt==32)
+            local source=selector.item.nbt==w.ccNBT(damaged.nbt) and damaged or enchanted
+            Test.equal(selector.fingerprint,w.fingerprint(source))
+        end
+    end end
+    assert(found,"client omitted retained selector rows from its batch")
+    for _,call in ipairs(w.callsFor("import",true)) do
+        Test.equal(call.computer,1);assert(call.filter.fingerprint and call.filter.nbt==nil and call.filter.name==nil)
+    end
+    w.untilTrue(function() return next(c.store.data.client.returnSelectors)==nil end)
+    c.restart();m.restart();for _=1,24 do w.step() end
+    Test.equal(#w.callsFor("export",false),2);Test.equal(#w.callsFor("import",true),3)
+end)
+
+Test.case("malformed or duplicate return selectors never start a PRS import or accept the current batch",function()
+    local mutations={
+        function(row) row.fingerprint="";return {row} end,
+        function(row) row.item.nbt={Damage=42};return {row} end,
+        function(row) return {row,S.copy(row)} end,
+        function(row) return {[2]=row} end,
+        function(row) row.item.name=false;return {row} end,
+        function(row) row.fingerprint=string.rep("f",257);return {row} end,
+    }
+    for index,mutate in ipairs(mutations) do
+        local w,m=fixture(1,{asymmetricNBT=true});local c=w.computers[2];c.integrator.requests={}
+        local source={name="minecraft:shears",nbt={Damage=42},maxCount=1};w.insert(w.channels.R2,source,1)
+        local selector={item={name=source.name,nbt=w.ccNBT(source.nbt)},fingerprint=w.fingerprint(source)}
+        local send=c.io.send
+        c.io.send=function(id,message)
+            if message.kind=="batch" then message=S.copy(message);message.returnSelectors=mutate(S.copy(selector)) end
+            return send(id,message)
+        end
+        w.untilTrue(function()
+            for _,entry in ipairs(m.store.data.errors) do if entry.code=="BAD_BATCH" then return true end end
+            return false
+        end,"malformed return selector was accepted: "..index)
+        local cs=m.store.data.master.colonies["2"];assert(cs.turn and cs.turn.phase=="WAIT_BATCH")
+        Test.equal(#w.callsFor("import",true),0);Test.equal(#w.callsFor("export",true),0)
+        Test.equal(w.count(w.channels.R2,selector.item),1)
+        assert(m.store.data.master.pendingTransfer==nil)
+    end
+end)
+
+Test.case("omitting a present overflow selector retains its binding and a later conflicting fingerprint is rejected",function()
+    local w,m=fixture(1,{asymmetricNBT=true});local c=w.computers[2]
+    c.integrator.requests={}
+    m.config.maxReturnItemsPerTurn=1
+    local source={name="minecraft:shears",nbt={Damage=42},maxCount=1}
+    local physical={name=source.name,nbt=w.ccNBT(source.nbt)}
+    w.insert(w.channels.R2,source,2)
+    c.store.data.client.returnSelectors[c.matcher.itemIdentity(physical)]={item=physical,fingerprint=w.fingerprint(source)}
+    c.store.save()
+    w.untilTrue(function() return #w.callsFor("import",true)==1 end)
+    Test.equal(w.count(w.channels.R2,physical),1)
+    local send=c.io.send;local seen=0
+    c.io.send=function(id,message)
+        if message.kind=="batch" then
+            message=S.copy(message);seen=seen+1
+            if seen==1 then
+                message.returnSelectors={};message.clientError="read-only held colony error"
+            else
+                for _,selector in ipairs(message.returnSelectors or {}) do selector.fingerprint=string.rep("e",32) end
+            end
+        end
+        return send(id,message)
+    end
+    w.untilTrue(function()
+        for _,entry in ipairs(m.store.data.errors) do if entry.code=="BAD_BATCH" then return true end end
+        return false
+    end,"master accepted a changed selector over a remaining physical stack")
+    Test.equal(#w.callsFor("import",true),1);Test.equal(w.count(w.channels.R2,physical),1)
+    assert(seen>=2,"the omitted selector did not pass through a retained error handshake")
+    local identity=m.matcher.itemIdentity(physical)
+    Test.equal(m.store.data.master.colonies["2"].returnSelectors[identity].fingerprint,w.fingerprint(source))
 end)
 return true

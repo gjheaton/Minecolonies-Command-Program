@@ -1,7 +1,7 @@
 local S=require("tests.support")
 local Diagnostics=require("colony.network.diagnostics")
-local function fixture()
-    local w=S.world();local m=S.computer(w,1,"master");local c=S.computer(w,2,"supply")
+local function fixture(options)
+    local w=S.world(options);local m=S.computer(w,1,"master");local c=S.computer(w,2,"supply")
     m.rs=w.bridge(1,"prs",true);m.rs.add({name="minecraft:cobblestone"},2)
     w.chest(1,"out","delivery");w.chest(1,"back","returns")
     w.chest(2,"delivery","delivery");w.chest(2,"returns","returns")
@@ -26,6 +26,57 @@ Test.case("Ender Chest diagnostic proves both color channels and restores PRS te
     Test.equal(#w.callsFor("export",true),1);Test.equal(#w.callsFor("import",true),1)
     Test.equal(#w.callsFor(nil,false),0,"chest diagnostic unexpectedly touched colony RS")
     assert(m.store.data.chestTest==nil and c.store.data.chestTest==nil)
+end)
+
+Test.case("Ender Chest diagnostic binds a known exact export to the physical CC hash and restores the original AP item",function()
+    local w,m,c=fixture({asymmetricNBT=true});w.probe()
+    local stock=w.at(1,m.io.stock)
+    Test.equal(m.io.count(stock,{name="minecraft:cobblestone"}),2)
+    Test.equal(next(w.channels.delivery.slots),nil);Test.equal(next(w.channels.returns.slots),nil)
+    local exports,imports=w.callsFor("export",true),w.callsFor("import",true)
+    Test.equal(#exports,1);Test.equal(#imports,1)
+    Test.equal(exports[1].filter.fingerprint,imports[1].filter.fingerprint)
+    Test.equal(imports[1].filter.nbt,nil,"a CC hash reached the AP NBT parser")
+    assert(m.store.data.chestTest==nil and c.store.data.chestTest==nil)
+end)
+
+Test.case("Ender Chest diagnostic restart binds a persisted positive export without sending another item",function()
+    local w,m,c=fixture({asymmetricNBT=true});local save=m.store.save;local interrupted=false
+    m.store.save=function()
+        local result=save();local record=m.store.data.chestTest
+        if not interrupted and record and record.phase=="export_intent" and record.reportedExport==1 then
+            interrupted=true;error("simulated interruption after the positive result was saved",0)
+        end
+        return result
+    end
+    local ok,err=pcall(w.probe);assert(not ok and tostring(err):find("simulated interruption"))
+    Test.equal(#w.callsFor("export",true),1)
+    assert(m.store.data.chestTest.physicalBefore and m.store.data.chestTest.stockItem)
+    m.restart();w.probe()
+    Test.equal(#w.callsFor("export",true),1);Test.equal(#w.callsFor("import",true),1)
+    local stock=w.at(1,m.io.stock);Test.equal(m.io.count(stock,{name="minecraft:cobblestone"}),2)
+    assert(m.store.data.chestTest==nil and c.store.data.chestTest==nil)
+end)
+
+Test.case("Ender Chest diagnostic never binds an unknown export to a different physical hash or replays it",function()
+    local w,m,c=fixture({asymmetricNBT=true});m.rs.unknownExport=true
+    local ok=pcall(w.probe);assert(not ok)
+    Test.equal(m.store.data.chestTest.phase,"export_intent")
+    Test.equal(#w.callsFor("export",true),1);Test.equal(#w.callsFor("import",true),0)
+    Test.equal(w.count(w.channels.delivery,{name="minecraft:cobblestone",nbt=w.ccNBT({})}),1)
+    m.restart();assert(not pcall(w.probe))
+    Test.equal(#w.callsFor("export",true),1);Test.equal(#w.callsFor("import",true),0)
+    assert(m.store.data.chestTest and c.store.data.chestTest)
+end)
+
+Test.case("Ender Chest diagnostic refuses collateral inventory changes even with a positive export",function()
+    local w,m,c=fixture({asymmetricNBT=true});local export=w.devices[1].prs.api.exportItemToPeripheral
+    w.devices[1].prs.api.exportItemToPeripheral=function(...)
+        local result=export(...);w.insert(w.channels.delivery,{name="minecraft:dirt"},1);return result
+    end
+    assert(not pcall(w.probe));Test.equal(m.store.data.chestTest.phase,"export_intent")
+    Test.equal(#w.callsFor("export",true),1);Test.equal(#w.callsFor("import",true),0)
+    assert(c.store.data.chestTest)
 end)
 
 Test.case("Ender Chest diagnostic rejects color labels mismatching route before export",function()

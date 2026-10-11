@@ -5,6 +5,11 @@ local function amount(value)
     return math.max(0, math.floor(tonumber(value) or 0))
 end
 
+local MAX_RETURN_SELECTORS = 1024
+local function validFingerprint(value)
+    return type(value) == "string" and value ~= "" and #value <= 256
+end
+
 local function copy(value, seen)
     if type(value) ~= "table" then return value end
     seen = seen or {}
@@ -212,6 +217,7 @@ function M.new(config, store, io, matcher)
     local data = store.data.client
     data.requests = type(data.requests) == "table" and data.requests or {}
     data.shipments = type(data.shipments) == "table" and data.shipments or {}
+    data.returnSelectors = type(data.returnSelectors) == "table" and data.returnSelectors or {}
     data.retiredSessions = type(data.retiredSessions) == "table" and data.retiredSessions or {}
     data.seenTurns = type(data.seenTurns) == "table" and data.seenTurns or {}
     data.cursor = amount(data.cursor)
@@ -275,13 +281,16 @@ function M.new(config, store, io, matcher)
             if type(shipment) ~= "table" or shipment.id == nil
                 or shipment.requestId == nil or shipment.verified ~= true
                 or type(shipment.item) ~= "table" or type(shipment.item.name) ~= "string"
-                or shipment.item.name == "" or amount(shipment.count) == 0 then
+                or shipment.item.name == "" or amount(shipment.count) == 0
+                or (shipment.item.fingerprint ~= nil and not validFingerprint(shipment.item.fingerprint))
+                or (shipment.item.fingerprint == nil and matcher.canonicalNBT(shipment.item.nbt) ~= "") then
                 fault("BAD_DELIVERY", "Master supplied an unverified or incomplete delivery record")
                 return false
             end
             local id = tostring(shipment.id)
             local current = data.shipments[id]
             if current and (not sameItem(current.item, shipment.item)
+                or current.item.fingerprint ~= shipment.item.fingerprint
                 or current.count ~= amount(shipment.count)
                 or current.requestId ~= tostring(shipment.requestId)) then
                 fault("DELIVERY_CHANGED", "A verified shipment identity or quantity changed", { id = id })
@@ -400,14 +409,105 @@ function M.new(config, store, io, matcher)
         return items
     end
 
+    local function selectorItem(item)
+        if type(item) ~= "table" or type(item.name) ~= "string" or item.name == "" or #item.name > 256 then
+            return nil, "Return item name is invalid or exceeds the selector limit"
+        end
+        local nbt = item.nbt
+        if matcher.canonicalNBT(nbt) == "" then nbt = nil
+        elseif type(nbt) ~= "string" or #nbt > 256 then
+            return nil, "Return items require the exact bounded physical CC NBT identity"
+        end
+        return { name = item.name, nbt = nbt }
+    end
+
+    local function returnSelectorRows()
+        local rows = {}
+        for key, row in pairs(data.returnSelectors) do
+            local item, err = selectorItem(type(row) == "table" and row.item)
+            if not item or type(key) ~= "string" or key ~= matcher.itemIdentity(item)
+                or not validFingerprint(row.fingerprint) then
+                return nil, err or "A retained return selector is invalid"
+            end
+            rows[#rows + 1] = { item = item, fingerprint = row.fingerprint }
+            if #rows > MAX_RETURN_SELECTORS then return nil, "Retained return selectors exceed the protocol limit" end
+        end
+        table.sort(rows, function(a, b) return matcher.itemIdentity(a.item) < matcher.itemIdentity(b.item) end)
+        return rows
+    end
+
+    local function pruneReturnSelectors()
+        if next(data.returnSelectors) == nil then return true end
+        local rows, rowError = returnSelectorRows()
+        if not rows then fault("RETURN_SELECTOR", rowError); return false end
+        local items, err = chestSnapshot(config.returnChestName)
+        if not items then fault("RETURN_CHEST", "Cannot inspect retained return selectors", { error = err }); return false end
+        local kept, changed = {}, false
+        for _, row in ipairs(rows) do
+            local present = io.count(items, row.item)
+            if type(present) ~= "number" or present ~= amount(present) or present == math.huge then
+                fault("RETURN_CHEST", "Return inventory did not provide a reliable physical quantity")
+                return false
+            end
+            if present > 0 then kept[matcher.itemIdentity(row.item)] = row else changed = true end
+        end
+        if changed then
+            local previous = data.returnSelectors
+            data.returnSelectors = kept
+            if not save() then data.returnSelectors = previous; return false end
+        end
+        return true
+    end
+
+    local function bindReturnSelector(physical, source)
+        local item, itemError = selectorItem(physical)
+        if not item then return nil, itemError end
+        if not validFingerprint(source.fingerprint) then return nil, "The source AP fingerprint is missing or invalid" end
+        local key = matcher.itemIdentity(item)
+        local previous = data.returnSelectors[key]
+        if previous and previous.fingerprint ~= source.fingerprint then
+            return nil, "A retained physical return identity already has a different AP fingerprint"
+        end
+        local rows, rowError = returnSelectorRows()
+        if not rows then return nil, rowError end
+        if not previous and #rows >= MAX_RETURN_SELECTORS then return nil, "Return selector limit reached; retain the held export" end
+        data.returnSelectors[key] = { item = item, fingerprint = source.fingerprint }
+        return key, previous
+    end
+
+    local function returnEvidence(intent, after, reported)
+        if reported == 0 then
+            local physicalAfter, err = io.exportBaseline(after)
+            if not physicalAfter then return nil, nil, err end
+            if matcher.canonicalNBT(intent.physicalBefore) == matcher.canonicalNBT(physicalAfter) then return 0 end
+            return nil, nil, "A zero return export changed the physical chest inventory"
+        end
+        if type(reported) ~= "number" or reported <= 0 then return nil, nil, "The return export has no reliable positive result" end
+        local physical, delta = io.exportEvidence(intent.physicalBefore, after, intent.item, reported)
+        if not physical then return nil, nil, delta end
+        if type(delta) ~= "number" or delta ~= reported then return nil, nil, "Physical return evidence differs from the bridge result" end
+        return delta, physical
+    end
+
     local function transfer(kind, shipment, item, count, chest)
         local before, err = chestSnapshot(chest)
         if not before then return nil, err end
+        local physicalBefore
+        if kind == "return" then
+            if not validFingerprint(item.fingerprint) then return nil, "Overflow export requires the source AP fingerprint" end
+            if type(item.name) ~= "string" or item.name == "" or #item.name > 256 then return nil, "Overflow item name exceeds the selector limit" end
+            local rows, rowError = returnSelectorRows()
+            if not rows then return nil, rowError end
+            if #rows >= MAX_RETURN_SELECTORS then return nil, "Return selector limit reached; wait for the master to drain the chest" end
+            physicalBefore, err = io.exportBaseline(before)
+            if not physicalBefore then return nil, err end
+        end
         local baseline = amount(io.count(before, item))
         local intent = {
             kind = kind, shipmentId = shipment and shipment.id,
             item = copy(item), count = count, chest = chest,
             beforeChest = baseline, startedAt = io.now(),
+            physicalBefore = physicalBefore,
             beforeImported = shipment and amount(shipment.imported),
             session = data.turn.session, turn = data.turn.turn,
         }
@@ -426,36 +526,55 @@ function M.new(config, store, io, matcher)
         local interval = math.max(0.05, tonumber(setting("transferPollSeconds", 0.25)) or 0.25)
         local deadline = io.now() + timeout
         local remainingReads = math.ceil(timeout / interval)
+        local delta, physicalItem, evidenceError
+        local function observe()
+            delta, physicalItem, evidenceError = nil, nil, nil
+            if not after then return end
+            if kind == "return" then
+                delta, physicalItem, evidenceError = returnEvidence(intent, after, reported)
+            else
+                delta = baseline - amount(io.count(after, item))
+            end
+        end
+        observe()
         -- Inventory events can trail the bridge's synchronous return. Only
         -- read during this wait; never repeat the source mutation.
         while type(io.wait) == "function" and remainingReads > 0 and io.now() < deadline
             and type(reported) == "number" and reported == amount(reported) and reported <= count do
-            local observed = after and amount(io.count(after, item))
-            local delta = observed and (kind == "import" and baseline - observed or observed - baseline)
             if delta == reported or (delta and (delta < 0 or delta > reported)) then break end
             io.wait(math.min(interval, math.max(0, deadline - io.now())))
             remainingReads = remainingReads - 1
             after, snapshotError = chestSnapshot(chest)
+            observe()
         end
         if not after then
             fault("TRANSFER_UNCERTAIN", "Unable to verify chest after colony transfer", { intent = intent, error = snapshotError })
             return nil, snapshotError
         end
-        local physical = amount(io.count(after, item))
-        local delta = kind == "import" and baseline - physical or physical - baseline
         if type(reported) ~= "number" or reported ~= amount(reported)
-            or reported > count or delta < 0 or delta ~= reported then
+            or reported > count or not delta or delta < 0 or delta ~= reported then
             fault("TRANSFER_DESYNC", "Colony bridge result does not match the chest inventory change", {
-                intent = intent, reported = reported, actualDelta = delta, error = callError,
+                intent = intent, reported = reported, actualDelta = delta, error = evidenceError or callError,
             })
             return nil, "unverified transfer"
         end
+        local selectorKey, previousSelector
+        if kind == "return" and delta > 0 then
+            selectorKey, previousSelector = bindReturnSelector(physicalItem, item)
+            if not selectorKey then
+                fault("TRANSFER_DESYNC", previousSelector, { intent = intent })
+                return nil, previousSelector
+            end
+        end
         if shipment then shipment.imported = amount(shipment.imported) + delta end
         data.intent = nil
-        if not save() then
+        local persisted, saved = pcall(save)
+        if not persisted or not saved then
             -- Retain the marker in memory as well; a retry cannot mutate the
             -- chest merely because the final accounting write failed.
             data.intent = intent
+            if selectorKey then data.returnSelectors[selectorKey] = previousSelector end
+            if not persisted then persistenceError = "Cannot persist supply state: " .. tostring(saved) end
             return nil, persistenceError
         end
         if delta > 0 then
@@ -559,26 +678,35 @@ function M.new(config, store, io, matcher)
         end
     end
 
+    local function selectorsForBatch()
+        local rows, err = returnSelectorRows()
+        if not rows and not clientError() then fault("RETURN_SELECTOR", err) end
+        return rows or {}
+    end
+
     local function batchForTurn()
+        if not clientError() and not data.intent then pruneReturnSelectors() end
         drainDeliveries()
         local active, err = readRequests()
         if not active then
             -- No activeIds is intentional: an unsuccessful scan must never
             -- tell the master that all requests disappeared.
+            local selectors = selectorsForBatch()
             return {
                 kind = "batch", session = data.turn.session, turn = data.turn.turn,
                 requests = {}, imports = imports(), clientError = clientError() or tostring(err),
-                authoritative = false,
+                authoritative = false, returnSelectors = selectors,
             }
         end
         stageOverflow(active)
         local name = io.colonyName()
         data.colonyName = type(name) == "string" and name or data.colonyName
+        local selectors = selectorsForBatch()
         return {
             kind = "batch", session = data.turn.session, turn = data.turn.turn,
             requests = selectedRequests(active), activeIds = activeIds(active),
             imports = imports(), colonyName = data.colonyName,
-            authoritative = true, clientError = clientError(),
+            authoritative = true, returnSelectors = selectors, clientError = clientError(),
         }
     end
 
@@ -733,7 +861,7 @@ function M.new(config, store, io, matcher)
         data.turn.batch = {
             kind = "batch", session = data.turn.session, turn = data.turn.turn,
             requests = {}, imports = imports(), authoritative = false,
-            clientError = clientError(),
+            clientError = clientError(), returnSelectors = selectorsForBatch(),
         }
         data.turn.phase = "waiting"
         save()
@@ -799,7 +927,7 @@ function M.new(config, store, io, matcher)
             return false, "Wait for the master result to close the reserved turn before repairing"
         end
         local intent = data.intent
-        local shipment, oldImported
+        local shipment, oldImported, returnPhysical
         if intent then
             local reported = intent.reported
             if type(reported) ~= "number" or reported ~= amount(reported) or reported > amount(intent.count) then
@@ -807,10 +935,15 @@ function M.new(config, store, io, matcher)
             end
             local items, err = chestSnapshot(intent.chest)
             if not items then return false, "Cannot inspect interrupted transfer chest: " .. tostring(err) end
-            local current = amount(io.count(items, intent.item))
-            local delta = intent.kind == "import" and amount(intent.beforeChest) - current or current - amount(intent.beforeChest)
+            local delta, evidenceError
+            if intent.kind == "return" and intent.physicalBefore then
+                delta, returnPhysical, evidenceError = returnEvidence(intent, items, reported)
+            else
+                local current = amount(io.count(items, intent.item))
+                delta = intent.kind == "import" and amount(intent.beforeChest) - current or current - amount(intent.beforeChest)
+            end
             if delta ~= reported then
-                return false, "The bridge result still differs from the physical chest quantity; automatic repair is unsafe"
+                return false, evidenceError or "The bridge result still differs from the physical chest quantity; automatic repair is unsafe"
             end
             if intent.kind == "import" then
                 shipment = data.shipments[tostring(intent.shipmentId)]
@@ -847,12 +980,19 @@ function M.new(config, store, io, matcher)
                 return false, "A verified shipment is still missing; restore or manually reconcile it before repairing"
             end
         end
+        local selectorKey, previousSelector
+        if returnPhysical then
+            selectorKey, previousSelector = bindReturnSelector(returnPhysical, intent.item)
+            if not selectorKey then return false, previousSelector end
+        end
         local previousFault = data.fault
         data.intent, data.fault = nil, nil
-        if not save() then
+        local persisted, saved = pcall(save)
+        if not persisted or not saved then
             data.intent, data.fault = intent, previousFault
             if shipment then shipment.imported = oldImported end
-            return false, persistenceError
+            if selectorKey then data.returnSelectors[selectorKey] = previousSelector end
+            return false, persistenceError or tostring(saved)
         end
         store.event("RECONCILED", "Physical chest quantities agree with the retained shipment ledger; transfers may resume")
         return true, "Chest quantities reconciled without repeating any transfer"

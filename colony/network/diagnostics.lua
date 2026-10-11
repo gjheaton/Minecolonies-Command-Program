@@ -3,6 +3,10 @@
 local Protocol=require("colony.network.protocol")
 local Config=require("colony.network.config")
 local M={}
+local function copy(value)
+    if type(value)~="table" then return value end
+    local out={};for key,child in pairs(value) do out[key]=copy(child) end;return out
+end
 local function countAll(items)
     local count=0; for _,item in pairs(items or {}) do count=count+(item.count or item.amount or 0) end; return count
 end
@@ -15,6 +19,39 @@ local function verify(io,config,fn)
         if io.now()>=deadline then return false,ok and "Inventory verification timed out" or tostring(result) end
         io.wait(config.transferPollSeconds)
     until false
+end
+local function nbtLabel(value)
+    if value==nil then return "nil" end
+    if type(value)=="string" then return "string: "..value:sub(1,96) end
+    local ok,source=pcall(textutils.serialize,value,{compact=true,allow_repetitions=true})
+    return type(value)..": "..(ok and type(source)=="string" and source:sub(1,96) or "unavailable")
+end
+function M.printHeldMaster(config,io,store)
+    local state=store and store.data and store.data.master
+    local pending=type(state)=="table" and state.pendingTransfer
+    if type(pending)~="table" then print("No held master transfer.");return end
+    local item=type(pending.item)=="table" and pending.item or {}
+    print("HELD PRS "..tostring(pending.kind)..": colony "..tostring(pending.colonyId))
+    print("Item: "..tostring(item.name).." x"..tostring(pending.count))
+    print("Chest: "..tostring(pending.chest))
+    print("Reported: "..tostring(pending.reported==nil and "UNKNOWN" or pending.reported))
+    print("Active quarantine: "..tostring(state.quarantine and state.quarantine.code or "NONE"))
+    print("AP item NBT: "..nbtLabel(item.nbt))
+    print("AP fingerprint: "..tostring(item.fingerprint or (pending.variant and pending.variant.fingerprint) or "NONE"))
+    local items,err=io.snapshot(pending.chest)
+    if type(items)~="table" then print("FAIL chest read: "..tostring(err));return end
+    local count=io.count(items,item)
+    print("Original/current AP identity count: "..tostring(pending.before).." / "..tostring(count))
+    print("Physical baseline saved: "..tostring(type(pending.physicalBefore)=="table"))
+    local slots,total={},0
+    for slot,entry in pairs(items) do if entry.name==item.name then slots[#slots+1]=slot;total=total+entry.count end end
+    table.sort(slots)
+    print("Same-name quantity: "..total.." (identity unverified)")
+    for index,slot in ipairs(slots) do
+        if index>4 then print("Additional matching slots: "..(#slots-4));break end
+        print("Slot "..slot.." x"..items[slot].count.." CC NBT: "..nbtLabel(items[slot].nbt))
+    end
+    print("Inspection only; transfer and ledger unchanged.")
 end
 function M.printReport(config,io,store)
     print("MineColonies "..config.role.." v"..Config.VERSION)
@@ -70,6 +107,9 @@ function M.printReport(config,io,store)
         print("Bridge error: "..tostring(intent.callError or "none recorded"))
         if intent.shipmentId~=nil then print("Shipment: "..tostring(intent.shipmentId)) end
         print("Inspection only; the transfer and its ledger remain unchanged.")
+    end
+    if config.role=="master" and data and data.master and data.master.pendingTransfer then
+        M.printHeldMaster(config,io,store)
     end
 end
 function M.handleClient(config,store,io,message,canProbe)
@@ -178,7 +218,14 @@ function M.runMaster(config,store,io,matcher,id,itemName,abandon)
         local selected
         for _,item in pairs(items) do if item.name==(itemName or config.chestTestItem) and (item.amount or 0)>0 and matcher.canonicalNBT(item.nbt)=="" then selected=item; break end end
         if not selected then error("Store a plain, non-NBT "..tostring(itemName or config.chestTestItem).." in PRS for the test",0) end
-        record={token=tostring(os.getComputerID())..":"..tostring(io.now()),colonyId=id,phase="inspect",item={name=selected.name,nbt=selected.nbt},variant=selected}
+        if type(selected.fingerprint)~="string" or selected.fingerprint=="" or #selected.fingerprint>256 then
+            error("The chest test item needs an exact AP fingerprint",0)
+        end
+        local baseline,baselineError=io.exportBaseline(output)
+        if not baseline then error(baselineError or "Physical chest baseline unavailable",0) end
+        record={token=tostring(os.getComputerID())..":"..tostring(io.now()),colonyId=id,phase="inspect",
+            item={name=selected.name,nbt=copy(selected.nbt),fingerprint=selected.fingerprint},
+            stockItem={name=selected.name,nbt=copy(selected.nbt)},physicalBefore=baseline,variant=selected}
         store.data.chestTest=record; store.save()
     end
     local base={kind="probe",token=record.token}
@@ -190,11 +237,26 @@ function M.runMaster(config,store,io,matcher,id,itemName,abandon)
         record.reportedExport=moved; record.exportError=err; store.save()
     end
     if record.phase=="export_intent" then
+        local physical
         local proven,err=verify(io,config,function()
             local items=snapshot(io,route.deliveryChest)
+            if record.physicalBefore then
+                if record.reportedExport==1 then
+                    local item=io.exportEvidence(record.physicalBefore,items,record.stockItem or record.variant,1)
+                    if item and countAll(items)==1 then physical=item;return true end
+                    return false
+                end
+                -- An interrupted or unknown export cannot bind a new physical
+                -- identity. The legacy exact-identity proof still applies.
+                local item=io.exportEvidence(record.physicalBefore,items,record.stockItem or record.variant,1)
+                return item and countAll(items)==1 and io.same(item,record.item)
+            end
             return countAll(items)==1 and io.count(items,record.item)==1
         end)
         if not proven then error(record.exportError or err.."; export will not be repeated",0) end
+        if physical then
+            record.item={name=physical.name,nbt=copy(physical.nbt),fingerprint=record.variant.fingerprint}
+        end
         record.phase="return"; store.save()
     end
     if record.phase=="return" then
@@ -205,20 +267,20 @@ function M.runMaster(config,store,io,matcher,id,itemName,abandon)
         end)
         if not proven then error(err.."; return channel identity could not be established",0) end
         local before,beforeErr=io.stock(); if not before then error(beforeErr,0) end
-        record.prsBefore=io.count(before,record.item)
+        record.prsBefore=io.count(before,record.stockItem or record.item)
         record.phase="import_intent"; store.save()
         local imported,importErr=io.importPRS(record.item,1,route.returnChest,route)
         record.reportedImport,record.importError=imported,importErr; store.save()
         local confirmed,confirmErr=verify(io,config,function()
             local returns=snapshot(io,route.returnChest); local after=io.stock()
-            return imported==1 and countAll(returns)==0 and after and io.count(after,record.item)>=record.prsBefore+1
+            return imported==1 and countAll(returns)==0 and after and io.count(after,record.stockItem or record.item)>=record.prsBefore+1
         end)
         if not confirmed then error(importErr or confirmErr.."; import will not be repeated",0) end
         record.phase="release"; store.save()
     elseif record.phase=="import_intent" then
         local confirmed=verify(io,config,function()
             local returns=snapshot(io,route.returnChest); local after=io.stock()
-            return countAll(returns)==0 and after and io.count(after,record.item)>=record.prsBefore+1
+            return countAll(returns)==0 and after and io.count(after,record.stockItem or record.item)>=record.prsBefore+1
         end)
         if not confirmed then error("Interrupted PRS return cannot be proven and will not be repeated. Recover the test item manually, empty both channels, then use chesttest abandon "..id,0) end
         record.phase="release"; store.save()

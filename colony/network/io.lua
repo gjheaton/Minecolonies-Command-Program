@@ -3,6 +3,17 @@ local Protocol=require("colony.network.protocol")
 local Config=require("colony.network.config")
 local M={}
 local function integer(value) return math.max(0,math.floor(tonumber(value) or 0)) end
+local function whole(value,minimum)
+    return type(value)=="number" and value==value and value~=math.huge and value~=-math.huge
+        and value%1==0 and value>=(minimum or 0)
+end
+local function copy(value,seen)
+    if type(value)~="table" then return value end
+    seen=seen or {}; if seen[value] then return seen[value] end
+    local out={};seen[value]=out
+    for key,child in pairs(value) do out[copy(key,seen)]=copy(child,seen) end
+    return out
+end
 local function call(device,method,...)
     if not device or type(device[method])~="function" then return nil,"Missing peripheral method "..method end
     local ok,value,detail=pcall(device[method],...)
@@ -81,7 +92,8 @@ function M.new(config,store,matcher)
             -- Detailed fields allow equipment matching and accurate stack limits.
             if type(chest.getItemDetail)=="function" then
                 local detail,detailErr=call(chest,"getItemDetail",slot)
-                if type(detail)~="table" or detail.name~=item.name or detail.count~=item.count then
+                if type(detail)~="table" or detail.name~=item.name or detail.count~=item.count
+                    or matcher.canonicalNBT(detail.nbt)~=matcher.canonicalNBT(item.nbt) then
                     return nil,detailErr or "Inventory changed during snapshot; retry before moving items"
                 end
                 for key,value in pairs(detail) do entry[key]=value end
@@ -102,6 +114,57 @@ function M.new(config,store,matcher)
         local total=0
         for _,entry in pairs(items or {}) do if self.same(entry,item) then total=total+integer(entry.count or entry.amount) end end
         return total
+    end
+    -- AP exposes full NBT tables; CC exposes a different, opaque NBT hash.
+    -- Capture physical identities before the exact AP export instead of
+    -- trying to translate one representation into the other.
+    function self.exportBaseline(items)
+        if type(items)~="table" then return nil,"Physical inventory is unavailable" end
+        local baseline={version=1,totals={}}
+        for slot,entry in pairs(items) do
+            if not whole(slot,1) or type(entry)~="table" or type(entry.name)~="string" or entry.name==""
+                or not whole(entry.count,1)
+                or (entry.nbt~=nil and type(entry.nbt)~="string" and type(entry.nbt)~="table") then
+                return nil,"Invalid physical inventory identity or quantity"
+            end
+            local key=matcher.itemIdentity(entry)
+            local total=baseline.totals[key] or {item={name=entry.name,nbt=copy(entry.nbt)},count=0}
+            total.count=total.count+entry.count
+            if not whole(total.count,1) then return nil,"Invalid physical inventory total" end
+            baseline.totals[key]=total
+        end
+        return baseline
+    end
+    function self.exportEvidence(baseline,items,source,reported)
+        if not whole(reported,1) then return nil,"A known positive bridge result is required to bind physical item data" end
+        if type(source)~="table" or type(source.name)~="string" or source.name=="" then return nil,"Export item identity is unavailable" end
+        if type(baseline)~="table" or baseline.version~=1 or type(baseline.totals)~="table" then
+            return nil,"The original physical inventory baseline is unavailable"
+        end
+        for key,total in pairs(baseline.totals) do
+            if type(key)~="string" or type(total)~="table" or type(total.item)~="table"
+                or type(total.item.name)~="string" or total.item.name=="" or not whole(total.count,1)
+                or (total.item.nbt~=nil and type(total.item.nbt)~="string" and type(total.item.nbt)~="table")
+                or matcher.itemIdentity(total.item)~=key then return nil,"Invalid original physical inventory baseline" end
+        end
+        local current,err=self.exportBaseline(items);if not current then return nil,err end
+        local gained
+        for key,total in pairs(baseline.totals) do
+            local now=current.totals[key]
+            if (now and now.count or 0)<total.count then return nil,"Another physical inventory quantity decreased during export" end
+        end
+        for key,total in pairs(current.totals) do
+            local before=baseline.totals[key]
+            local delta=total.count-(before and before.count or 0)
+            if delta>0 then
+                if gained or total.item.name~=source.name or delta~=reported then
+                    return nil,"Physical inventory changes do not identify one exact exported variant"
+                end
+                gained=copy(total.item)
+            end
+        end
+        if not gained then return nil,"No physical item increase agrees with the bridge result" end
+        return gained,reported
     end
     function self.capacity(name,items,item,reserveSlots)
         local chest,err=self.inventory(name); if not chest then return nil,err end
@@ -190,38 +253,56 @@ function M.new(config,store,matcher)
         local value,transferErr=call(rs,method,filter,destination)
         return settled(value,transferErr)
     end
-    local function importFilter(item,allowFingerprint)
+    local function importFilter(item,chest,importing)
         if type(item.name)~="string" or item.name=="" then return nil,"Import has no item name" end
-        -- RS fingerprints belong to the source network. An item received from
-        -- PRS must be imported into CRS by its physical name/NBT identity.
-        if allowFingerprint and type(item.fingerprint)=="string" and item.fingerprint~="" then return {fingerprint=item.fingerprint} end
-        local filter={name=item.name}
         local nbt=matcher.canonicalNBT(item.nbt)
+        -- AP fingerprints describe the stack, not its RS network. AP tests
+        -- this signature on the source chest stack before extracting it.
+        if item.fingerprint~=nil then
+            if type(item.fingerprint)~="string" or item.fingerprint=="" or #item.fingerprint>256 then
+                return nil,"Invalid exact AP item fingerprint"
+            end
+            if not importing or nbt~="" then return {fingerprint=item.fingerprint} end
+        end
+        local filter={name=item.name}
         if nbt~="" then
-            if type(item.nbt)=="string" then filter.nbt=item.nbt
-            elseif type(item.nbt)=="table" then
-                local ok,encoded=pcall(textutils.serializeJSON,item.nbt)
-                if not ok then return nil,"Cannot represent exact import NBT" end
-                filter.nbt=encoded
-            else return nil,"Cannot represent exact import NBT" end
+            return nil,"Exact NBT transfer needs an AP fingerprint; CC inventory hashes are not AP NBT filters"
+        end
+        if importing then
+            local items,err=self.snapshot(chest);if not items then return nil,err end
+            local selected
+            for slot,entry in pairs(items) do
+                if self.same(entry,item) and whole(slot,1) and whole(entry.count,1)
+                    and (not selected or slot<selected) then selected=slot end
+            end
+            if not selected then return nil,"The exact physical import item is absent from the source chest" end
+            -- AP fingerprint matching can add an empty tag to an untagged
+            -- stack. Keep plain partial imports anchored to their exact slot
+            -- instead, avoiding a metadata change in the remaining stack.
+            -- Forge inventory indices are zero based.
+            filter.fromSlot=selected-1
         end
         return filter
     end
     function self.exportPRS(candidate,variant,count,chest,route)
         local filter,err=matcher.exportFilterForVariant(candidate,variant,count)
         if not filter then return nil,err end
+        if type(variant)~="table" or type(variant.fingerprint)~="string" or variant.fingerprint=="" or #variant.fingerprint>256 then
+            return nil,"The selected export variant needs an exact AP fingerprint"
+        end
+        filter={fingerprint=variant.fingerprint}
         return move("master",true,filter,count,chest,route)
     end
     function self.importPRS(item,count,chest,route)
-        local filter,err=importFilter(item); if not filter then return nil,err end
+        local filter,err=importFilter(item,chest,true); if not filter then return nil,err end
         return move("master",false,filter,count,chest,route)
     end
     function self.importColony(item,count,chest)
-        local filter,err=importFilter(item); if not filter then return nil,err end
+        local filter,err=importFilter(item,chest,true); if not filter then return nil,err end
         return move("supply",false,filter,count,chest)
     end
     function self.exportColony(item,count,chest)
-        local filter,err=importFilter(item,true); if not filter then return nil,err end
+        local filter,err=importFilter(item,chest,false); if not filter then return nil,err end
         return move("supply",true,filter,count,chest)
     end
     function self.craftable(candidate)

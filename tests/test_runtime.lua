@@ -115,6 +115,7 @@ local function zeroRecoveryFixture()
     -- UNKNOWN bridge result and the master's closing RESULT, before the CLI.
     local w,c=S.clientFixture()
     local rice={name="farmersdelight:rice",displayName="Rice",nbt={batch="reserved"}}
+    rice.fingerprint=w.fingerprint(rice)
     local deliveries={
         {id="D-RICE",requestId="R1",item=rice,count=1,verified=true,createdAt=99},
         {id="D-STONE",requestId="R2",item={name="minecraft:stone"},count=3,verified=true,createdAt=100},

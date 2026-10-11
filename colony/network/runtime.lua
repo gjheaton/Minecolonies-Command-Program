@@ -45,6 +45,30 @@ function M.run(role,...)
     local matcher=Matcher.new(config,store)
     local io=IO.new(config,store,matcher)
     if mode=="diag" or mode=="diagnostics" then Diagnostics.printReport(config,io,store); return end
+    if mode=="transferdiag" then
+        if role~="master" or arg2~=nil or arg3~=nil then error("Usage: colony_master transferdiag",0) end
+        Diagnostics.printHeldMaster(config,io,store);return
+    end
+    if mode=="reconcile-bind" then
+        if role~="master" or type(arg2)~="string" or arg2=="" or arg3~=nil then
+            error("Usage: colony_master reconcile-bind <colony ID>",0)
+        end
+        local recovery=require("colony.network.master").legacyExportRecovery(config,store,io,matcher)
+        local ok,preview=recovery.previewBindExport(arg2)
+        if not ok then print("BLOCKED: "..tostring(preview));return end
+        print("HELD PRS EXPORT: colony "..tostring(preview.colonyId))
+        print("Item: "..preview.item.name.." x"..preview.count)
+        print("Chest: "..preview.chest)
+        print("Bridge reported: "..preview.reported.."; physical quantity: "..preview.currentNameCount)
+        print("This command records the existing delivery and moves no items.")
+        print("Confirm only if this item was ABSENT before that failed export,")
+        print("and the delivered item has stayed untouched and unreplaced.")
+        print("Type "..preview.confirmation.." to bind it, or anything else to cancel:")
+        local confirmation=read()
+        if confirmation~=preview.confirmation then print("CANCELLED: Held transfer unchanged");return end
+        local bound,detail=recovery.reconcileBindExport(arg2,confirmation)
+        print((bound and "OK: " or "BLOCKED: ")..tostring(detail));return
+    end
     if mode=="reconcile-zero" then
         if role~="supply" or type(arg2)~="string" or arg2=="" or arg3~=nil then
             error("Usage: colony_supply reconcile-zero <shipment ID>",0)
@@ -138,7 +162,7 @@ function M.run(role,...)
         end
         print((ok and "OK: " or "BLOCKED: ")..tostring(err)); return
     end
-    if mode and mode~="" then error("Usage: "..(role=="master" and "colony_master" or "colony_supply").." [setup | diag | monitors | reconcile | set key value"..(role=="master" and " | monitor ID name | chesttest ID [item]" or " | reconcile-zero shipmentID").."]",0) end
+    if mode and mode~="" then error("Usage: "..(role=="master" and "colony_master" or "colony_supply").." [setup | diag | monitors | reconcile | set key value"..(role=="master" and " | monitor ID name | chesttest ID [item] | transferdiag | reconcile-bind colonyID" or " | reconcile-zero shipmentID").."]",0) end
     local inbox,action={},nil
     local processorFault
     local telemetryFault
