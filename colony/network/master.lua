@@ -190,14 +190,22 @@ function M.new(config, store, io, matcher)
         return reason
     end
 
+    local function verificationReason(pending,delta,err)
+        if pending.reported == 0 and delta == 0 then return zeroTransferReason(pending) end
+        return err and "Cannot verify transfer inventory: " .. err
+            or "Transfer inventory delta does not agree with the export/import outcome"
+    end
+
     local function currentTransferReason()
         local fault, pending = state.quarantine, state.pendingTransfer
         if not fault then return "No uncertain transfer" end
         -- Older journals labelled every zero as a possible storage desync.
         -- Present the evidence accurately without changing those durable holds.
         if fault.code == "TRANSFER_VERIFY" and type(pending) == "table"
-            and pending.reported == 0 and pending.lastDelta == 0 then
-            return zeroTransferReason(pending)
+            and (pending.lastDelta ~= nil or pending.lastError ~= nil) then
+            -- A guarded probe retains the original quarantine. Its latest
+            -- physical verification may now fail for a different reason.
+            return verificationReason(pending,pending.lastDelta,pending.lastError)
         end
         return tostring(fault.message)
     end
@@ -554,10 +562,8 @@ function M.new(config, store, io, matcher)
         end
         pending.uncertain = true
         pending.lastDelta, pending.lastError = delta, err
-        local reason = err and "Cannot verify transfer inventory: " .. err
-            or "Transfer inventory delta does not agree with the export/import outcome"
+        local reason = verificationReason(pending,delta,err)
         if pending.reported == 0 and delta == 0 then
-            reason = zeroTransferReason(pending)
             pending.definiteZero = true
         end
         quarantine("TRANSFER_VERIFY", reason, {colonyId=pending.colonyId,
@@ -1261,7 +1267,15 @@ function M.new(config, store, io, matcher)
     function self.verifyHeldTransfer()
         if not state.pendingTransfer then return true, "No held transfer remains" end
         local owner=state.pendingTransfer.colonyId
-        if not verifyPending(true) then return false,"Transfer verification pending; existing intent retained" end
+        if not verifyPending(true) then
+            -- A completed verification can fail with definite zero movement,
+            -- unreadable inventory, or a mismatched delta. Preserve the hold
+            -- and report that evidence instead of calling every failure pending.
+            if state.pendingTransfer.uncertain and state.quarantine then
+                return false,transferFaultDetail()
+            end
+            return false,"Transfer verification pending; existing intent retained"
+        end
         clearQuarantine()
         local cs=state.colonies[tostring(owner)]
         if cs and cs.turn and cs.turn.phase=="RECOVERY" then cs.turn=nil; save() end

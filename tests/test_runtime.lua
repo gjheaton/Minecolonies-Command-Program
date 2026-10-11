@@ -110,6 +110,79 @@ Test.case("CLI reconciliation waits a bounded interval for offline colony withou
     Test.equal(#state.colonies["2"].shipments,0)
 end)
 
+local function capturedReconcile(w)
+    local originalPrint,lines=print,{}
+    _G.print=function(...)
+        local values={};for index=1,select("#",...) do values[index]=tostring(select(index,...)) end
+        lines[#lines+1]=table.concat(values," ")
+    end
+    local ok,err=pcall(w.run,"reconcile");_G.print=originalPrint;assert(ok,err)
+    return table.concat(lines,"\n")
+end
+local function pauseRecovery(c)
+    c.config.automationEnabled=false;Config.save(c.config)
+end
+local function assertSingleHeldProbe(w,state)
+    assert(state.pendingTransfer and state.pendingTransfer.recoveryProbe and state.pendingTransfer.uncertain)
+    assert(state.quarantine and state.quarantine.code=="TRANSFER_VERIFY")
+    Test.equal(#w.callsFor("export",true),1,"blocked CLI verification repeated its guarded probe")
+    Test.equal(w.callsFor("export",true)[1].filter.count,1)
+    Test.equal(#w.callsFor("import",true),0);Test.equal(#state.colonies["2"].shipments,0)
+    Test.equal(Config.load("master").automationEnabled,false,"CLI verification enabled automation")
+    Test.equal(w.count(w.channels.D3,{name="minecraft:stone"}),0)
+    for _,packet in ipairs(w.sent) do assert(packet.message.kind~="turn","CLI verification granted a normal colony turn") end
+end
+
+Test.case("CLI zero recovery reports the final zero-movement evidence and item while keeping its single probe held and automation paused",function()
+    local w,c=recoveryFixture();pauseRecovery(c);w.rs.zeroExport=true;w.hello()
+    local output=capturedReconcile(w);local state=w.reloaded();assertSingleHeldProbe(w,state)
+    assert(output:find("BLOCKED: PRS export returned 0; chest unchanged",1,true),"CLI hid the completed zero verification behind a pending message")
+    assert(output:find("Item: minecraft:stone",1,true) and output:find("Chest: D2",1,true))
+    assert(output:find("Reported / chest change: 0 / 0",1,true))
+    assert(not output:find("Transfer verification pending",1,true))
+    Test.equal(state.pendingTransfer.reported,0);Test.equal(state.pendingTransfer.lastDelta,0)
+    assert(state.pendingTransfer.definiteZero);Test.equal(w.count(w.channels.D2,{name="minecraft:stone"}),0)
+end)
+
+Test.case("CLI mismatched recovery describes missing physical evidence then credits the same delayed probe without a second export",function()
+    local w,c=recoveryFixture();pauseRecovery(c);w.rs.visibilityDelay=2;w.hello()
+    local output=capturedReconcile(w);local state=w.reloaded();assertSingleHeldProbe(w,state)
+    assert(output:find("BLOCKED: Cannot verify transfer inventory",1,true),output)
+    assert(output:find("No physical item increase agrees with the bridge result",1,true),"CLI hid the actual mismatched receipt reason")
+    assert(output:find("Item: minecraft:stone",1,true) and output:find("Chest: D2",1,true))
+    Test.equal(state.pendingTransfer.reported,1)
+    Test.equal(w.count(w.channels.D2,{name="minecraft:stone"}),1,"the original probe did not physically arrive")
+    w.advance(2)
+    output=capturedReconcile(w);state=w.reloaded()
+    assert(output:find("OK:",1,true));assert(state.pendingTransfer==nil and state.quarantine==nil)
+    Test.equal(#state.colonies["2"].shipments,1);Test.equal(state.colonies["2"].shipments[1].count,1)
+    Test.equal(#w.callsFor("export",true),1,"delayed visibility caused a replacement export")
+    Test.equal(Config.load("master").automationEnabled,false)
+    for _,packet in ipairs(w.sent) do assert(packet.message.kind~="turn") end
+end)
+
+Test.case("CLI unreadable recovery reports its chest-read reason and preserves the original receipt until visibility is restored",function()
+    local w,c=recoveryFixture();pauseRecovery(c)
+    local chest=w.devices[1].D2.api;local originalList=chest.list
+    local bridge=w.devices[1].prs.api;local originalExport=bridge.exportItemToPeripheral
+    bridge.exportItemToPeripheral=function(...)
+        local moved=originalExport(...)
+        chest.list=function() error("Delivery chest temporarily unreadable",0) end
+        return moved
+    end
+    w.hello();local output=capturedReconcile(w);local state=w.reloaded();assertSingleHeldProbe(w,state)
+    assert(output:find("BLOCKED: Cannot verify transfer inventory",1,true),output)
+    assert(output:find("Delivery chest temporarily unreadable",1,true),"CLI replaced the actual chest-read failure with a pending message")
+    assert(output:find("Item: minecraft:stone",1,true) and output:find("Chest: D2",1,true))
+    Test.equal(state.pendingTransfer.reported,1);Test.equal(w.count(w.channels.D2,{name="minecraft:stone"}),1)
+    chest.list=originalList
+    output=capturedReconcile(w);state=w.reloaded()
+    assert(output:find("OK:",1,true));assert(state.pendingTransfer==nil and state.quarantine==nil)
+    Test.equal(#state.colonies["2"].shipments,1);Test.equal(state.colonies["2"].shipments[1].count,1)
+    Test.equal(#w.callsFor("export",true),1,"restored chest access replayed the original export")
+    Test.equal(Config.load("master").automationEnabled,false)
+end)
+
 local function zeroRecoveryFixture()
     -- Generate the retained intent with the real supply engine, including its
     -- UNKNOWN bridge result and the master's closing RESULT, before the CLI.

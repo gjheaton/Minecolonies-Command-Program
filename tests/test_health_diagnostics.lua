@@ -142,6 +142,49 @@ Test.case("held master diagnostics identify the display name and colony while in
     Test.equal(textutils.serialize(f.master.store.data),before);Test.equal(textutils.serialize(f.w.files),files)
 end)
 
+Test.case("held zero-export diagnostics distinguish current exact fingerprint stock from same-name variants without altering the receipt",function()
+    local f=fixture();local state=f.master.store.data.master
+    f.w.chest(1,"held-delivery","held-channel")
+    local source=f.master.rs.add({name="minecraft:clock",nbt={}},12)
+    f.master.rs.add({name="minecraft:clock",nbt={display={Name="Other clock"}}},3)
+    state.pendingTransfer={kind="export",colonyId=9,chest="held-delivery",before=0,count=1,reported=0,
+        item={name=source.name,fingerprint=source.fingerprint},selectionMode="plain-name",physicalBefore={totals={}}}
+    state.quarantine={code="TRANSFER_VERIFY",message="Export returned zero"};f.master.store.save()
+    local journal=textutils.serialize(f.master.store.data);local files=textutils.serialize(f.w.files)
+    local originalPrint,lines=print,{};_G.print=function(value) lines[#lines+1]=tostring(value) end
+    local ok,err=pcall(f.w.at,1,require("colony.network.diagnostics").printHeldMaster,f.master.config,f.master.io,f.master.store,false)
+    _G.print=originalPrint;assert(ok,err);local output=table.concat(lines,"\n")
+    assert(output:find("Current PRS same-name quantity: 15",1,true))
+    assert(output:find("Current original fingerprint quantity: 12",1,true))
+    assert(output:find("PRS variant x12 NBT: table:",1,true) and output:find("Other clock",1,true))
+    assert(output:find("Stock visibility does not prove extraction or chest insertion",1,true))
+    Test.equal(textutils.serialize(f.master.store.data),journal);Test.equal(textutils.serialize(f.w.files),files)
+    for _,call in ipairs(f.w.calls) do assert(call.method=="listItems","source diagnostic performed a mutating bridge operation") end
+end)
+
+Test.case("unavailable or invalid diagnostic stock does not erase a held export or report invented source quantities",function()
+    for _,failure in ipairs({"disconnected","exception","invalid"}) do
+        local f=fixture();local state=f.master.store.data.master
+        f.w.chest(1,"held-delivery","held-channel")
+        state.pendingTransfer={kind="export",colonyId=9,chest="held-delivery",before=0,count=1,reported=0,
+            item={name="minecraft:clock",fingerprint="original-clock"},physicalBefore={totals={}}}
+        state.quarantine={code="TRANSFER_VERIFY",message="Export returned zero"};f.master.store.save()
+        f.master.io.stock=function()
+            if failure=="exception" then error("RS disconnected",0) end
+            if failure=="invalid" then return {{name="minecraft:clock",amount=-1}} end
+            return nil,"RS disconnected"
+        end
+        local journal=textutils.serialize(f.master.store.data);local files=textutils.serialize(f.w.files)
+        local originalPrint,lines=print,{};_G.print=function(value) lines[#lines+1]=tostring(value) end
+        local ok,err=pcall(f.w.at,1,require("colony.network.diagnostics").printHeldMaster,f.master.config,f.master.io,f.master.store,false)
+        _G.print=originalPrint;assert(ok,err);local output=table.concat(lines,"\n")
+        assert(output:find("FAIL PRS stock read:",1,true) and output:find("Inspection only",1,true))
+        assert(not output:find("Current PRS same-name quantity:",1,true))
+        Test.equal(textutils.serialize(f.master.store.data),journal);Test.equal(textutils.serialize(f.w.files),files)
+        Test.equal(#f.w.calls,0)
+    end
+end)
+
 Test.case("actual retained import details render on the native colony and cached read-only master display without storage discovery or mutation",function()
     local w=D.world();local c=S.computer(w,2,"supply")
     local prefix="enderchests:ender_chest_"

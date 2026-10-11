@@ -891,7 +891,7 @@ hardware wizard; do not use `CLEAN` to obtain an update or repair.
 
 Versions follow **MAJOR.MINOR.PATCH**. The first number changes for incompatible
 behavior or migrations, the second for compatible new features, and the third
-for fixes and maintenance. This release is **4.0.15**; later fixes increase the
+for fixes and maintenance. This release is **4.0.16**; later fixes increase the
 third number. A minor release resets the patch number (`4.1.0`), and a major
 release resets both later numbers (`5.0.0`). The update control compares all three
 numbers and offers installation when the published version is greater.

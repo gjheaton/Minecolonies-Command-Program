@@ -67,7 +67,7 @@ local function run(role,options,scenario)
                     runtimeStore.save()
                     return true,"Held transfer verified from physical chest quantities"
                 end
-                return false,"Transfer verification pending; existing intent retained"
+                return false,options.verificationFailure or "Transfer verification pending; existing intent retained"
             end}
         return f.engine
     end
@@ -170,6 +170,23 @@ Test.case("blocked and expired recovery preserve the original hold and report BL
         Test.equal(f.reconciles,1);Test.equal(payload(f.store.data),f.held)
         Test.equal(Config.load("master").automationEnabled,false)
     end) end
+end)
+
+Test.case("expired monitor recovery shows the latest concrete reason and item details without replaying its probe",function()
+    local detail="PRS export returned 0; chest unchanged. Transfer held.\nItem: Clock\nID: minecraft:clock\nReported / chest change: 0 / 0"
+    run("master",{recoverable=true,verificationFailure=detail},function(f)
+        f.boot();f.config.automationEnabled=true;Config.save(f.config)
+        f.ui.view="health";f.manager.draw();f.click("RECOVER TRANSFER");f.click("RUN RECOVERY")
+        f.step();Test.equal(f.reconciles,1);assert(f.ui.recoveryRunning)
+        f.w.advance(f.c.config.transferVerifyTimeoutSeconds+1);f.step()
+        local screen=f.surface.dump()
+        for _,text in ipairs({"BLOCKED: PRS export returned 0","Item: Clock","ID: minecraft:clock","Reported / chest change: 0 / 0"}) do
+            assert(screen:find(text,1,true),"recovery screen omitted "..text..": "..screen)
+        end
+        assert(not screen:find("verification pending",1,true) and not screen:find("RECOVERED:",1,true))
+        f.step();Test.equal(f.reconciles,1);Test.equal(Config.load("master").automationEnabled,false)
+        Test.equal(payload(f.store.data),f.held)
+    end)
 end)
 
 Test.case("recovery reports a reserved chest test without starting a transfer or clearing its journal",function()

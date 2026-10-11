@@ -131,6 +131,41 @@ function M.printHeldMaster(config,io,store,inspectTarget)
         end
     end
     if pending.kind=="export" then print("Export selector: "..tostring(pending.selectionMode or "not recorded")) end
+    if config.role=="master" and pending.kind=="export" and pending.reported==0 then
+        -- Inspect the source cache without exporting, rebinding its selector,
+        -- or changing the original physical evidence saved in the journal.
+        local ok,stock,stockError=pcall(io.stock)
+        if not ok or type(stock)~="table" then
+            print("FAIL PRS stock read: "..tostring(ok and stockError or stock))
+        else
+            local sameName,original,variants=0,0,{}
+            local fingerprint=item.fingerprint or (pending.variant and pending.variant.fingerprint)
+            local valid=true
+            for _,entry in pairs(stock) do
+                if type(entry)~="table" or type(entry.name)~="string"
+                    or type(entry.amount)~="number" or entry.amount~=entry.amount
+                    or entry.amount==math.huge or entry.amount<0 or entry.amount%1~=0 then
+                    valid=false;break
+                end
+                if entry.name==item.name then
+                    sameName=sameName+entry.amount
+                    if fingerprint~=nil and entry.fingerprint==fingerprint then original=original+entry.amount end
+                    if entry.amount>0 then variants[#variants+1]=entry end
+                end
+            end
+            if not valid then print("FAIL PRS stock read: Invalid stock data")
+            else
+                print("Current PRS same-name quantity: "..sameName)
+                print("Current original fingerprint quantity: "..tostring(fingerprint and original or "UNKNOWN"))
+                table.sort(variants,function(a,b) return tostring(a.fingerprint)<tostring(b.fingerprint) end)
+                for index,entry in ipairs(variants) do
+                    if index>4 then print("Additional PRS variants: "..(#variants-4));break end
+                    print("PRS variant x"..entry.amount.." NBT: "..nbtLabel(entry.nbt))
+                end
+                print("Stock visibility does not prove extraction or chest insertion.")
+            end
+        end
+    end
     print("Original bridge error: "..tostring(pending.callError or "none recorded"))
     if inspectTarget~=false and config.role=="master" and pending.kind=="export" and pending.reported==0 then
         local report,targetError
