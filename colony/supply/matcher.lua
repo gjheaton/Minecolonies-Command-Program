@@ -514,10 +514,6 @@ function M.new(config, store)
         end
 
         table.sort(candidates, function(a, b)
-            if class and a.toolTier ~= b.toolTier then
-                return a.toolTier > b.toolTier
-            end
-
             local aFull = a.stock >= remaining and remaining > 0
             local bFull = b.stock >= remaining and remaining > 0
             if aFull ~= bFull then return aFull end
@@ -530,6 +526,9 @@ function M.new(config, store)
             if a.craftabilityKnown ~= b.craftabilityKnown then
                 return a.craftabilityKnown == false
             end
+            -- Prefer an available accepted tool over an unavailable higher
+            -- tier. MineColonies' alternatives already encode allowed levels.
+            if class and a.toolTier ~= b.toolTier then return a.toolTier > b.toolTier end
             if a.stock ~= b.stock then return a.stock > b.stock end
             return a.identity < b.identity
         end)
@@ -549,8 +548,6 @@ function M.new(config, store)
         end
 
         table.sort(candidates, function(a,b)
-            if class and a.toolTier ~= b.toolTier then return a.toolTier > b.toolTier end
-
             local aFull = a.stock >= remaining and remaining > 0
             local bFull = b.stock >= remaining and remaining > 0
             if aFull ~= bFull then return aFull end
@@ -560,6 +557,7 @@ function M.new(config, store)
             if aAny ~= bAny then return aAny end
 
             if a.craftable ~= b.craftable then return a.craftable end
+            if class and a.toolTier ~= b.toolTier then return a.toolTier > b.toolTier end
             if a.stock ~= b.stock then return a.stock > b.stock end
             return a.identity < b.identity
         end)

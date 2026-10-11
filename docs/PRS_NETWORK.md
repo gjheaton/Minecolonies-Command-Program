@@ -843,7 +843,7 @@ install_colony --update supply
 ```
 
 Run the appropriate command on each role; do not update two processes concurrently
-on one computer. Update the master and every colony supply computer to 4.0.8 before
+on one computer. Update the master and every colony supply computer to 4.0.9 before
 resuming automation, and update both roles together for protocol-changing releases.
 An older v3 installation must use the first clean v4 installation instead of an
 in-place update.
@@ -888,7 +888,7 @@ hardware wizard; do not use `CLEAN` to obtain an update or repair.
 
 Versions follow **MAJOR.MINOR.PATCH**. The first number changes for incompatible
 behavior or migrations, the second for compatible new features, and the third
-for fixes and maintenance. This release is **4.0.8**; later fixes increase the
+for fixes and maintenance. This release is **4.0.9**; later fixes increase the
 third number. A minor release resets the patch number (`4.1.0`), and a major
 release resets both later numbers (`5.0.0`). The update control compares all three
 numbers and offers installation when the published version is greater.
@@ -934,7 +934,8 @@ transfer journal is discarded. Queued state is visible in the header and SETTING
 Installation failure releases the admission hold and displays the failure. A
 transfer intent needing reconciliation cancels the queued update so recovery
 controls remain available. The master still keeps held-transfer installation
-guards and must finish its reserved turns before using UPDATE.
+guards. Masters through 4.0.8 require manually pausing automation and finishing
+reserved turns before using UPDATE.
 
 Older colony versions only display a waiting notice; they do not queue an update.
 To obtain 4.0.6 through those buttons, pause Run supply automation on the master,
@@ -969,3 +970,25 @@ Remote colony dashboards remain read-only.
 Suite 4.0.8 packages Command Center **4.0.0**. Its application version is separate
 from the suite version; both participate in update checks. Existing V4 Command
 installations can use CHECK UPDATE → UPDATE while preserving their settings.
+
+### Master updates and available equipment in 4.0.9
+
+After CHECK UPDATE finds a newer version, pressing UPDATE on the master queues
+installation, saves Run supply automation as disabled, and refuses new turns.
+Existing granted turns, deliveries, and result acknowledgments continue. Ordinary
+pending chest verification may finish; uncertain transfer holds, PRS quarantine,
+chest tests, and stopped processors block installation and display the reason.
+Once reserved turns close, the installer rechecks the available version and
+updates with settings and journals preserved. Automation stays paused after the
+update or an installation failure. Re-enable it in SETTINGS when ready.
+
+Masters running older releases need one manual pause and completed turns to install
+4.0.9 through the UI, or a stopped application followed by install_colony --repair
+and reboot. Subsequent master updates can use the queued workflow.
+
+Equipment selection now ranks stocked accepted alternatives before absent ones,
+then craftable alternatives before unavailable recipes. Higher tiers are preferred
+within those groups. A nonexistent netherite hoe can no longer hide stocked wooden,
+stone, or diamond hoes or a craftable iron hoe. MineColonies' item alternatives
+remain authoritative for allowed levels; the matcher does not invent tools outside
+that list or weaken exact NBT / fingerprint rules for damaged or enchanted variants.

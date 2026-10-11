@@ -283,12 +283,14 @@ function M.run(role,...)
         if queued then actualUpdater.checkQueued=true end
         return queued,reason or "Update check queued"
     end
-    updater.canQueueInstall=role=="supply"
+    updater.canQueueInstall=true
+    local updatePauseSaved=false
     function updater.install()
         local queued,reason=queueAction("update")
-        if queued and role=="supply" then
+        if queued then
             actualUpdater.installQueued=true
             actualUpdater.installResult=nil
+            updatePauseSaved=false
             if engine.holdNewTurns then engine.holdNewTurns(true) end
         end
         return queued,reason or "Update queued; finishing the current turn"
@@ -354,8 +356,13 @@ function M.run(role,...)
                             end
                         end
                     elseif pending=="update" then
+                        if role=="master" and not updatePauseSaved then
+                            config.automationEnabled=false
+                            Config.save(config)
+                            updatePauseSaved=true
+                        end
                         local allowed,reason=engine.canUpdate()
-                        if allowed and not store.data.chestTest then
+                        if allowed and not processorFault and not store.data.chestTest then
                             actualUpdater.installQueued=false
                             actualUpdater.installing=true
                             local updated,result=pcall(actualUpdater.install)
@@ -364,7 +371,7 @@ function M.run(role,...)
                             actualUpdater.installResult=updated and result~=false and "Update installation finished"
                                 or "Update failed: "..(updated and "Installer did not commit an update" or tostring(result))
                             if not updated or result==false then store.error("UPDATE_FAILED",updated and "Installer did not commit an update; previous suite retained" or tostring(result)) end
-                        elseif role=="supply" and engine.busy() and not processorFault and not store.data.chestTest
+                        elseif engine.busy() and not processorFault and not store.data.chestTest
                             and (not engine.canWaitForUpdate or engine.canWaitForUpdate()) then
                             -- Results and batch retries continue; new grants
                             -- are refused until installation or a safe failure.
@@ -393,6 +400,12 @@ function M.run(role,...)
             if not ok then
                 processorFault="Processor stopped; restart after recovery: "..tostring(err)
                 pcall(store.error,"PROCESSOR_ERROR",processorFault)
+                if actualUpdater.installQueued then
+                    action=nil
+                    actualUpdater.installQueued=false
+                    actualUpdater.installResult="Update blocked: "..processorFault
+                    if engine.holdNewTurns then engine.holdNewTurns(false) end
+                end
                 if recovery then
                     local completed=recovery;recovery=nil
                     if completed.callback then pcall(completed.callback,false,processorFault) end

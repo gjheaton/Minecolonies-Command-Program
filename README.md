@@ -1,6 +1,6 @@
 # MineColonies Control Suite
 
-The `supply-master-colony` branch provides Supply 4.0.8: one dedicated computer owns
+The `supply-master-colony` branch provides Supply 4.0.9: one dedicated computer owns
 Player Refined Storage (PRS), and colony supply computers communicate with it over
 rednet. Each colony has a delivery and a return Ender Chest channel. Command Center
 is also available through the same installer.
@@ -58,9 +58,10 @@ install_colony --update master
 ```
 
 Use `supply` or `command` instead of `master` on those computers. The stored update
-source remains this development branch until explicitly changed. For 4.0.6, pause
-master automation, let current handshakes finish, then use **CHECK UPDATE → UPDATE**
-on the master and every colony supply computer. Settings and request/transfer
+source remains this development branch until explicitly changed. In 4.0.9, the
+master UPDATE button saves an automation pause, drains reserved turns, then installs
+the available update. Colony updates also queue until their current turn finishes.
+Older masters require manually pausing automation before using UPDATE. Settings and request/transfer
 journals are preserved. Resume automation after all computers have restarted with
 the new release. Update both roles together when a release changes the protocol.
 
@@ -100,7 +101,7 @@ Versions use **MAJOR.MINOR.PATCH**:
 - **Minor**, the second number, changes for compatible new features.
 - **Patch**, the third number, changes for fixes and maintenance updates.
 
-This update is **4.0.8**. Future fixes increase the patch number so **CHECK UPDATE**
+This update is **4.0.9**. Future fixes increase the patch number so **CHECK UPDATE**
 can detect them. A minor release resets the patch number, such as `4.1.0`; a major
 release resets both later numbers, such as `5.0.0`.
 
@@ -130,9 +131,13 @@ It saves an automation pause, verifies the held transfer, and displays RECOVERED
 or BLOCKED without stopping the application. A recorded zero export may send one
 guarded recovery item. Automation stays paused afterward; error history is kept.
 
-Command Center is now **4.0.0**, packaged in suite **4.0.8**. Its monitor header
+Command Center is now **4.0.0**, packaged in suite **4.0.9**. Its monitor header
 and installer metadata use the same application version. Existing V4 Command
 installations can update without resetting their settings.
+
+Release 4.0.9 queues master updates and fixes equipment selection: stocked accepted
+tools take priority over absent higher tiers, then craftable alternatives. Exact
+fingerprints and MineColonies’ serialized allowed alternatives remain required.
 
 ## Development checks
 

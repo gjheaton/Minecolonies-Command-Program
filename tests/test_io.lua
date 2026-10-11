@@ -3,6 +3,33 @@ local IO=require("colony.network.io")
 local Store=require("colony.network.store")
 local Config=require("colony.network.config")
 
+Test.case("hoe selection prefers accepted stock then recipes over unavailable higher tiers",function()
+    local w,c=S.clientFixture()
+    local request={id="HOE",name="Hoe minimum level wood",items={}}
+    for _,tier in ipairs({"wooden","stone","iron","diamond","netherite"}) do
+        request.items[#request.items+1]={name="minecraft:"..tier.."_hoe"}
+    end
+    local inventory={
+        {name="minecraft:wooden_hoe",amount=3,fingerprint="plain-wood"},
+        {name="minecraft:stone_hoe",amount=2,fingerprint="plain-stone"},
+        {name="minecraft:wooden_hoe",amount=1,nbt={Damage=5,Enchantments={{id="minecraft:unbreaking",lvl=1}}},fingerprint="tagged-wood"},
+        {name="minecraft:iron_hoe",amount=1,nbt={Enchantments={{id="minecraft:unbreaking",lvl=1}}},fingerprint="tagged-iron"},
+        {name="minecraft:diamond_hoe",amount=1,fingerprint="plain-diamond"},
+    }
+    local lookup=function(candidate) return candidate.name=="minecraft:iron_hoe","recipe",true end
+    local selected=c.matcher.chooseFromSnapshot(request,inventory,lookup,1)
+    Test.equal(selected.name,"minecraft:diamond_hoe");Test.equal(selected.stock,1)
+    Test.equal(c.matcher.exportFilterForVariant(selected,selected.variants[1],1).fingerprint,"plain-diamond")
+    table.remove(inventory,5)
+    selected=c.matcher.chooseFromSnapshot(request,inventory,lookup,1)
+    Test.equal(selected.name,"minecraft:stone_hoe");Test.equal(selected.stock,2)
+    selected=c.matcher.chooseFromSnapshot(request,{inventory[3],inventory[4]},lookup,1)
+    Test.equal(selected.name,"minecraft:iron_hoe");Test.equal(selected.stock,0);assert(selected.craftable)
+    request.items={{name="minecraft:wooden_hoe"},{name="minecraft:stone_hoe"}}
+    selected=c.matcher.chooseFromSnapshot(request,{{name="minecraft:diamond_hoe",amount=1},inventory[1]},lookup,1)
+    Test.equal(selected.name,"minecraft:wooden_hoe","tool outside serialized allowed levels was selected")
+end)
+
 Test.case("supply hardware boundary refuses every PRS operation",function()
     local w,client=S.clientFixture()
     local prs=w.bridge(2,"prs",true)

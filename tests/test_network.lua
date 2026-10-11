@@ -54,6 +54,44 @@ Test.case("two colonies share one PRS writer in round-robin turns without duplic
     Test.equal(m.store.data.master.colonies["3"].requests.R3.status,"in progress")
 end)
 
+Test.case("hoe alternatives with absent higher tiers deliver stocked exact equipment instead of reporting missing",function()
+    local w,m=fixture(1)
+    local c=w.computers[2]
+    local request={id="HOE",name="Hoe minimum level wood",count=1,items={}}
+    for _,tier in ipairs({"wooden","stone","iron","diamond","netherite"}) do
+        request.items[#request.items+1]={name="minecraft:"..tier.."_hoe",count=1}
+    end
+    c.integrator.requests={request}
+    m.rs.add({name="minecraft:wooden_hoe"},3)
+    m.rs.add({name="minecraft:stone_hoe"},2)
+    m.rs.add({name="minecraft:wooden_hoe",nbt={Damage=4,Enchantments={{id="minecraft:unbreaking",lvl=1}}}},1)
+    m.rs.add({name="minecraft:iron_hoe",nbt={Enchantments={{id="minecraft:unbreaking",lvl=1}}}},1)
+    local diamond=m.rs.add({name="minecraft:diamond_hoe"},1)
+    m.rs.recipes["minecraft:iron_hoe"]=true
+    w.untilTrue(function()
+        local item=c.rs.items[w.identity({name="minecraft:diamond_hoe"})]
+        return item and item.amount==1
+    end,"stocked hoe was not delivered")
+    Test.equal(#w.callsFor("export",true),1)
+    Test.equal(w.callsFor("export",true)[1].filter.fingerprint,diamond.fingerprint)
+    Test.equal(#w.callsFor("craft",true),0)
+    Test.equal(m.store.data.master.colonies["2"].requests.HOE.status,"in progress")
+end)
+
+Test.case("master update admission hold finishes an existing turn without granting another",function()
+    local w,m=fixture(1);m.rs.add({name="minecraft:stone"},16);m.rs.visibilityDelay=.75
+    w.untilTrue(function() return m.store.data.master.pendingTransfer~=nil end)
+    assert(m.engine.canWaitForUpdate(),"ordinary pending chest verification blocked draining")
+    m.engine.holdNewTurns(true)
+    w.untilTrue(function() return not m.engine.busy() end,"master did not drain reserved turn")
+    local grants=#w.grants()
+    for _=1,30 do w.step() end
+    Test.equal(#w.grants(),grants,"master admitted new turn while update held")
+    assert(m.engine.canUpdate())
+    m.engine.holdNewTurns(false)
+    w.untilTrue(function() return #w.grants()>grants end,"released update admission did not resume turns")
+end)
+
 Test.case("lost grant, batch, result and acknowledgement recover using original transaction",function()
     local w,m=fixture(1);m.rs.add({name="minecraft:stone"},16)
     w.drop={turn=1,batch=1,result=1,received=1}

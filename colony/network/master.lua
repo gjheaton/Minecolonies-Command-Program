@@ -1076,7 +1076,7 @@ function M.new(config, store, io, matcher)
                 end
             end
         end
-        if config.automationEnabled == false or awaitingClient then return end
+        if config.automationEnabled == false or self.updateWaiting or awaitingClient then return end
         if now < nextTurnAt then return end
         for _=1,#colonies do
             state.colonyCursor = (state.colonyCursor % #colonies) + 1
@@ -1213,7 +1213,16 @@ function M.new(config, store, io, matcher)
     end
 
     function self.canUpdate()
-        return not self.busy() and not state.quarantine
+        if state.pendingTransfer or state.quarantine then return false,"Held PRS fault requires recovery before updating" end
+        if self.busy() then return false,"Waiting for reserved colony turns to finish" end
+        return true
+    end
+
+    function self.holdNewTurns(enabled) self.updateWaiting=enabled==true end
+
+    function self.canWaitForUpdate()
+        local pending=state.pendingTransfer
+        return not state.quarantine and (not pending or (not pending.uncertain and not pending.intent))
     end
 
     function self.snapshot()
