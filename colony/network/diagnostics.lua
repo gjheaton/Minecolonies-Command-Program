@@ -59,6 +59,7 @@ function M.printHeldMaster(config,io,store,inspectTarget)
             print("Slot "..slot.." x"..items[slot].count.." CC NBT: "..nbtLabel(items[slot].nbt))
         end
     end
+    if pending.kind=="export" then print("Export selector: "..tostring(pending.selectionMode or "not recorded")) end
     print("Original bridge error: "..tostring(pending.callError or "none recorded"))
     if inspectTarget~=false and config.role=="master" and pending.kind=="export" and pending.reported==0 then
         local report,targetError

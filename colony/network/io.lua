@@ -135,7 +135,7 @@ function M.new(config,store,matcher)
         end
         return baseline
     end
-    function self.exportEvidence(baseline,items,source,reported)
+    function self.exportEvidence(baseline,items,source,reported,selectionMode)
         if not whole(reported,1) then return nil,"A known positive bridge result is required to bind physical item data" end
         if type(source)~="table" or type(source.name)~="string" or source.name=="" then return nil,"Export item identity is unavailable" end
         if type(baseline)~="table" or baseline.version~=1 or type(baseline.totals)~="table" then
@@ -164,6 +164,9 @@ function M.new(config,store,matcher)
             end
         end
         if not gained then return nil,"No physical item increase agrees with the bridge result" end
+        if selectionMode=="plain-name" and matcher.canonicalNBT(gained.nbt)~="" then
+            return nil,"Plain-item export produced tagged physical inventory; transfer remains held"
+        end
         return gained,reported
     end
     function self.capacity(name,items,item,reserveSlots)
@@ -321,13 +324,38 @@ function M.new(config,store,matcher)
         end
         return filter
     end
-    function self.exportPRS(candidate,variant,count,chest,route)
-        local filter,err=matcher.exportFilterForVariant(candidate,variant,count)
+    function self.exportSelection(candidate,variant,items)
+        local filter,err=matcher.exportFilterForVariant(candidate,variant,1)
         if not filter then return nil,err end
         if type(variant)~="table" or type(variant.fingerprint)~="string" or variant.fingerprint=="" or #variant.fingerprint>256 then
             return nil,"The selected export variant needs an exact AP fingerprint"
         end
-        filter={fingerprint=variant.fingerprint}
+        -- AP 0.7.48r fingerprint predicates mutate actual RS cache tags.
+        -- Candidate.variants omits tagged alternatives; only the complete
+        -- stock snapshot can prove one plain same-name fingerprint.
+        local plain=type(items)=="table" and not candidate.toolClass and not candidate.hasNBT
+            and candidate.name==variant.name and matcher.canonicalNBT(candidate.nbt)==""
+            and matcher.canonicalNBT(variant.nbt)==""
+        local found=false
+        if plain then
+            for _,entry in pairs(items) do
+                if type(entry)~="table" or type(entry.name)~="string" or not whole(entry.amount,0) then
+                    plain=false;break
+                end
+                if entry.name==variant.name and entry.amount>0 then
+                    if matcher.canonicalNBT(entry.nbt)~="" or entry.fingerprint~=variant.fingerprint then
+                        plain=false;break
+                    end
+                    found=true
+                end
+            end
+        end
+        if plain and found then return {name=variant.name},"plain-name" end
+        return {fingerprint=variant.fingerprint},"fingerprint"
+    end
+    function self.exportPRS(candidate,variant,count,chest,route,items)
+        local filter,err=self.exportSelection(candidate,variant,items)
+        if not filter then return nil,err end
         return move("master",true,filter,count,chest,route)
     end
     function self.importPRS(item,count,chest,route)

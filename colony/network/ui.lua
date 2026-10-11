@@ -708,7 +708,7 @@ function M.new(config, store, engine, io, updater, options)
                 shown={item=true,reported=true,beforeChest=true,actualDelta=true}
             end
             if type(e.context)=="table" then
-                for _,key in ipairs({"displayName","item","expected","colonyLabel","colonyId","chest","requestId","shipmentId","reason","callError","observed","reported","actual","actualDelta","beforeChest","afterChest"}) do
+                for _,key in ipairs({"displayName","item","expected","colonyLabel","colonyId","chest","requestId","shipmentId","reason","callError","selectionMode","observed","reported","actual","actualDelta","beforeChest","afterChest"}) do
                     if e.context[key]~=nil and not shown[key] then
                         local value=e.context[key]
                         if key=="item" and type(value)=="table" then value=value.name or "UNKNOWN" end

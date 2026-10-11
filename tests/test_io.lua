@@ -643,4 +643,36 @@ Test.case("zero-target inspection reads connection status from its configured PR
         Test.equal(m.rs.items[w.identity(source)].amount,8);Test.equal(next(w.channels["target-delivery"].slots),nil)
     end
 end)
+Test.case("ordinary exports use names only with full plain stock proof while tagged alternatives tools and incomplete evidence retain fingerprints",function()
+    for _,mode in ipairs({"plain","empty-tag","tagged-sibling","other-fingerprint","tagged-selected","tool","explicit-nbt","missing-stock","empty-stock","malformed-stock"}) do
+        local w,m,route,source,candidate=targetFixture()
+        local items={S.copy(source)}
+        if mode=="empty-tag" then source.nbt={};items[1].nbt={} end
+        if mode=="tagged-sibling" then items[2]={name=source.name,nbt={display={Name="special"}},amount=1,fingerprint="tagged-fp"} end
+        if mode=="other-fingerprint" then items[2]={name=source.name,amount=1,fingerprint="other-plain-fp"} end
+        if mode=="tagged-selected" then source.nbt={display={Name="special"}};items[1]=S.copy(source) end
+        if mode=="tool" then candidate.toolClass="shears" end
+        if mode=="explicit-nbt" then candidate.hasNBT=true;candidate.nbt={display={Name="special"}} end
+        if mode=="missing-stock" then items=nil end
+        if mode=="empty-stock" then items={} end
+        if mode=="malformed-stock" then items[2]={name="minecraft:dirt",amount="unknown"} end
+        local filter,kind=m.io.exportSelection(candidate,source,items)
+        assert(filter,kind)
+        if mode=="plain" or mode=="empty-tag" then
+            Test.equal(kind,"plain-name");Test.equal(filter.name,source.name);Test.equal(filter.fingerprint,nil)
+        else Test.equal(kind,"fingerprint");Test.equal(filter.fingerprint,source.fingerprint);Test.equal(filter.name,nil) end
+        Test.equal(filter.nbt,nil);Test.equal(#w.calls,0,"selector planning accessed hardware")
+    end
+end)
+
+Test.case("plain-name physical verification rejects a tagged same-name gain while preserving exact-selector evidence behavior",function()
+    local w,m=targetFixture();local item={name="minecraft:kelp",fingerprint="original-AP-selector"}
+    local baseline=assert(m.io.exportBaseline({}))
+    local tagged={[1]={name=item.name,count=1,nbt="opaque-tagged-variant"}}
+    local physical,err=m.io.exportEvidence(baseline,tagged,item,1,"plain-name")
+    Test.equal(physical,nil);assert(err:find("tagged",1,true))
+    assert(m.io.exportEvidence(baseline,tagged,item,1,"fingerprint"))
+    local plain=assert(m.io.exportEvidence(baseline,{[1]={name=item.name,count=1}},item,1,"plain-name"))
+    Test.equal(plain.name,item.name);Test.equal(plain.nbt,nil)
+end)
 return true

@@ -828,4 +828,70 @@ Test.case("omitting a present overflow selector retains its binding and a later 
     local identity=m.matcher.itemIdentity(physical)
     Test.equal(m.store.data.master.colonies["2"].returnSelectors[identity].fingerprint,w.fingerprint(source))
 end)
+Test.case("ordinary kelp avoids AP fingerprint cache mutation and journals its selector before verified delivery",function()
+    local w,m=fixture(1);local kelp={name="minecraft:kelp"};local source=m.rs.add(kelp,64)
+    local c=w.computers[2];c.integrator.requests={S.request("R2",kelp.name,53)}
+    local api=w.devices[1].prs.api;local original=api.exportItemToPeripheral;local poisoned=false
+    api.exportItemToPeripheral=function(filter,chest)
+        local pending=m.store.data.master.pendingTransfer
+        assert(pending and pending.intent and pending.physicalBefore,"bridge call lacked durable baseline")
+        Test.equal(pending.item.fingerprint,source.fingerprint)
+        if filter.fingerprint then poisoned=true;return 0 end
+        Test.equal(filter.name,kelp.name);Test.equal(pending.selectionMode,"plain-name")
+        assert(not poisoned,"fingerprint selection poisoned the real plain-item cache before export")
+        return original(filter,chest)
+    end
+    w.untilTrue(function() local entry=c.rs.items[w.identity(kelp)];return entry and entry.amount==53 end)
+    Test.equal(poisoned,false);assert(not m.store.data.master.quarantine)
+    local record=m.store.data.master.colonies["2"].requests.R2
+    Test.equal(record.status,"in progress","delivery prematurely completed the MineColonies request")
+    for _=1,20 do w.step() end
+    Test.equal(c.rs.items[w.identity(kelp)].amount,53,"outstanding request duplicated the verified shipment")
+    c.integrator.requests={}
+    w.untilTrue(function() return record.status=="delivered" end)
+end)
+
+Test.case("unexpected tagged item during a plain-name export is held across reboot without shipment credit or automatic retry",function()
+    local w,m=fixture(1);local kelp={name="minecraft:kelp"};m.rs.add(kelp,8)
+    w.computers[2].integrator.requests={S.request("R2",kelp.name,1)}
+    local calls=0
+    w.devices[1].prs.api.exportItemToPeripheral=function(filter,chest)
+        calls=calls+1;Test.equal(filter.name,kelp.name);Test.equal(filter.fingerprint,nil)
+        w.insert(w.channels.D2,{name=kelp.name,nbt="unexpected-tagged-variant"},1)
+        return 1
+    end
+    w.untilTrue(function() return m.store.data.master.quarantine~=nil end)
+    local state=m.store.data.master;Test.equal(state.pendingTransfer.selectionMode,"plain-name")
+    assert(state.pendingTransfer.lastError:find("tagged",1,true))
+    Test.equal(#state.colonies["2"].shipments,0)
+    m.restart();for _=1,20 do w.step() end
+    Test.equal(calls,1);assert(m.store.data.master.quarantine)
+    Test.equal(#m.store.data.master.colonies["2"].shipments,0)
+end)
+
+Test.case("a retained legacy zero export recovers with one explicit plain-name probe preserving its original AP fingerprint and remaining quantity",function()
+    local w,m=fixture(1);local kelp={name="minecraft:kelp"};m.rs.add(kelp,8)
+    w.computers[2].integrator.requests={S.request("R2",kelp.name,4)}
+    m.rs.zeroExport=true
+    w.untilTrue(function()
+        local state=m.store.data.master;return state.quarantine and state.colonies["2"].turn==nil
+    end)
+    m.config.automationEnabled=false
+    local pending=m.store.data.master.pendingTransfer
+    pending.selectionMode=nil -- A deployed 4.0.4 zero-export intent has no selector marker.
+    local fingerprint=pending.item.fingerprint
+    m.store.save();m.rs.zeroExport=false
+    assert(w.at(1,m.engine.reconcile))
+    local probe=m.store.data.master.pendingTransfer
+    assert(probe.recoveryProbe);Test.equal(probe.count,1);Test.equal(probe.selectionMode,"plain-name")
+    Test.equal(probe.item.fingerprint,fingerprint)
+    Test.equal(w.callsFor("export",true)[2].filter.count,1)
+    Test.equal(w.callsFor("export",true)[2].filter.name,kelp.name)
+    assert(w.at(1,m.engine.verifyHeldTransfer))
+    local cs=m.store.data.master.colonies["2"]
+    Test.equal(cs.shipments[1].count,1);Test.equal(cs.shipments[1].item.fingerprint,fingerprint)
+    m.config.automationEnabled=true
+    w.untilTrue(function() local entry=w.computers[2].rs.items[w.identity(kelp)];return entry and entry.amount==4 end)
+    Test.equal(m.rs.items[w.identity(kelp)].amount,4)
+end)
 return true

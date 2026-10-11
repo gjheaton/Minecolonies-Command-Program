@@ -645,8 +645,47 @@ not prove that the held item can be inserted or that a nonzero export will work.
 An item-selection, insertion, or cached-NBT/fingerprint issue remains a possible
 cause to investigate after the target check. Unknown results and held imports
 are inspected without this export target check. Retain the original hold while
-investigating; do not repeatedly retry, clear the journal, change to a name-only
-item filter, or move delivery items to make a check pass.
+investigating; do not repeatedly retry, clear the journal, manually substitute an
+unguarded name-only item filter, or move delivery items to make a check pass.
+
+#### Ordinary-item selection on AP 0.7.48r
+
+Release 4.0.5 addresses an AP fingerprint lookup that calls `getOrCreateTag`
+on actual Refined Storage cache stacks. A plain stack's null tag can become
+an empty compound before extraction; an NBT-sensitive disk comparison can then
+return zero. An accepted target handler alone does not establish this cause
+for a particular failed transfer, because it does not test insertion or extraction.
+
+The master uses `{name = <item ID>, count = <quantity>}` only when the request
+is an ordinary non-NBT item and the full stock snapshot shows positive stock
+of that name with one original fingerprint and no tagged alternatives. Candidate
+variants alone cannot establish this because they exclude rejected tagged items.
+Missing or ambiguous evidence, equipment, and tagged requests retain fingerprint
+selection. The chosen selector mode is journaled before the bridge call. The
+original AP fingerprint and full physical chest baseline remain recorded.
+
+Physical verification of a `plain-name` export requires a single plain same-name
+increase matching the reported count, with no other chest changes. Tagged output
+remains quarantined and receives no shipment credit. Updating does not clear an
+existing hold or automatically repeat a failed export.
+
+For an existing zero-export hold, leave master automation paused and delivery
+items untouched. Install 4.0.5 with `install_colony --repair`, then `reboot`.
+Keep the colony client running so it can acknowledge any outstanding result.
+Stop the master program and startup launcher and run:
+
+```lua
+colony_master --reconcile
+```
+
+This existing command checks the original physical baseline and fresh stock
+identity, obtains the colony's channel confirmation, and may perform **one
+journaled recovery item**. It is not a read-only diagnostic. The probe must be
+physically verified before the hold is released; its quantity is credited to the
+original request, leaving only the remaining quantity to supply. A changed chest,
+changed fingerprint, or unacknowledged turn blocks the probe. Existing cached
+metadata or insertion problems can still produce zero; if it remains blocked,
+inspect with `colony_master --transferdiag` rather than repeatedly retrying.
 
 ### Tools held after an identity mismatch
 
@@ -803,7 +842,7 @@ install_colony --update supply
 ```
 
 Run the appropriate command on each role; do not update two processes concurrently
-on one computer. Update the master and every colony supply computer to 4.0.4 before
+on one computer. Update the master and every colony supply computer to 4.0.5 before
 resuming automation, and update both roles together for protocol-changing releases.
 An older v3 installation must use the first clean v4 installation instead of an
 in-place update.
@@ -848,7 +887,7 @@ hardware wizard; do not use `CLEAN` to obtain an update or repair.
 
 Versions follow **MAJOR.MINOR.PATCH**. The first number changes for incompatible
 behavior or migrations, the second for compatible new features, and the third
-for fixes and maintenance. This release is **4.0.4**; later fixes increase the
+for fixes and maintenance. This release is **4.0.5**; later fixes increase the
 third number. A minor release resets the patch number (`4.1.0`), and a major
 release resets both later numbers (`5.0.0`). The update control compares all three
 numbers and offers installation when the published version is greater.

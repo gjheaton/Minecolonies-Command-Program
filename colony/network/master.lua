@@ -448,7 +448,7 @@ function M.new(config, store, io, matcher)
                 return nil, "Physical export verification is unavailable"
             end
             if type(pending.reported) == "number" and pending.reported > 0 then
-                local physical, delta = io.exportEvidence(pending.physicalBefore, items, pending.item, pending.reported)
+                local physical, delta = io.exportEvidence(pending.physicalBefore, items, pending.item, pending.reported,pending.selectionMode)
                 if not physical then return nil, tostring(delta) end
                 return delta, nil, physical
             end
@@ -458,7 +458,7 @@ function M.new(config, store, io, matcher)
             local current, baselineError = io.exportBaseline(items)
             if not current then return nil, tostring(baselineError) end
             if equal(current, pending.physicalBefore) then return 0, nil end
-            local physical, delta = io.exportEvidence(pending.physicalBefore, items, pending.item, pending.count)
+            local physical, delta = io.exportEvidence(pending.physicalBefore, items, pending.item, pending.count,pending.selectionMode)
             if not physical then return nil, tostring(delta) end
             if physical.name ~= pending.item.name
                 or matcher.canonicalNBT(physical.nbt) ~= matcher.canonicalNBT(pending.item.nbt) then
@@ -548,7 +548,7 @@ function M.new(config, store, io, matcher)
             colonyLabel=transferColonyLabel(pending), chest=pending.chest,
             requestId=pending.requestId, item=pending.item.name, displayName=pending.item.displayName,
             expected=pending.count,
-            reported=pending.reported, actual=delta, error=err, callError=pending.callError})
+            reported=pending.reported, actual=delta, error=err, callError=pending.callError,selectionMode=pending.selectionMode})
         local cs = state.colonies[tostring(pending.colonyId)]
         local record = cs and cs.requests[pending.requestId]
         if record then record.status, record.detail, record.errorCode = "error", reason, "PRS_QUARANTINE" end
@@ -556,9 +556,10 @@ function M.new(config, store, io, matcher)
         return false
     end
 
-    local function beginTransfer(kind, colony, cs, item, candidate, variant, count, before, record, recovery, chestSnapshot)
+    local function beginTransfer(kind, colony, cs, item, candidate, variant, count, before, record, recovery, chestSnapshot,stockSnapshot)
         local p = cs.turn.policy
         local physicalBefore
+        local selectionMode
         if kind == "export" then
             local err
             if not validFingerprint(item.fingerprint) then
@@ -578,11 +579,22 @@ function M.new(config, store, io, matcher)
                 return false
             end
         end
+        if kind=="export" and type(io.exportSelection)=="function" then
+            local filter
+            filter,selectionMode=io.exportSelection(candidate,variant,stockSnapshot)
+            if not filter then
+                if record then record.status,record.detail="error",tostring(selectionMode) end
+                errorEvent("UNSAFE_VARIANT",tostring(selectionMode),{colonyId=colony.id,requestId=record and record.id})
+                save()
+                return false
+            end
+        end
         state.pendingTransfer = {kind=kind, colonyId=colony.id,
             requestId=record and record.id or nil, generation=record and record.generation or nil,
             chest=kind == "export" and colony.deliveryChest or colony.returnChest,
             item=copy(item), candidate=candidate and copy(candidate) or nil,
             variant=variant and copy(variant) or nil, count=count, before=before, physicalBefore=physicalBefore,
+            selectionMode=selectionMode,
             session=cs.turn.session, turn=cs.turn.id, startedAt=io.now(),
             verifySeconds=p.transferVerifyTimeoutSeconds, pollSeconds=p.transferPollSeconds,
             nextReadAt=io.now() + p.transferSettleSeconds, intent=true,
@@ -592,7 +604,7 @@ function M.new(config, store, io, matcher)
         save()
         local moved, err
         if kind == "export" then
-            moved, err = io.exportPRS(candidate, variant, count, colony.deliveryChest, colony)
+            moved, err = io.exportPRS(candidate, variant, count, colony.deliveryChest, colony,stockSnapshot)
         else
             moved, err = io.importPRS(item, count, colony.returnChest, colony)
         end
@@ -703,7 +715,7 @@ function M.new(config, store, io, matcher)
             end
             record.selectedItem = copy(item)
             beginTransfer("export", colony, cs, item, candidate, variant, count,
-                integer(io.count(chest, item)), record, false, chest)
+                integer(io.count(chest, item)), record, false, chest,items)
             return
         end
 
@@ -1125,6 +1137,7 @@ function M.new(config, store, io, matcher)
             local candidate
             local variant
             local exportChest
+            local exportStock
             if pending.kind == "export" then
                 local items = stock()
                 if not items then cs.turn=nil; save(); return false, "PRS stock remains unreadable" end
@@ -1163,6 +1176,7 @@ function M.new(config, store, io, matcher)
                     cs.turn=nil; save(); return false, "Original delivery chest changed during recovery checks; transfer remains held"
                 end
                 exportChest = chest
+                exportStock = items
             else
                 local chest, err = io.snapshot(pending.chest)
                 if not chest or integer(io.count(chest, pending.item)) < 1 then
@@ -1171,7 +1185,7 @@ function M.new(config, store, io, matcher)
             end
             local item = copy(pending.item)
             state.lastRecoveryProbeAt = io.now()
-            if not beginTransfer(pending.kind, colony, cs, item, candidate, variant, 1, pending.before, record, true, exportChest) then
+            if not beginTransfer(pending.kind, colony, cs, item, candidate, variant, 1, pending.before, record, true, exportChest,exportStock) then
                 cs.turn=nil; save(); return false, "Recovery transfer could not establish its physical baseline"
             end
             store.event("PRS_PROBE", "Explicit guarded recovery transfer started", {colonyId=colony.id, item=item.name, direction=pending.kind})
