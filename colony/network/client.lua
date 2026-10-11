@@ -826,6 +826,7 @@ function M.new(config, store, io, matcher)
             -- existing handshake first, including across master restarts.
             return false
         end
+        if self.updateWaiting then return false end
         if data.session ~= session then
             if data.session then data.retiredSessions[tostring(data.session)] = true end
             data.session, data.seenTurns = session, {}
@@ -910,6 +911,17 @@ function M.new(config, store, io, matcher)
 
     function self.busy()
         return data.intent ~= nil or (data.turn ~= nil and data.turn.phase ~= "finished")
+    end
+
+    -- Volatile admission control only: retain the active reservation and
+    -- receipts, and continue processing its duplicate grants and result.
+    function self.holdNewTurns(enabled)
+        self.updateWaiting=enabled==true
+    end
+
+    function self.canWaitForUpdate()
+        return data.intent==nil and persistenceError==nil
+            and data.turn~=nil and data.turn.phase~="finished"
     end
 
     function self.canUpdate()

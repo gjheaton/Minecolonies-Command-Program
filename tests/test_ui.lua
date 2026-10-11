@@ -169,7 +169,7 @@ Test.case("UI queues read-only update checks during active work and keeps instal
     f.updater.lastCheckedText="12:34:56";f.ui.draw()
     assert(f.ui.notice:find("UPDATE AVAILABLE",1,true) and not f.ui.notice:find("queued",1,true))
     f.touch(75,3);Test.equal(f.updater.installs,0,"active turn allowed installation")
-    assert(f.ui.notice:find("safely closed",1,true))
+    assert(f.ui.notice:find("press UPDATE again",1,true))
     f.state.busy=false;f.ui.draw();f.touch(75,3);Test.equal(f.updater.installs,1)
     f.updater.installing=true;f.ui.draw();assert(f.monitor.dump():find("UPDATING...",1,true))
     f.touch(75,3);Test.equal(f.updater.installs,1,"running installation was duplicated")

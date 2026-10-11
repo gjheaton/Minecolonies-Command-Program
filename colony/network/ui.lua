@@ -375,6 +375,7 @@ function M.new(config, store, engine, io, updater, options)
         local checking=self.checkingUpdate or updater.checking
         local status
         if updater.installing then status="INSTALLING..."
+        elseif updater.installQueued then status="UPDATE QUEUED: finishing current turn"
         elseif checking then status="CHECKING..."
         elseif updater.checkQueued or self.updateCheckPending then status="CHECK QUEUED"
         elseif type(updater.statusText)=="function" then
@@ -402,6 +403,10 @@ function M.new(config, store, engine, io, updater, options)
     end
 
     local function finishUpdateNotice()
+        if self.updateInstallPending and updater and not updater.installQueued and not updater.installing then
+            self.updateInstallPending=nil
+            self.notice=updater.installResult or "Update request finished; see SETTINGS."
+        end
         local pending=self.updateCheckPending
         if not pending or not updater then return end
         if updater.checkQueued or updater.checking then pending.sawWorking=true;return end
@@ -426,9 +431,9 @@ function M.new(config, store, engine, io, updater, options)
 
     local function update()
         if options.readOnly then return end
-        if not updater or self.checkingUpdate or updater.checkQueued or updater.checking or updater.installing or self.updateCheckPending then return end
+        if not updater or self.checkingUpdate or updater.checkQueued or updater.checking or updater.installing or updater.installQueued or self.updateCheckPending then return end
         local installing=updater.availableVersion~=nil
-        if installing and isBusy() then self.notice="Update installation waits until the active turn is safely closed."; draw(); return end
+        if installing and isBusy() and not updater.canQueueInstall then self.notice="Pause master automation, finish the active turn, then press UPDATE again."; draw(); return end
         local method = installing and updater.install or updater.check
         if type(method) ~= "function" then return end
         local pending={checked=updater.lastCheckedText,suite=updater.remoteSuiteVersion,version=updater.remoteVersion,error=updater.checkError}
@@ -439,6 +444,9 @@ function M.new(config, store, engine, io, updater, options)
         if not ok or result == false then
             self.notice = "Update: " .. tostring(reason or result)
             logError("UPDATE", self.notice)
+        elseif installing and updater.installQueued then
+            self.updateInstallPending=true
+            self.notice="Update queued; finishing current turn before installation."
         elseif not installing then
             pending.notice="Update check queued; result appears in SETTINGS."
             pending.sawWorking=updater.checkQueued==true or updater.checking==true
@@ -453,6 +461,7 @@ function M.new(config, store, engine, io, updater, options)
         local label = "CHECK UPDATE"
         if options.readOnly then label="READ ONLY"
         elseif updater and updater.installing then label="UPDATING..."
+        elseif updater and updater.installQueued then label="UPDATE QUEUED"
         elseif self.checkingUpdate or (updater and updater.checking) then label="CHECKING..."
         elseif updater and (updater.checkQueued or self.updateCheckPending) then label="CHECK QUEUED"
         elseif updater and updater.availableVersion then

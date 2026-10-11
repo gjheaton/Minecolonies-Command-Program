@@ -1,16 +1,16 @@
 -- MineColonies Control Suite local manifest
--- Suite version: 4.0.5
+-- Suite version: 4.0.6
 return {
-    suiteVersion = "4.0.5",
+    suiteVersion = "4.0.6",
     installationSchema = 4,
     repositoryLayout = "cc-mirror",
     components = {
-        startup = "1.1.0", installer = "4.0.5", util = "1.1.0", ui = "1.1.0",
-        version = "1.0.0", updater = "1.2.0", network = "4.0.5",
+        startup = "1.1.0", installer = "4.0.6", util = "1.1.0", ui = "1.1.0",
+        version = "1.0.0", updater = "1.2.0", network = "4.0.6",
     },
     apps = {
-        master = { version = "4.0.5", program = "/colony_master.lua" },
-        supply = { version = "4.0.5", program = "/colony_supply.lua" },
+        master = { version = "4.0.6", program = "/colony_master.lua" },
+        supply = { version = "4.0.6", program = "/colony_supply.lua" },
         command = { version = "3.0.7", program = "/colony_command.lua" },
     },
     files = {

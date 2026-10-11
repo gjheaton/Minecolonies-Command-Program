@@ -277,7 +277,16 @@ function M.run(role,...)
         if queued then actualUpdater.checkQueued=true end
         return queued,reason or "Update check queued"
     end
-    function updater.install() return queueAction("update") end
+    updater.canQueueInstall=role=="supply"
+    function updater.install()
+        local queued,reason=queueAction("update")
+        if queued and role=="supply" then
+            actualUpdater.installQueued=true
+            actualUpdater.installResult=nil
+            if engine.holdNewTurns then engine.holdNewTurns(true) end
+        end
+        return queued,reason or "Update queued; finishing the current turn"
+    end
     local telemetry=Telemetry.new(config,store,io,engine)
     local ui=Displays.new(config,store,engine,io,updater,telemetry)
     local nextCheck=io.now()
@@ -314,11 +323,25 @@ function M.run(role,...)
                     elseif pending=="update" then
                         local allowed,reason=engine.canUpdate()
                         if allowed and not store.data.chestTest then
+                            actualUpdater.installQueued=false
                             actualUpdater.installing=true
                             local updated,result=pcall(actualUpdater.install)
                             actualUpdater.installing=false
+                            if engine.holdNewTurns then engine.holdNewTurns(false) end
+                            actualUpdater.installResult=updated and result~=false and "Update installation finished"
+                                or "Update failed: "..(updated and "Installer did not commit an update" or tostring(result))
                             if not updated or result==false then store.error("UPDATE_FAILED",updated and "Installer did not commit an update; previous suite retained" or tostring(result)) end
-                        else store.event("WARNING",reason or "Finish the current turn before updating") end
+                        elseif role=="supply" and engine.busy() and not processorFault and not store.data.chestTest
+                            and (not engine.canWaitForUpdate or engine.canWaitForUpdate()) then
+                            -- Results and batch retries continue; new grants
+                            -- are refused until installation or a safe failure.
+                            action="update"
+                        else
+                            actualUpdater.installQueued=false
+                            actualUpdater.installResult="Update blocked: "..tostring(reason or "Finish the current turn before updating")
+                            if engine.holdNewTurns then engine.holdNewTurns(false) end
+                            store.event("WARNING",reason or "Finish the current turn before updating")
+                        end
                     end
                 end
                 if not processorFault and not store.data.chestTest then engine.tick() end

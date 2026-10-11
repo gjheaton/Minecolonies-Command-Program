@@ -842,7 +842,7 @@ install_colony --update supply
 ```
 
 Run the appropriate command on each role; do not update two processes concurrently
-on one computer. Update the master and every colony supply computer to 4.0.5 before
+on one computer. Update the master and every colony supply computer to 4.0.6 before
 resuming automation, and update both roles together for protocol-changing releases.
 An older v3 installation must use the first clean v4 installation instead of an
 in-place update.
@@ -887,7 +887,7 @@ hardware wizard; do not use `CLEAN` to obtain an update or repair.
 
 Versions follow **MAJOR.MINOR.PATCH**. The first number changes for incompatible
 behavior or migrations, the second for compatible new features, and the third
-for fixes and maintenance. This release is **4.0.5**; later fixes increase the
+for fixes and maintenance. This release is **4.0.6**; later fixes increase the
 third number. A minor release resets the patch number (`4.1.0`), and a major
 release resets both later numbers (`5.0.0`). The update control compares all three
 numbers and offers installation when the published version is greater.
@@ -921,3 +921,23 @@ live RS asynchronous behavior, chunk loading, or MineColonies courier behavior.
 Initial in-game testing should use small noncritical requests with overflow and
 autocrafting disabled, then enable crafting and add the second colony after the
 chest round trip and request acknowledgment have passed.
+
+### Colony updates during active automation
+
+Release 4.0.6 makes the colony UPDATE button queue installation during an active
+turn. The client continues its existing batch/result/receipt handshake and
+refuses fresh grants while the update is queued. Once that reservation closes,
+the runtime rechecks installation safety and runs the installer. No shipment or
+transfer journal is discarded. Queued state is visible in the header and SETTINGS.
+
+Installation failure releases the admission hold and displays the failure. A
+transfer intent needing reconciliation cancels the queued update so recovery
+controls remain available. The master still keeps held-transfer installation
+guards and must finish its reserved turns before using UPDATE.
+
+Older colony versions only display a waiting notice; they do not queue an update.
+To obtain 4.0.6 through those buttons, pause Run supply automation on the master,
+let reserved turns finish, then press UPDATE again on each colony. Alternatively,
+stop the program and startup launcher and use `install_colony --repair`, followed
+by `reboot`. Resume master automation after the updates finish. Future colony
+updates can be queued while ordinary turns are active.

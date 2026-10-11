@@ -34,14 +34,21 @@ local function run(role,options,scenario)
     local saved={engine=Engine.new,displays=Displays.new,telemetry=Telemetry.new,updater=Updater.new,open=Protocol.open,
         parallel=parallel,sleep=sleep,pull=os.pullEvent,print=print}
     local f={w=w,c=c,surface=surface,checks=0,installs=0,ticks=0,messages=0,reconciles=0,updateGuards=0,
-        outcome="current",terminal={}}
+        outcome="current",terminal={},held=held}
     Engine.new=function(_,runtimeStore)
         f.store=runtimeStore
+        f.busy=true
         f.engine={snapshot=function() return {role=role,health={ok=true,detail="Connected"},requests={},colonies={}} end,
-            busy=function() return true end,
-            canUpdate=function() f.updateGuards=f.updateGuards+1;return false,"Held transfer prevents installation" end,
+            busy=function() return f.busy end,
+            canUpdate=function() f.updateGuards=f.updateGuards+1;return options.updatable and not f.busy,"Held transfer prevents installation" end,
+            holdNewTurns=function(enabled) f.holding=enabled end,
+            canWaitForUpdate=function() return not options.blockWait end,
             tick=function() f.ticks=f.ticks+1;if options.stopped then error("Stopped held processor",0) end end,
-            onMessage=function() f.messages=f.messages+1 end,
+            onMessage=function(_,message)
+                f.messages=f.messages+1
+                if options.updatable and message.kind=="result" then f.busy=false end
+                if options.updatable and message.kind=="turn" and not f.holding then f.busy=true end
+            end,
             reconcile=function() f.reconciles=f.reconciles+1;return false,"Original receipt stays held" end}
         return f.engine
     end
@@ -60,7 +67,14 @@ local function run(role,options,scenario)
             if f.outcome=="available" then self.remoteVersion="4.0.3";self.availableVersion=self.remoteVersion end
             return self.availableVersion~=nil
         end
-        self.install=function() f.installs=f.installs+1;return true end
+        self.install=function()
+            f.installs=f.installs+1
+            if options.updatable then assert(not f.busy and f.holding,"installation did not safely close and hold turns") end
+            if f.installOutcome=="throw" then error("Injected installation failure",0) end
+            if f.installOutcome=="false" then return false end
+            if f.installOutcome=="yield" then coroutine.yield("install wait") end
+            return true
+        end
         f.actual=self;return self
     end
     Telemetry.new=function() return {tick=function() end,onMessage=function() return false end,get=function() return nil end} end
@@ -174,10 +188,59 @@ Test.case("an available update remains visible while busy but UI and runtime sti
         f.boot();f.outcome="available";f.click("CHECK UPDATE");f.step()
         Test.equal(f.actual.availableVersion,"4.0.3")
         assert(f.settings():find("4.0.3",1,true));f.click("UPDATE v4.0.3")
-        Test.equal(f.installs,0);assert(f.ui.notice and f.ui.notice:find("safely",1,true))
+        Test.equal(f.installs,0);assert(f.ui.notice and f.ui.notice:find("press UPDATE again",1,true))
         assert(f.proxy.install());f.step();Test.equal(f.installs,0);Test.equal(f.updateGuards,1)
         local warning=f.store.data.history[#f.store.data.history]
         Test.equal(warning.kind,"WARNING");assert(warning.message:find("Held transfer",1,true));f.unchanged()
+    end)
+end)
+Test.case("colony UPDATE queues through an active turn then installs once despite a following grant in the same receiver inbox",function()
+    run("supply",{updatable=true},function(f)
+        f.boot();f.outcome="available";f.click("CHECK UPDATE");f.step();f.click("UPDATE v4.0.3")
+        assert(f.holding and f.actual.installQueued);assert(f.surface.dump():find("UPDATE QUEUED",1,true))
+        f.step();f.step();Test.equal(f.installs,0)
+        assert(f.engine.requestReconcile()==false,"waiting update lost its queue reservation")
+        f.event("rednet_message",1,{kind="result",version=1},require("colony.network.protocol").NAME)
+        f.event("rednet_message",1,{kind="turn",version=1},require("colony.network.protocol").NAME)
+        f.step();Test.equal(f.installs,1);Test.equal(f.busy,false)
+        assert(not f.holding and not f.actual.installQueued)
+        f.step();Test.equal(f.installs,1,"queued update installed twice")
+        Test.equal(payload(f.store.data),f.held) -- Existing transfer evidence is untouched by scheduling.
+    end)
+end)
+
+Test.case("queued colony installation keeps turns held during HTTP work and releases admission after failure",function()
+    for _,outcome in ipairs({"false","throw","yield"}) do
+        run("supply",{updatable=true},function(f)
+            f.boot();f.outcome="available";f.click("CHECK UPDATE");f.step();f.click("UPDATE v4.0.3")
+            f.installOutcome=outcome
+            f.event("rednet_message",1,{kind="result",version=1},require("colony.network.protocol").NAME)
+            if outcome=="yield" then
+                f.step("install wait");assert(f.holding and f.actual.installing)
+                local messages=f.messages
+                f.event("rednet_message",1,{kind="turn",version=1},require("colony.network.protocol").NAME)
+                Test.equal(f.messages,messages,"receiver ran a grant during installation")
+                f.step()
+            else f.step() end
+            Test.equal(f.installs,1);assert(not f.holding and not f.actual.installQueued and not f.actual.installing)
+            if outcome~="yield" then
+                Test.equal(f.store.data.errors[#f.store.data.errors].code,"UPDATE_FAILED")
+                assert(f.ui.notice:find("Update failed",1,true),"failed installation kept the queued notice")
+                f.event("rednet_message",1,{kind="turn",version=1},require("colony.network.protocol").NAME)
+            end
+            f.step();Test.equal(f.busy,true,"failed/returned installation left turn admission frozen")
+            Test.equal(f.installs,1)
+        end)
+    end
+end)
+Test.case("an ambiguous transfer cancels the waiting colony update and frees recovery actions without installing or changing its evidence",function()
+    run("supply",{blockWait=true},function(f)
+        f.boot();f.outcome="available";f.click("CHECK UPDATE");f.step();f.click("UPDATE v4.0.3")
+        assert(f.actual.installQueued and f.holding)
+        f.step();assert(not f.actual.installQueued and not f.holding);Test.equal(f.installs,0)
+        assert(f.ui.notice:find("Update blocked",1,true),"blocked installation still displayed a queued notice")
+        assert(f.engine.requestReconcile(),"blocked update prevented transfer recovery")
+        f.step();Test.equal(f.reconciles,1);Test.equal(payload(f.store.data),f.held)
     end)
 end)
 return true
