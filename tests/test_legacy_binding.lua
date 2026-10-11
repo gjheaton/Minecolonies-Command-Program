@@ -2,7 +2,6 @@ local S=require("tests.support")
 local Master=require("colony.network.master")
 local Store=require("colony.network.store")
 local Config=require("colony.network.config")
-local CC_HASH="41883520c3071f5f4a4a4613fb005e0c"
 local RICE="farmersdelight:rice"
 
 local function encoded(value)
@@ -15,8 +14,13 @@ local function fixture()
     m.config.colonies={{id=2,label="Stardust",deliveryChest="D2",returnChest="R2",deliveryChannel="D2",returnChannel="R2"}}
     w.chest(1,"D2","D2");w.chest(1,"R2","R2")
     m.rs=w.bridge(1,"prs",true)
-    local source={name=RICE,nbt={},displayName="Rice",maxCount=64};source.fingerprint=w.fingerprint(source)
-    local physical={name=RICE,nbt=CC_HASH,displayName="Rice",maxCount=64}
+    -- Empty compound tags are equivalent to untagged items. Keep this legacy
+    -- binding fixture genuinely tagged so AP's NBT table and CC's opaque hash
+    -- still require an operator to bind the original physical identity.
+    local source={name=RICE,nbt={display={Name='{"text":"Legacy Rice"}'}},displayName="Legacy Rice",maxCount=64}
+    source.fingerprint=w.fingerprint(source)
+    local CC_HASH=w.ccNBT(source.nbt)
+    local physical={name=RICE,nbt=CC_HASH,displayName=source.displayName,maxCount=64}
     local variant=m.rs.add(source,8)
     w.devices[1].prs.api.isConnected=function() return true end
     w.insert(w.channels.D2,source,1);w.insert(w.channels.D2,{name="minecraft:stone"},3)
@@ -76,7 +80,7 @@ Test.case("legacy binding previews different AP and physical identities without 
         local ok,review=recovery.previewBindExport(2);assert(ok,tostring(review))
         Test.equal(review.colonyId,2);Test.equal(review.confirmation,"BIND 2")
         Test.equal(encoded(review.sourceItem.nbt),encoded(f.source.nbt));Test.equal(review.sourceItem.fingerprint,f.source.fingerprint)
-        Test.equal(review.item.nbt,CC_HASH);Test.equal(review.currentNameCount,1)
+        Test.equal(review.item.nbt,f.physical.nbt);Test.equal(review.currentNameCount,1)
         Test.equal(review.before,0);Test.equal(review.reported,1);Test.equal(review.count,1)
         Test.equal(review.chest,"D2")
         for _,confirmation in ipairs({"","BIND 3","bind 2"," BIND 2"}) do
@@ -105,11 +109,11 @@ Test.case("legacy binding saves an operator audit before an atomic physical ship
     local event=audit.history[#audit.history];Test.equal(event.kind,"OPERATOR_BIND_EXPORT")
     Test.equal(event.context.colonyId,2);Test.equal(event.context.requestId,"R1")
     Test.equal(event.context.sourceFingerprint,f.source.fingerprint)
-    Test.equal(event.context.physicalNBT,CC_HASH);Test.equal(event.context.confirmation,"BIND 2")
+    Test.equal(event.context.physicalNBT,f.physical.nbt);Test.equal(event.context.confirmation,"BIND 2")
     assert(final.master.pendingTransfer==nil and final.master.quarantine==nil)
     Test.equal(#final.master.colonies["2"].shipments,2);Test.equal(final.master.shipmentCounter,4)
     local shipment=final.master.colonies["2"].shipments[2]
-    Test.equal(shipment.item.name,RICE);Test.equal(shipment.item.nbt,CC_HASH)
+    Test.equal(shipment.item.name,RICE);Test.equal(shipment.item.nbt,f.physical.nbt)
     Test.equal(shipment.item.fingerprint,f.source.fingerprint,"binding replaced the source RS fingerprint with the chest fingerprint")
     Test.equal(shipment.count,1);Test.equal(shipment.imported,0);Test.equal(shipment.verified,true)
     Test.equal(shipment.requestId,"R1");Test.equal(shipment.generation,1)
@@ -190,8 +194,8 @@ end
 Test.case("legacy binding resumes all PRS quarantine requests while retaining independent client and craft faults",function()
     local f=fixture();blockOtherRequests(f)
     local state=f.m.store.data.master
-    state.craftJobs.rice={state="crafting",item=S.copy(f.source),exported=5,count=10}
-    state.craftJobs.other={state="uncertain",item={name=RICE,nbt={Batch="other"}},exported=7,count=10}
+    state.craftJobs.rice={state="crafting",item=S.copy(f.source),exported=5,count=10,createdAt=90}
+    state.craftJobs.other={state="uncertain",item={name=RICE,nbt={Batch="other"}},exported=7,count=10,createdAt=90}
     f.m.store.save()
     local unrelated=S.copy({client=state.colonies["2"].requests.R3,
         craft=state.colonies["3"].requests.unrelated,connection=state.colonies["3"].error,job=state.craftJobs.other})
@@ -213,7 +217,7 @@ Test.case("legacy binding audit or clearing journal failure keeps the export hel
     for _,failedWrite in ipairs({1,2}) do
         local f=fixture()
         blockOtherRequests(f)
-        local job={state="crafting",item=S.copy(f.source),exported=5,count=10}
+        local job={state="crafting",item=S.copy(f.source),exported=5,count=10,createdAt=90}
         f.m.store.data.master.craftJobs.rice=job;f.m.store.save()
         local beforeColonies=S.copy(f.m.store.data.master.colonies)
         local originalShipments=f.m.store.data.master.colonies["2"].shipments
@@ -332,7 +336,7 @@ Test.case("transferdiag and cancelled reconcile-bind inspect the native AP and C
     local diag=f.cli("transferdiag")
     assert(diag.ok,tostring(diag.err));Test.equal(diag.prompts,0);Test.equal(diag.writes,0)
     assert(diag.text:find("AP item NBT: table:",1,true))
-    assert(diag.text:find("CC NBT: string: "..CC_HASH,1,true))
+    assert(diag.text:find("CC NBT: string: "..f.physical.nbt,1,true))
     assert(diag.text:find("AP fingerprint: "..f.source.fingerprint,1,true))
     assert(diag.text:find("Original/current AP identity count: 0 / 0",1,true))
     assert(diag.text:find("Same-name quantity: 1 (identity unverified)",1,true))
@@ -356,7 +360,7 @@ Test.case("reconcile-bind exact CLI confirmation persists the audited original p
     Test.equal(out.journals[1].history[#out.journals[1].history].kind,"OPERATOR_BIND_EXPORT")
     local saved=f.loaded();assert(saved.master.pendingTransfer==nil and saved.master.quarantine==nil)
     Test.equal(#saved.master.colonies["2"].shipments,2)
-    Test.equal(saved.master.colonies["2"].shipments[2].item.nbt,CC_HASH)
+    Test.equal(saved.master.colonies["2"].shipments[2].item.nbt,f.physical.nbt)
     Test.equal(saved.master.colonies["2"].shipments[2].item.fingerprint,f.source.fingerprint)
     for _,change in ipairs({
         function(current) current.w.take(current.w.channels.D2,current.physical,1) end,
@@ -378,7 +382,7 @@ Test.case("reconcile-bind accepts unrelated PRS stock amount changes while the o
     assert(out.text:find("OK:",1,true),"an unrelated stock quantity invalidated the held export evidence")
     local saved=f.loaded();assert(saved.master.pendingTransfer==nil and saved.master.quarantine==nil)
     Test.equal(#saved.master.colonies["2"].shipments,2)
-    Test.equal(saved.master.colonies["2"].shipments[2].item.nbt,CC_HASH)
+    Test.equal(saved.master.colonies["2"].shipments[2].item.nbt,f.physical.nbt)
     Test.equal(saved.master.colonies["2"].shipments[2].item.fingerprint,f.source.fingerprint)
     Test.equal(f.m.rs.items[f.w.identity(unrelated)].amount,7)
     Test.equal(f.w.count(f.w.channels.D2,f.physical),1)

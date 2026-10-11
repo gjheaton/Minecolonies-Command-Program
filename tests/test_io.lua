@@ -280,7 +280,7 @@ Test.case("export baselines detach from mutable snapshots and reject malformed p
 end)
 
 Test.case("inventory snapshots reject same-name same-count NBT changes between list and detail",function()
-    for _,hashes in ipairs({{SHEARS_PRISTINE,SHEARS_DAMAGED},{false,EMPTY_COMPOUND},{EMPTY_COMPOUND,false}}) do
+    for _,hashes in ipairs({{SHEARS_PRISTINE,SHEARS_DAMAGED},{false,SHEARS_PRISTINE},{SHEARS_DAMAGED,false}}) do
         local w,c=S.clientFixture();local api=w.devices[2].delivery.api
         api.list=function() return {[1]={name="minecraft:shears",count=1,nbt=hashes[1] or nil}} end
         api.getItemDetail=function() return {name="minecraft:shears",count=1,nbt=hashes[2] or nil,damage=0,maxCount=1} end
@@ -306,7 +306,7 @@ end)
 
 Test.case("unbound physical hashes and structured NBT imports stop before any PRS or colony bridge transfer",function()
     for _,role in ipairs({"master","supply"}) do
-        for _,nbt in ipairs({SHEARS_PRISTINE,EMPTY_COMPOUND,"{Damage:0}",{Damage=0}}) do
+        for _,nbt in ipairs({SHEARS_PRISTINE,"{Damage:0}",{Damage=0}}) do
             local w=S.world();local c=S.computer(w,role=="master" and 1 or 2,role)
             w.chest(c.id,"delivery","boundary-delivery");w.bridge(c.id,role=="master" and "prs" or "crs",role=="master")
             local before=textutils.serialize(w.files)
@@ -352,7 +352,7 @@ Test.case("plain imports cannot select a same-name physical NBT variant or an un
         if mode=="only-tagged" then w.insert(w.channels.D2,{name="minecraft:stone",nbt="tagged-stone"},1)
         else
             api.list=function() return {[1]={name="minecraft:stone",count=1}} end
-            api.getItemDetail=function() return {name="minecraft:stone",count=1,nbt=EMPTY_COMPOUND} end
+            api.getItemDetail=function() return {name="minecraft:stone",count=1,nbt="tagged-stone"} end
         end
         w.at(2,function()
             local moved,err=c.io.importColony({name="minecraft:stone"},1,"delivery")
@@ -384,7 +384,7 @@ Test.case("exact AP selectors survive the PRS to colony and overflow return cycl
             Test.equal(master.io.exportPRS(candidate,source,1,"output"),1)
             physical=assert(master.io.exportEvidence(before,assert(master.io.snapshot("output")),source,1))
             initialHash=w.ccNBT(variant.nbt or {})
-            Test.equal(physical.nbt,initialHash,"physical inventory reused AP compound NBT")
+            Test.equal(physical.nbt,variant.nbt and initialHash or nil,"physical inventory reused AP compound NBT")
             Test.equal(physical.fingerprint,nil,"CC invented a visible fingerprint")
             physical.fingerprint=source.fingerprint -- The master binds the successful exact export selector.
         end)
@@ -406,8 +406,18 @@ Test.case("exact AP selectors survive the PRS to colony and overflow return cycl
         Test.equal(next(returns.slots),nil)
         Test.equal(#w.callsFor("export"),2);Test.equal(#w.callsFor("import"),2)
         for _,call in ipairs(w.calls) do if call.method=="export" or call.method=="import" then
-            Test.equal(call.filter.fingerprint,source.fingerprint)
-            Test.equal(call.filter.name,nil);Test.equal(call.filter.nbt,nil);Test.equal(call.filter.fromSlot,nil)
+            if call.method=="import" then
+                assert(type(call.filter.fromSlot)=="number","exact import scanned other physical stacks")
+                if not variant.nbt then
+                    Test.equal(call.filter.name,variant.name);Test.equal(call.filter.fingerprint,nil)
+                else
+                    Test.equal(call.filter.fingerprint,source.fingerprint);Test.equal(call.filter.name,nil)
+                end
+            else
+                Test.equal(call.filter.fingerprint,source.fingerprint)
+                Test.equal(call.filter.name,nil);Test.equal(call.filter.fromSlot,nil)
+            end
+            Test.equal(call.filter.nbt,nil)
         end end
     end
 end)
@@ -447,7 +457,7 @@ Test.case("invalid or unmatched AP import selectors never broaden to another sam
             Test.equal(#calls,selector[1]==string.rep("a",32) and 1 or 0)
             if calls[1] then
                 Test.equal(calls[1].filter.fingerprint,selector[1]);Test.equal(calls[1].filter.name,nil)
-                Test.equal(calls[1].filter.nbt,nil);Test.equal(calls[1].filter.fromSlot,nil)
+                Test.equal(calls[1].filter.nbt,nil);Test.equal(calls[1].filter.fromSlot,0)
             end
         end
     end

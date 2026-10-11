@@ -10,6 +10,11 @@ local function validFingerprint(value)
     return type(value) == "string" and value ~= "" and #value <= 256
 end
 
+local function sameExportBaseline(io, matcher, before, after)
+    if type(io.sameExportBaseline) == "function" then return io.sameExportBaseline(before, after) end
+    return matcher.canonicalNBT(before) == matcher.canonicalNBT(after)
+end
+
 local function copy(value, seen)
     if type(value) ~= "table" then return value end
     seen = seen or {}
@@ -250,7 +255,7 @@ function M.zeroReturnRecovery(config, store, io, matcher)
         if type(items)~="table" then return nil,"Cannot inspect the original return chest: "..tostring(chestError) end
         local physical,physicalError=io.exportBaseline(items)
         if type(physical)~="table" then return nil,"Cannot verify physical return items: "..tostring(physicalError) end
-        if matcher.canonicalNBT(physical)~=matcher.canonicalNBT(intent.physicalBefore) then
+        if not sameExportBaseline(io,matcher,intent.physicalBefore,physical) then
             return nil,"The physical return chest changed; zero-movement acknowledgment is unsafe"
         end
         local current=io.count(items,intent.item)
@@ -535,15 +540,27 @@ function M.new(config, store, io, matcher)
     end
 
     local function returnSelectorRows()
-        local rows = {}
+        local rows,seen,count = {},{},0
         for key, row in pairs(data.returnSelectors) do
-            local item, err = selectorItem(type(row) == "table" and row.item)
-            if not item or type(key) ~= "string" or key ~= matcher.itemIdentity(item)
+            local original=type(row)=="table" and row.item
+            local item, err = selectorItem(original)
+            local keyMatches=item and type(key)=="string" and
+                (type(matcher.itemIdentityKeyMatches)=="function" and matcher.itemIdentityKeyMatches(original,key)
+                    or key==matcher.itemIdentity(original))
+            if not item or not keyMatches
                 or not validFingerprint(row.fingerprint) then
                 return nil, err or "A retained return selector is invalid"
             end
-            rows[#rows + 1] = { item = item, fingerprint = row.fingerprint }
-            if #rows > MAX_RETURN_SELECTORS then return nil, "Retained return selectors exceed the protocol limit" end
+            count=count+1
+            if count > MAX_RETURN_SELECTORS then return nil, "Retained return selectors exceed the protocol limit" end
+            local identity=matcher.itemIdentity(item)
+            local previous=seen[identity]
+            if previous and previous.fingerprint~=row.fingerprint then
+                return nil,"Equivalent physical return selectors have conflicting AP fingerprints"
+            elseif not previous then
+                local entry={item=item,fingerprint=row.fingerprint}
+                rows[#rows+1]=entry;seen[identity]=entry
+            end
         end
         table.sort(rows, function(a, b) return matcher.itemIdentity(a.item) < matcher.itemIdentity(b.item) end)
         return rows
@@ -556,6 +573,10 @@ function M.new(config, store, io, matcher)
         local items, err = chestSnapshot(config.returnChestName)
         if not items then fault("RETURN_CHEST", "Cannot inspect retained return selectors", { error = err }); return false end
         local kept, changed = {}, false
+        for key,row in pairs(data.returnSelectors) do
+            local normalized=selectorItem(row.item)
+            if key~=matcher.itemIdentity(normalized) or row.item.nbt~=normalized.nbt then changed=true end
+        end
         for _, row in ipairs(rows) do
             local present = io.count(items, row.item)
             if type(present) ~= "number" or present ~= amount(present) or present == math.huge then
@@ -577,12 +598,22 @@ function M.new(config, store, io, matcher)
         if not item then return nil, itemError end
         if not validFingerprint(source.fingerprint) then return nil, "The source AP fingerprint is missing or invalid" end
         local key = matcher.itemIdentity(item)
-        local previous = data.returnSelectors[key]
-        if previous and previous.fingerprint ~= source.fingerprint then
-            return nil, "A retained physical return identity already has a different AP fingerprint"
-        end
         local rows, rowError = returnSelectorRows()
         if not rows then return nil, rowError end
+        -- Check all legacy and canonical keys before selecting a write key.
+        -- A compatible legacy binding can remain unchanged until normal pruning
+        -- saves its canonical view; never overwrite a conflicting old selector.
+        local existingKey
+        for storedKey,row in pairs(data.returnSelectors) do
+            if matcher.itemIdentity(row.item)==key then
+                if row.fingerprint~=source.fingerprint then
+                    return nil,"A retained physical return identity already has a different AP fingerprint"
+                end
+                if not existingKey or storedKey==key then existingKey=storedKey end
+            end
+        end
+        if existingKey and existingKey~=key then return existingKey,data.returnSelectors[existingKey] end
+        local previous = data.returnSelectors[key]
         if not previous and #rows >= MAX_RETURN_SELECTORS then return nil, "Return selector limit reached; retain the held export" end
         data.returnSelectors[key] = { item = item, fingerprint = source.fingerprint }
         return key, previous
@@ -592,7 +623,9 @@ function M.new(config, store, io, matcher)
         if reported == 0 then
             local physicalAfter, err = io.exportBaseline(after)
             if not physicalAfter then return nil, nil, err end
-            if matcher.canonicalNBT(intent.physicalBefore) == matcher.canonicalNBT(physicalAfter) then return 0 end
+            local unchanged,baselineError=sameExportBaseline(io,matcher,intent.physicalBefore,physicalAfter)
+            if unchanged then return 0 end
+            if baselineError then return nil,nil,baselineError end
             return nil, nil, "A zero return export changed the physical chest inventory"
         end
         if type(reported) ~= "number" or reported <= 0 then return nil, nil, "The return export has no reliable positive result" end
@@ -750,7 +783,17 @@ function M.new(config, store, io, matcher)
 
     local function keepCount(item)
         local keep = setting("keepCounts", {})
-        local explicit = type(keep) == "table" and (keep[matcher.itemIdentity(item)] or keep[item.name])
+        local explicit
+        if type(keep)=="table" then
+            local keys=type(matcher.itemIdentityKeys)=="function" and matcher.itemIdentityKeys(item)
+                or {matcher.itemIdentity(item)}
+            -- Empty-tag aliases may have had separate keep overrides in an
+            -- older config. Retain the larger floor before returning stock.
+            for _,key in ipairs(keys) do
+                if keep[key]~=nil then explicit=math.max(explicit or 0,amount(keep[key])) end
+            end
+            if explicit==nil then explicit=keep[item.name] end
+        end
         if explicit ~= nil then return amount(explicit) end
         local path = tostring(item.name):match("^[^:]+:(.+)$") or tostring(item.name)
         for _, pattern in ipairs(config.buildingItemPatterns or BUILDING_PATTERNS) do

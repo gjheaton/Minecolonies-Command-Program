@@ -76,6 +76,16 @@ local function canonical(value)
     return encode(value, {})
 end
 
+-- CC:Tweaked hashes the named empty CompoundTag bytes 0a 00 00 00 with
+-- MD5. AP fingerprint predicates can create that empty tag on a live stack.
+-- Only this whole-NBT representation is equivalent to no item metadata;
+-- never normalize arbitrary hashes or literal strings inside a real tag.
+local EMPTY_CC_NBT = "41883520c3071f5f4a4a4613fb005e0c"
+local function canonicalNBT(nbt)
+    if nbt == EMPTY_CC_NBT then return "" end
+    return canonical(nbt)
+end
+
 local function isOpaqueNBTHash(nbt)
     if type(nbt) ~= "string" then return false end
     local s = tostring(nbt):lower()
@@ -97,7 +107,7 @@ local function hasMeaningfulNBT(item)
 end
 
 local function identityFrom(item)
-    return tostring(item.name or "") .. "|NBT|" .. canonical(item.nbt)
+    return tostring(item.name or "") .. "|NBT|" .. canonicalNBT(item.nbt)
 end
 
 local function textHasToolToken(text, token)
@@ -183,7 +193,7 @@ function M.new(config, store)
     local self = {}
 
     function self.canonicalNBT(nbt)
-        return canonical(nbt)
+        return canonicalNBT(nbt)
     end
 
     function self.requestIdentity(item)
@@ -194,6 +204,21 @@ function M.new(config, store)
     function self.itemIdentity(item)
         if type(item) ~= "table" then return nil end
         return identityFrom(item)
+    end
+
+    -- Read older physical evidence without rewriting its original key/tag.
+    function self.itemIdentityKeyMatches(item, key)
+        if type(item) ~= "table" or type(key) ~= "string" then return false end
+        return key == identityFrom(item)
+            or (item.nbt == EMPTY_CC_NBT
+                and key == tostring(item.name or "") .. "|NBT|" .. EMPTY_CC_NBT)
+    end
+
+    function self.itemIdentityKeys(item)
+        if type(item) ~= "table" then return {} end
+        local key = identityFrom(item)
+        if canonicalNBT(item.nbt) == "" then return {key, key .. EMPTY_CC_NBT} end
+        return {key}
     end
 
     function self.exactlyMatches(requestItem, storedItem)
@@ -212,7 +237,7 @@ function M.new(config, store)
             return true
         end
 
-        return canonical(requestItem.nbt) == canonical(storedItem.nbt)
+        return canonicalNBT(requestItem.nbt) == canonicalNBT(storedItem.nbt)
     end
 
     function self.requestAcceptsItem(request, physicalItem)
@@ -238,7 +263,7 @@ function M.new(config, store)
                         or candidate.displayName
                         or physicalItem.name,
                     nbt = physicalItem.nbt,
-                    nbtCanonical = canonical(physicalItem.nbt),
+                    nbtCanonical = canonicalNBT(physicalItem.nbt),
                     hasNBT = hasMeaningfulNBT(physicalItem),
                     identity = identityFrom(physicalItem),
                     namespace = namespace(physicalItem.name),
@@ -275,7 +300,7 @@ function M.new(config, store)
                 name = physicalItem.name,
                 displayName = physicalItem.displayName or physicalItem.name,
                 nbt = physicalItem.nbt,
-                nbtCanonical = canonical(physicalItem.nbt),
+                nbtCanonical = canonicalNBT(physicalItem.nbt),
                 hasNBT = hasMeaningfulNBT(physicalItem),
                 identity = identityFrom(physicalItem),
                 namespace = ns,
@@ -316,7 +341,7 @@ function M.new(config, store)
                     name = item.name,
                     displayName = item.displayName or item.name,
                     nbt = item.nbt,
-                    nbtCanonical = canonical(item.nbt),
+                    nbtCanonical = canonicalNBT(item.nbt),
                     hasNBT = hasMeaningfulNBT(item),
                     identity = identityFrom(item),
                     namespace = namespace(item.name),

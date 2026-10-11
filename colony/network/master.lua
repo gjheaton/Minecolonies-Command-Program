@@ -86,24 +86,36 @@ local function denseArray(value)
     return true
 end
 
-local function validateReturnSelectors(selectors)
+local function validateReturnSelectors(selectors,matcher,retainedAliases)
     if selectors == nil then return {} end -- Older clients may return plain items.
     if not denseArray(selectors) then return nil, "Return selectors are not a dense array" end
-    local result, seen, length = {}, {}, #selectors
+    local result, seen, rawSeen, length = {}, {}, {}, #selectors
     if length > 1024 then return nil, "Too many return selectors" end
     for _, selector in ipairs(selectors) do
         local item = type(selector) == "table" and selector.item
         local nbt = type(item) == "table" and item.nbt
-        if type(nbt) == "table" and next(nbt) == nil then nbt = nil end
+        local originalNBT=nbt
+        if matcher.canonicalNBT(nbt)=="" then nbt = nil end
         if type(item) ~= "table" or type(item.name) ~= "string" or item.name == "" or #item.name > 256
             or (nbt ~= nil and (type(nbt) ~= "string" or #nbt > 256))
             or not validFingerprint(selector.fingerprint) then
             return nil, "Invalid physical return selector"
         end
-        local identity = item.name .. "\n" .. tostring(nbt or "")
-        if seen[identity] then return nil, "Duplicate physical return selector" end
-        seen[identity] = true
-        result[#result + 1] = {item={name=item.name, nbt=nbt}, fingerprint=selector.fingerprint}
+        local normalized={name=item.name,nbt=nbt}
+        local identity = matcher.itemIdentity(normalized)
+        local rawIdentity=identity.."\n"..type(originalNBT)..":"
+            ..(type(originalNBT)=="table" and "{}" or tostring(originalNBT))
+        if rawSeen[rawIdentity] and not (retainedAliases and nbt==nil) then
+            return nil,"Duplicate physical return selector"
+        end
+        rawSeen[rawIdentity]=true
+        if seen[identity] then
+            if seen[identity]~=selector.fingerprint then return nil,"Equivalent physical return selectors have conflicting AP fingerprints" end
+            if nbt~=nil then return nil,"Duplicate physical return selector" end
+        else
+            seen[identity] = selector.fingerprint
+            result[#result + 1] = {item=normalized, fingerprint=selector.fingerprint}
+        end
     end
     return result
 end
@@ -457,7 +469,11 @@ function M.new(config, store, io, matcher)
             -- complete chest to reject concurrent inventory changes.
             local current, baselineError = io.exportBaseline(items)
             if not current then return nil, tostring(baselineError) end
-            if equal(current, pending.physicalBefore) then return 0, nil end
+            local unchanged,baselineError
+            if type(io.sameExportBaseline)=="function" then unchanged,baselineError=io.sameExportBaseline(pending.physicalBefore,current)
+            else unchanged=equal(current,pending.physicalBefore) end
+            if baselineError then return nil,tostring(baselineError) end
+            if unchanged then return 0, nil end
             local physical, delta = io.exportEvidence(pending.physicalBefore, items, pending.item, pending.count,pending.selectionMode)
             if not physical then return nil, tostring(delta) end
             if physical.name ~= pending.item.name
@@ -806,17 +822,43 @@ function M.new(config, store, io, matcher)
         if message.session ~= turn.session or message.turn ~= turn.id then return false end
         if turn.phase == "RESULT" then sendTurn(colony, cs); return true end
         if turn.phase ~= "WAIT_BATCH" then return true end
-        local selectors, selectorError = validateReturnSelectors(message.returnSelectors)
+        local selectors, selectorError = validateReturnSelectors(message.returnSelectors,matcher)
         if not selectors then
             errorEvent("BAD_BATCH", selectorError, {colonyId=colony.id})
             return false
         end
+        -- Validate the persisted keys against their original item descriptors
+        -- before normalizing a read-only view. Old empty-tag keys may coalesce;
+        -- their fingerprints must still agree before any map is replaced.
+        local retained={}
+        for key,row in pairs(cs.returnSelectors or {}) do
+            local item=type(row)=="table" and row.item
+            local keyMatches=type(item)=="table" and type(key)=="string" and
+                (type(matcher.itemIdentityKeyMatches)=="function" and matcher.itemIdentityKeyMatches(item,key)
+                    or key==matcher.itemIdentity(item))
+            if not keyMatches then
+                errorEvent("BAD_BATCH","A retained return selector has an invalid physical identity key",{colonyId=colony.id})
+                return false
+            end
+            retained[#retained+1]=row
+            if #retained>1024 then
+                errorEvent("BAD_BATCH","Retained return selectors exceed the safe bound",{colonyId=colony.id})
+                return false
+            end
+        end
+        local previousRows,previousError=validateReturnSelectors(retained,matcher,true)
+        if not previousRows then
+            errorEvent("BAD_BATCH",previousError,{colonyId=colony.id})
+            return false
+        end
+        local previousMap={}
+        for _,row in ipairs(previousRows) do previousMap[matcher.itemIdentity(row.item)]=row end
         local selectorMap, changed = {}, {}
         for _, selector in ipairs(selectors) do
             local identity = matcher.itemIdentity(selector.item)
             selectorMap[identity] = copy(selector)
         end
-        for identity, previous in pairs(cs.returnSelectors or {}) do
+        for identity, previous in pairs(previousMap) do
             local incoming = selectorMap[identity]
             if not incoming or previous.fingerprint ~= incoming.fingerprint then
                 changed[#changed + 1] = {previous=previous, incoming=incoming, identity=identity}
@@ -1187,7 +1229,8 @@ function M.new(config, store, io, matcher)
                 local unchanged
                 if pending.physicalBefore and type(io.exportBaseline) == "function" then
                     local fresh = io.exportBaseline(chest)
-                    unchanged = fresh and equal(fresh, pending.physicalBefore)
+                    if fresh and type(io.sameExportBaseline)=="function" then unchanged=io.sameExportBaseline(pending.physicalBefore,fresh)
+                    else unchanged=fresh and equal(fresh,pending.physicalBefore) end
                 elseif not pending.physicalBefore then
                     unchanged = integer(io.count(chest, pending.item)) == pending.before
                 end

@@ -35,7 +35,10 @@ Test.case("Ender Chest diagnostic binds a known exact export to the physical CC 
     Test.equal(next(w.channels.delivery.slots),nil);Test.equal(next(w.channels.returns.slots),nil)
     local exports,imports=w.callsFor("export",true),w.callsFor("import",true)
     Test.equal(#exports,1);Test.equal(#imports,1)
-    Test.equal(exports[1].filter.fingerprint,imports[1].filter.fingerprint)
+    assert(exports[1].filter.fingerprint)
+    Test.equal(imports[1].filter.name,"minecraft:cobblestone")
+    Test.equal(imports[1].filter.fingerprint,nil)
+    Test.equal(imports[1].filter.fromSlot,0)
     Test.equal(imports[1].filter.nbt,nil,"a CC hash reached the AP NBT parser")
     assert(m.store.data.chestTest==nil and c.store.data.chestTest==nil)
 end)
@@ -60,10 +63,19 @@ end)
 
 Test.case("Ender Chest diagnostic never binds an unknown export to a different physical hash or replays it",function()
     local w,m,c=fixture({asymmetricNBT=true});m.rs.unknownExport=true
+    local export=w.devices[1].prs.api.exportItemToPeripheral
+    local taggedHash=w.ccNBT({display={Name="Changed during export"}})
+    w.devices[1].prs.api.exportItemToPeripheral=function(...)
+        local result=export(...)
+        -- A genuine metadata change must still block an unknown outcome;
+        -- CC's known empty compound is now the same original plain item.
+        for _,item in pairs(w.channels.delivery.slots) do item.nbt=taggedHash end
+        return result
+    end
     local ok=pcall(w.probe);assert(not ok)
     Test.equal(m.store.data.chestTest.phase,"export_intent")
     Test.equal(#w.callsFor("export",true),1);Test.equal(#w.callsFor("import",true),0)
-    Test.equal(w.count(w.channels.delivery,{name="minecraft:cobblestone",nbt=w.ccNBT({})}),1)
+    Test.equal(w.count(w.channels.delivery,{name="minecraft:cobblestone",nbt=taggedHash}),1)
     m.restart();assert(not pcall(w.probe))
     Test.equal(#w.callsFor("export",true),1);Test.equal(#w.callsFor("import",true),0)
     assert(m.store.data.chestTest and c.store.data.chestTest)

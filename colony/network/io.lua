@@ -118,6 +118,31 @@ function M.new(config,store,matcher)
     -- AP exposes full NBT tables; CC exposes a different, opaque NBT hash.
     -- Capture physical identities before the exact AP export instead of
     -- trying to translate one representation into the other.
+    local function physicalItem(entry)
+        local nbt=entry.nbt
+        if matcher.canonicalNBT(nbt)=="" then nbt=nil end
+        return {name=entry.name,nbt=copy(nbt)}
+    end
+    local function normalizedBaseline(baseline)
+        if type(baseline)~="table" or baseline.version~=1 or type(baseline.totals)~="table" then
+            return nil,"The original physical inventory baseline is unavailable"
+        end
+        local normalized={version=1,totals={}}
+        for key,total in pairs(baseline.totals) do
+            if type(key)~="string" or type(total)~="table" or type(total.item)~="table"
+                or type(total.item.name)~="string" or total.item.name=="" or not whole(total.count,1)
+                or (total.item.nbt~=nil and type(total.item.nbt)~="string" and type(total.item.nbt)~="table")
+                or not matcher.itemIdentityKeyMatches(total.item,key) then
+                return nil,"Invalid original physical inventory baseline"
+            end
+            local identity=matcher.itemIdentity(total.item)
+            local merged=normalized.totals[identity] or {item=physicalItem(total.item),count=0}
+            merged.count=merged.count+total.count
+            if not whole(merged.count,1) then return nil,"Invalid physical inventory total" end
+            normalized.totals[identity]=merged
+        end
+        return normalized
+    end
     function self.exportBaseline(items)
         if type(items)~="table" then return nil,"Physical inventory is unavailable" end
         local baseline={version=1,totals={}}
@@ -128,25 +153,28 @@ function M.new(config,store,matcher)
                 return nil,"Invalid physical inventory identity or quantity"
             end
             local key=matcher.itemIdentity(entry)
-            local total=baseline.totals[key] or {item={name=entry.name,nbt=copy(entry.nbt)},count=0}
+            local total=baseline.totals[key] or {item=physicalItem(entry),count=0}
             total.count=total.count+entry.count
             if not whole(total.count,1) then return nil,"Invalid physical inventory total" end
             baseline.totals[key]=total
         end
         return baseline
     end
+    function self.sameExportBaseline(before,after)
+        local original,err=normalizedBaseline(before);if not original then return false,err end
+        local current,currentErr=normalizedBaseline(after);if not current then return false,currentErr end
+        for key,total in pairs(original.totals) do
+            if not current.totals[key] or current.totals[key].count~=total.count then return false end
+        end
+        for key in pairs(current.totals) do if not original.totals[key] then return false end end
+        return true
+    end
     function self.exportEvidence(baseline,items,source,reported,selectionMode)
         if not whole(reported,1) then return nil,"A known positive bridge result is required to bind physical item data" end
         if type(source)~="table" or type(source.name)~="string" or source.name=="" then return nil,"Export item identity is unavailable" end
-        if type(baseline)~="table" or baseline.version~=1 or type(baseline.totals)~="table" then
-            return nil,"The original physical inventory baseline is unavailable"
-        end
-        for key,total in pairs(baseline.totals) do
-            if type(key)~="string" or type(total)~="table" or type(total.item)~="table"
-                or type(total.item.name)~="string" or total.item.name=="" or not whole(total.count,1)
-                or (total.item.nbt~=nil and type(total.item.nbt)~="string" and type(total.item.nbt)~="table")
-                or matcher.itemIdentity(total.item)~=key then return nil,"Invalid original physical inventory baseline" end
-        end
+        local original,baselineError=normalizedBaseline(baseline)
+        if not original then return nil,baselineError end
+        baseline=original
         local current,err=self.exportBaseline(items);if not current then return nil,err end
         local gained
         for key,total in pairs(baseline.totals) do
@@ -298,14 +326,14 @@ function M.new(config,store,matcher)
         local nbt=matcher.canonicalNBT(item.nbt)
         -- AP fingerprints describe the stack, not its RS network. AP tests
         -- this signature on the source chest stack before extracting it.
+        local filter={name=item.name}
         if item.fingerprint~=nil then
             if type(item.fingerprint)~="string" or item.fingerprint=="" or #item.fingerprint>256 then
                 return nil,"Invalid exact AP item fingerprint"
             end
-            if not importing or nbt~="" then return {fingerprint=item.fingerprint} end
+            if not importing or nbt~="" then filter={fingerprint=item.fingerprint} end
         end
-        local filter={name=item.name}
-        if nbt~="" then
+        if nbt~="" and not filter.fingerprint then
             return nil,"Exact NBT transfer needs an AP fingerprint; CC inventory hashes are not AP NBT filters"
         end
         if importing then
@@ -316,10 +344,11 @@ function M.new(config,store,matcher)
                     and (not selected or slot<selected) then selected=slot end
             end
             if not selected then return nil,"The exact physical import item is absent from the source chest" end
-            -- AP fingerprint matching can add an empty tag to an untagged
-            -- stack. Keep plain partial imports anchored to their exact slot
-            -- instead, avoiding a metadata change in the remaining stack.
-            -- Forge inventory indices are zero based.
+            -- AP fingerprint matching calls getOrCreateTag even on unrelated
+            -- source stacks. Anchor every import to its verified physical
+            -- slot, keeping tagged-item scans away from plain deliveries.
+            -- Forge inventory indices are zero based; the next import can
+            -- select another matching slot after this stack is consumed.
             filter.fromSlot=selected-1
         end
         return filter

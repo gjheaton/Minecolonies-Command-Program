@@ -320,10 +320,13 @@ colony imports and overflow returns preserve that binding. AP fingerprints descr
 the item stack and remain usable across RS networks. An NBT import without a valid
 AP selector is blocked; the program never substitutes a CC hash as an AP NBT filter
 or falls back to importing any item with the same name.
-Plain, untagged imports use the matching physical source slot. This prevents AP
-fingerprint matching from adding an empty tag to a partially imported stack and
-changing the remaining stack's CC identity. Ender Chest round-trip tests use the
-same physical export evidence and preserve the original AP item for PRS accounting.
+Every physical import selects the matching source slot, including imports with
+an AP fingerprint. This prevents the selector from scanning and changing unrelated
+stacks. Plain imports avoid fingerprint matching. From 4.0.15, CC's known hash for
+an empty compound is treated as empty root NBT, so an empty tag cannot make an
+otherwise plain retained delivery appear to be a different variant. Genuine
+tagged variants stay distinct. Ender Chest round-trip tests use the same physical
+export evidence and preserve the original AP item for PRS accounting.
 
 Timeouts never revoke permission to drain a chest already handed to a colony. An
 offline colony retains its original turn; other colonies can be serviced after its
@@ -888,7 +891,7 @@ hardware wizard; do not use `CLEAN` to obtain an update or repair.
 
 Versions follow **MAJOR.MINOR.PATCH**. The first number changes for incompatible
 behavior or migrations, the second for compatible new features, and the third
-for fixes and maintenance. This release is **4.0.14**; later fixes increase the
+for fixes and maintenance. This release is **4.0.15**; later fixes increase the
 third number. A minor release resets the patch number (`4.1.0`), and a major
 release resets both later numbers (`5.0.0`). The update control compares all three
 numbers and offers installation when the published version is greater.
@@ -1054,3 +1057,38 @@ import, or clearing a fault. Compare the expected exact item with both physical
 chests' contents and verify their actual colors match the configured channel.
 Same-name items with different NBT do not establish the shipment's identity.
 Do not remove journal entries or resend stock merely because an item is absent.
+
+### Recovering a delivery with empty root NBT (4.0.15)
+
+CC:Tweaked reports the empty-compound NBT hash
+`41883520c3071f5f4a4a4613fb005e0c` when a stack has an empty root tag. Release
+4.0.15 treats only that known empty hash as equivalent to `nil` or `{}` at the
+root. Other hashes and tagged item variants remain exact. Slot-bound physical
+imports also prevent AP fingerprint predicates from scanning unrelated stacks.
+
+This fixes a false **DELIVERY_MISSING** when a verified plain item is still in
+the correct chest but now carries that empty tag. For example, Stardust's
+shipment `shipment-183` recorded three carrots, with zero imported, while its
+delivery chest contained 36 carrots with the empty-compound hash. Those existing
+carrots can cover the retained shipment; they do not need to be supplied again.
+
+Keep master automation paused and leave both delivery chests untouched. Stop
+Stardust's application and startup launcher to reach the shell, then run:
+
+```lua
+install_colony --repair
+colony_supply --reconcile
+reboot
+```
+
+Repair preserves settings and journals. In this false-missing case, reconciliation
+checks the existing chest quantity against the retained deliveries and clears the
+fault when all required quantities are present. It transfers no items and credits
+no imported quantity. The next normal supply turn handles the imports.
+
+After Stardust restarts, verify its **HEALTH** is healthy. Its next route-confirmed
+hello clears the old reported colony fault on the master while automation remains
+paused. Resume automation only after both show healthy. This recovery requires no
+new supply, manual movement, or `ZERO` acknowledgment. If reconciliation remains
+blocked, retain the records and contents and inspect `--deliverydiag` rather than
+resetting the journal or forcing another delivery.

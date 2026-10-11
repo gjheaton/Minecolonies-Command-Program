@@ -1,6 +1,6 @@
 # MineColonies Control Suite
 
-The `supply-master-colony` branch provides Supply 4.0.14: one dedicated computer owns
+The `supply-master-colony` branch provides Supply 4.0.15: one dedicated computer owns
 Player Refined Storage (PRS), and colony supply computers communicate with it over
 rednet. Each colony has a delivery and a return Ender Chest channel. Command Center
 is also available through the same installer.
@@ -101,7 +101,7 @@ Versions use **MAJOR.MINOR.PATCH**:
 - **Minor**, the second number, changes for compatible new features.
 - **Patch**, the third number, changes for fixes and maintenance updates.
 
-This update is **4.0.14**. Future fixes increase the patch number so **CHECK UPDATE**
+This update is **4.0.15**. Future fixes increase the patch number so **CHECK UPDATE**
 can detect them. A minor release resets the patch number, such as `4.1.0`; a major
 release resets both later numbers, such as `5.0.0`.
 
@@ -131,7 +131,7 @@ It saves an automation pause, verifies the held transfer, and displays RECOVERED
 or BLOCKED without stopping the application. A recorded zero export may send one
 guarded recovery item. Automation stays paused afterward; error history is kept.
 
-Command Center is now **4.0.1**, packaged in suite **4.0.14**. Its monitor header
+Command Center is now **4.0.1**, packaged in suite **4.0.15**. Its monitor header
 and installer metadata use the same application version. Existing V4 Command
 installations can update without resetting their settings.
 
@@ -179,3 +179,14 @@ Suite 4.0.14 adds `colony_supply --deliverydiag <shipment ID>` to inspect a
 retained delivery's item, outstanding quantity, and current physical chest
 contents without moving items or changing its ledger. New DELIVERY_MISSING
 errors also show the item, chest, request, and missing quantity.
+
+Suite 4.0.15 treats CC's known empty-compound NBT hash as the same empty root
+NBT as `nil` or `{}`, while keeping genuinely tagged variants distinct. Physical
+imports select the exact source slot, including when using an AP fingerprint.
+For a falsely missing Stardust delivery caused by this empty tag, pause master
+automation, stop Stardust's application and launcher, then run
+`install_colony --repair`, `colony_supply --reconcile`, and `reboot` at its shell.
+Reconciliation checks the existing chest quantity without transferring or
+crediting items. Verify Stardust and the master's reported colony status are
+healthy before resuming automation; no extra supply or `ZERO` acknowledgment is
+needed for this case.
