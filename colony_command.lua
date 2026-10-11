@@ -16,12 +16,13 @@
 -- v3.0.6: Help Wanted shows the best-suited current citizen for each open
 --         building, and CHECK UPDATE / UPDATE is persistent in the header.
 -- v3.0.7: Shared updater now validates both app and suite metadata versions.
+-- v4.0.0: Command version aligned with the v4 suite release line.
 
 local REFRESH_SECONDS = 10
 local RAID_BLINK_SECONDS = 0.75
 local TEXT_SCALE = 0.5
-local PROGRAM_VERSION = "3.0.7"
-local SUITE_VERSION = "4.0.7"
+local PROGRAM_VERSION = "4.0.0"
+local SUITE_VERSION = "4.0.8"
 
 local Util = require("colony.lib.util")
 local SharedUI = require("colony.lib.ui")

@@ -843,7 +843,7 @@ install_colony --update supply
 ```
 
 Run the appropriate command on each role; do not update two processes concurrently
-on one computer. Update the master and every colony supply computer to 4.0.7 before
+on one computer. Update the master and every colony supply computer to 4.0.8 before
 resuming automation, and update both roles together for protocol-changing releases.
 An older v3 installation must use the first clean v4 installation instead of an
 in-place update.
@@ -888,7 +888,7 @@ hardware wizard; do not use `CLEAN` to obtain an update or repair.
 
 Versions follow **MAJOR.MINOR.PATCH**. The first number changes for incompatible
 behavior or migrations, the second for compatible new features, and the third
-for fixes and maintenance. This release is **4.0.7**; later fixes increase the
+for fixes and maintenance. This release is **4.0.8**; later fixes increase the
 third number. A minor release resets the patch number (`4.1.0`), and a major
 release resets both later numbers (`5.0.0`). The update control compares all three
 numbers and offers installation when the published version is greater.
@@ -965,3 +965,7 @@ Automation remains paused after the check. Review **HEALTH**, then enable
 for an ordinary transfer hold recovered by this button. Recorded errors remain
 in **ERRORS**; **CLEAR HISTORY** removes the archive without changing active faults.
 Remote colony dashboards remain read-only.
+
+Suite 4.0.8 packages Command Center **4.0.0**. Its application version is separate
+from the suite version; both participate in update checks. Existing V4 Command
+installations can use CHECK UPDATE → UPDATE while preserving their settings.
