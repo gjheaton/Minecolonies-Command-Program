@@ -87,18 +87,31 @@ local function canonicalNBT(nbt)
 end
 
 -- Quark writes these client-style calculated flags after a vanilla clock or
--- compass leaves autocrafting and re-enters RS. They do not change which item
--- MineColonies requested. Keep the exception exact: a lodestone compass,
--- renamed item, enchantment, or any additional tag remains a distinct variant.
+-- compass leaves autocrafting and re-enters RS. MineColonies rewrites an
+-- Ancient Tome in a player inventory with its current raid forecast.
+-- These tags do not change which item MineColonies requested. Keep every
+-- exception exact: a lodestone compass, named item, or any additional tag
+-- remains a distinct variant.
 local TRANSIENT_CALCULATED_TAGS = {
     ["minecraft:clock"] = "quark:clock_calculated",
     ["minecraft:compass"] = "quark:compass_calculated",
 }
+local TRANSIENT_TRANSPORT_NAMES = {
+    ["minecraft:clock"] = true,
+    ["minecraft:compass"] = true,
+    ["minecolonies:ancienttome"] = true,
+}
 local function isTransientTransportName(name)
-    return TRANSIENT_CALCULATED_TAGS[tostring(name or "")] ~= nil
+    return TRANSIENT_TRANSPORT_NAMES[tostring(name or "")] == true
 end
 local function isTransientComputedVariant(item)
     if type(item) ~= "table" or type(item.nbt) ~= "table" then return false end
+    if item.name == "minecolonies:ancienttome" then
+        local raidWillHappen = item.nbt.raidWillHappen
+        if type(raidWillHappen) ~= "boolean" then return false end
+        for current in pairs(item.nbt) do if current ~= "raidWillHappen" then return false end end
+        return true
+    end
     local key = TRANSIENT_CALCULATED_TAGS[item.name]
     if not key then return false end
     local value = item.nbt[key]

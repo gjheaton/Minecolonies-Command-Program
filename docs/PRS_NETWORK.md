@@ -209,9 +209,12 @@ colony_master --set automationEnabled false
 ```
 
 Reboot colony computers so their clients are listening. Leave the master in the
-shell for diagnostics. You can later start `colony_master`, open **SETTINGS**, and
-enable **Run supply automation**. Pausing stops new grants but finishes existing
-handshakes; it does not cancel deliveries or crafts.
+shell for diagnostics. You can later start `colony_master` and press the header's
+**PAUSED** button to resume automation. When automation is enabled, the same saved
+control reads **RUNNING**; press it to pause. It stays at the top of every local
+master tab, including route and transfer-recovery pages. Pausing stops new grants
+but finishes existing handshakes; it does not cancel deliveries or crafts. The
+SETTINGS control remains available.
 
 ### Connection timing
 
@@ -691,6 +694,15 @@ changed fingerprint, or unacknowledged turn blocks the probe. Existing cached
 metadata or insertion problems can still produce zero; if it remains blocked,
 inspect with `colony_master --transferdiag` rather than repeatedly retrying.
 
+Suite 4.0.17 applies the same guarded name selector and physical verification to
+vanilla clocks and compasses carrying only Quark's calculated transport flag.
+Suite 4.0.18 also accepts `minecolonies:ancienttome` when its sole added tag is
+the `raidWillHappen` boolean written by MineColonies while the item is in a player
+inventory. Any additional tag remains an exact fingerprint variant. For an
+already held Tome export, update both master and colony, leave inventories and
+journals intact, and use **HEALTH → RECOVER TRANSFER → RUN RECOVERY** on the
+master. The recovery may send one journaled probe and keeps automation paused.
+
 ### Tools held after an identity mismatch
 
 Earlier 4.0.0 code could export a tool successfully but fail chest verification
@@ -891,7 +903,7 @@ hardware wizard; do not use `CLEAN` to obtain an update or repair.
 
 Versions follow **MAJOR.MINOR.PATCH**. The first number changes for incompatible
 behavior or migrations, the second for compatible new features, and the third
-for fixes and maintenance. This release is **4.0.17**; later fixes increase the
+for fixes and maintenance. This release is **4.0.18**; later fixes increase the
 third number. A minor release resets the patch number (`4.1.0`), and a major
 release resets both later numbers (`5.0.0`). The update control compares all three
 numbers and offers installation when the published version is greater.

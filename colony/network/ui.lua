@@ -237,6 +237,23 @@ function M.new(config, store, engine, io, updater, options)
         return true
     end
 
+    local function toggleAutomation()
+        if options.readOnly or role() ~= "master" then return end
+        local enabled = config.automationEnabled ~= false
+        local ok, reason = setValue("automationEnabled", not enabled)
+        if ok then
+            if config.automationEnabled == false then
+                self.notice = "Automation paused. Active turns finish safely; no new turns will start."
+            else
+                self.notice = "Automation running."
+            end
+        else
+            self.notice = "Could not change automation: " .. tostring(reason or "Configuration save failed.")
+            logError("AUTOMATION", self.notice)
+        end
+        draw()
+    end
+
     local function saveRoute(route)
         if options.readOnly then return false,"Remote colony dashboards are read-only." end
         for key in pairs(self.routeSelections) do
@@ -494,8 +511,14 @@ function M.new(config, store, engine, io, updater, options)
         end
         local button=options.readOnly and {id="read_only",label="READ ONLY",bg=C.nav,fg=C.dim}
             or {id="program_update",label=label,bg=updater and (updater.availableVersion or updater.checkError) and C.warn or C.navActive,action=update}
+        local buttons={button}
+        if not options.readOnly and role()=="master" then
+            local running=config.automationEnabled~=false
+            table.insert(buttons,1,{id="automation_toggle",label=running and "RUNNING" or "PAUSED",minWidth=10,
+                bg=running and C.good or C.warn,fg=C.text,action=toggleAutomation})
+        end
         screen.drawHeader({title=titleName,subtitle=subtitle,status=status or "",statusFg=color or C.dim,
-            pageTitle=title,button=button})
+            pageTitle=title,buttons=buttons})
         local active = (self.view=="routes" or self.view=="route" or self.view=="overrides") and "settings" or self.view
         screen.drawNav(active,tabs,nil,function(id) self.view=id; self.notice=nil; draw() end)
     end
@@ -653,7 +676,7 @@ function M.new(config, store, engine, io, updater, options)
             message="Fix storage / connections first.\nLeave colony computers running.\n"
                 .."This check saves an automation pause.\nRecorded zero export may send:\n"
                 .."ONE recovery item, verified in the chest.\nUncertain transfers are never blindly repeated.\n"
-                .."Automation stays paused afterward.\nCheck HEALTH before enabling it in SETTINGS.\n"
+                .."Automation stays paused afterward.\nCheck HEALTH, then press PAUSED to resume.\n"
                 .."Error history is kept; clearing it is separate."
         else message="Check the held colony transfer. Uncertain transfers remain reserved unless verification succeeds." end
         for index,line in ipairs(Util.wrapText(message,math.max(1,w-4))) do
@@ -667,7 +690,7 @@ function M.new(config, store, engine, io, updater, options)
                 self.recoveryRunning=false
                 self.recoverySuccess=success==true
                 self.recoveryResult=(success and "RECOVERED: " or "BLOCKED: ")..tostring(detail or "Reconciliation finished")
-                    ..(role()=="master" and "\nAutomation remains paused. Check HEALTH, then enable it in SETTINGS when ready." or "")
+                    ..(role()=="master" and "\nAutomation remains paused. Check HEALTH, then press PAUSED when ready." or "")
                 self.notice=self.recoveryResult
                 draw()
             end)

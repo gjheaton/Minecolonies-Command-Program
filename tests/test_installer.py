@@ -337,7 +337,7 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(self.info.suiteVersion, manifest.suiteVersion)
         self.assertEqual(self.info.installationSchema, 4)
         self.assertEqual(self.info.apps.command.version, "4.0.1")
-        self.assertEqual(self.info.components.ui, "1.1.0")
+        self.assertEqual(self.info.components.ui, "1.1.1")
         self.assertEqual(self.info.installerVersion, CURRENT_VERSION)
         self.assertEqual(self.info.apps.master.version, CURRENT_VERSION)
         self.assertEqual(self.info.apps.supply.version, CURRENT_VERSION)

@@ -889,14 +889,15 @@ Test.case("ordinary kelp avoids AP fingerprint cache mutation and journals its s
     w.untilTrue(function() return record.status=="delivered" end)
 end)
 
-Test.case("mixed fresh and Quark-calculated clocks and compasses export by guarded name and import their verified physical slot",function()
+Test.case("mixed fresh and harmless transport variants export by guarded name and import their verified physical slot",function()
     for _,case in ipairs({
-        {name="minecraft:clock",tag="quark:clock_calculated"},
-        {name="minecraft:compass",tag="quark:compass_calculated"},
+        {name="minecraft:clock",nbt={["quark:clock_calculated"]=1}},
+        {name="minecraft:compass",nbt={["quark:compass_calculated"]=1}},
+        {name="minecolonies:ancienttome",nbt={raidWillHappen=false}},
     }) do
         local w,m=fixture(1,{asymmetricNBT=true});local c=w.computers[2]
         c.integrator.requests={S.request("R2",case.name,1)}
-        m.rs.add({name=case.name,nbt={[case.tag]=1}},9)
+        m.rs.add({name=case.name,nbt=case.nbt},9)
         m.rs.add({name=case.name},1)
         local api=w.devices[1].prs.api;local original=api.exportItemToPeripheral
         api.exportItemToPeripheral=function(filter,chest)
@@ -966,33 +967,38 @@ Test.case("a retained legacy zero export recovers with one explicit plain-name p
     Test.equal(m.rs.items[w.identity(kelp)].amount,4)
 end)
 
-Test.case("a retained fingerprint-zero clock recovers once after Quark-calculated stock appears",function()
-    local w,m=fixture(1,{asymmetricNBT=true});local c=w.computers[2]
-    local clock={name="minecraft:clock"};c.integrator.requests={S.request("R2",clock.name,1)}
-    local original=m.rs.add(clock,1);m.rs.zeroExport=true
-    w.untilTrue(function()
-        local state=m.store.data.master;return state.quarantine and state.colonies["2"].turn==nil
-    end)
-    m.config.automationEnabled=false
-    local pending=m.store.data.master.pendingTransfer
-    pending.selectionMode="fingerprint" -- The selector retained by suite 4.0.16.
-    Test.equal(pending.item.fingerprint,original.fingerprint)
-    m.rs.add({name=clock.name,nbt={["quark:clock_calculated"]=1}},9)
-    m.store.save();m.rs.zeroExport=false
-    assert(w.at(1,m.engine.reconcile))
-    local probe=m.store.data.master.pendingTransfer
-    assert(probe.recoveryProbe);Test.equal(probe.count,1);Test.equal(probe.selectionMode,"transient-name")
-    local exports=w.callsFor("export",true);Test.equal(#exports,2)
-    Test.equal(exports[2].filter.name,clock.name);Test.equal(exports[2].filter.fingerprint,nil)
-    assert(w.at(1,m.engine.verifyHeldTransfer))
-    local shipment=m.store.data.master.colonies["2"].shipments[1]
-    assert(shipment.item.transientNameImport==true);Test.equal(shipment.item.fingerprint,nil)
-    m.config.automationEnabled=true
-    w.untilTrue(function()
-        for _,entry in pairs(c.rs.items) do if entry.name==clock.name and entry.amount==1 then return true end end
-        return false
-    end,"recovered clock did not import exactly once")
-    Test.equal(#w.callsFor("export",true),2);Test.equal(#w.callsFor("import",false),1)
-    assert(not m.store.data.master.quarantine and not c.store.data.client.fault)
+Test.case("retained fingerprint-zero transport items recover once after harmless metadata appears",function()
+    for _,case in ipairs({
+        {name="minecraft:clock",nbt={["quark:clock_calculated"]=1}},
+        {name="minecolonies:ancienttome",nbt={raidWillHappen=false}},
+    }) do
+        local w,m=fixture(1,{asymmetricNBT=true});local c=w.computers[2]
+        local item={name=case.name};c.integrator.requests={S.request("R2",item.name,1)}
+        local original=m.rs.add(item,1);m.rs.zeroExport=true
+        w.untilTrue(function()
+            local state=m.store.data.master;return state.quarantine and state.colonies["2"].turn==nil
+        end)
+        m.config.automationEnabled=false
+        local pending=m.store.data.master.pendingTransfer
+        pending.selectionMode="fingerprint" -- The selector retained by suite 4.0.16/4.0.17.
+        Test.equal(pending.item.fingerprint,original.fingerprint)
+        m.rs.add({name=item.name,nbt=case.nbt},9)
+        m.store.save();m.rs.zeroExport=false
+        assert(w.at(1,m.engine.reconcile))
+        local probe=m.store.data.master.pendingTransfer
+        assert(probe.recoveryProbe);Test.equal(probe.count,1);Test.equal(probe.selectionMode,"transient-name")
+        local exports=w.callsFor("export",true);Test.equal(#exports,2)
+        Test.equal(exports[2].filter.name,item.name);Test.equal(exports[2].filter.fingerprint,nil)
+        assert(w.at(1,m.engine.verifyHeldTransfer))
+        local shipment=m.store.data.master.colonies["2"].shipments[1]
+        assert(shipment.item.transientNameImport==true);Test.equal(shipment.item.fingerprint,nil)
+        m.config.automationEnabled=true
+        w.untilTrue(function()
+            for _,entry in pairs(c.rs.items) do if entry.name==item.name and entry.amount==1 then return true end end
+            return false
+        end,"recovered "..item.name.." did not import exactly once")
+        Test.equal(#w.callsFor("export",true),2);Test.equal(#w.callsFor("import",false),1)
+        assert(not m.store.data.master.quarantine and not c.store.data.client.fault)
+    end
 end)
 return true

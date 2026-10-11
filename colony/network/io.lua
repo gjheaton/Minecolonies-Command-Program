@@ -330,7 +330,7 @@ function M.new(config,store,matcher)
         end
         if transientNameImport and (type(matcher.isTransientTransportName)~="function"
             or not matcher.isTransientTransportName(item.name) or item.fingerprint~=nil) then
-            return nil,"Transient-name import is only valid for an unbound vanilla clock or compass"
+            return nil,"Transient-name import is only valid for a supported unbound transport variant"
         end
         -- AP fingerprints describe the stack, not its RS network. AP tests
         -- this signature on the source chest stack before extracting it.
@@ -390,11 +390,13 @@ function M.new(config,store,matcher)
         if plain and found then return {name=variant.name},"plain-name" end
 
         -- AP 0.7.48r computes fingerprints by calling getOrCreateTag() on the
-        -- live RS cache stack. A freshly crafted untagged clock/compass can
+        -- live RS cache stack. A freshly crafted untagged clock/compass or
+        -- Ancient Tome can
         -- therefore become an empty-tag cache entry just before COMPARE_NBT,
         -- making a valid export return zero. A name selector avoids that bug,
         -- but only when the complete same-name stock is proven to contain no
-        -- variant except untagged items and Quark's sole calculated flag.
+        -- variant except untagged items and the exact harmless transport
+        -- metadata recognized by the matcher.
         local transient=type(items)=="table" and not candidate.toolClass and not candidate.hasNBT
             and candidate.name==variant.name
             and type(matcher.isTransientTransportName)=="function"

@@ -50,6 +50,13 @@ local function fixture(role,hasMonitor,width,height,options)
     function f.touch(x,y)
         return hasMonitor==false and ui.handleEvent("mouse_click",1,x,y) or ui.handleEvent("monitor_touch","top",x,y)
     end
+    function f.click(label)
+        for y=1,f.screen.height do
+            local x=(f.screen.lines[y] or ""):find(label,1,true)
+            if x then return f.touch(x,y) end
+        end
+        error("visible control missing: "..label.."\n"..f.screen.dump())
+    end
     function f.selectSetting(key)
         local schemas=Config.fields(config.role)
         local rows=f.screen.height-((options and options.readOnly) and 9 or 10)
@@ -70,15 +77,45 @@ end
 Test.case("shared supply UI renders every existing tab and preserves verified quantities",function()
     local f=fixture()
     f.state.requests={{id="R",name="minecraft:stone",status="in progress",requested=6,shipped=4,imported=2}}
-    for _,view in ipairs({"home","health","requests","history","errors","settings","routes"}) do
+    for _,view in ipairs({"home","health","recovery","requests","history","errors","settings","routes"}) do
         f.ui.view=view;f.ui.draw()
         assert(f.monitor.dump():find("CHECK UPDATE",1,true),"upper-right update control absent")
+        assert(f.monitor.dump():find("RUNNING",1,true),"master automation toggle absent from "..view)
     end
+    f.ui.view="routes";f.ui.draw();f.click("ADD COLONY ROUTE")
+    assert(f.monitor.dump():find("RUNNING",1,true),"master automation toggle absent from route editor")
+    f.click("PER COLONY POLICY OVERRIDES")
+    assert(f.monitor.dump():find("RUNNING",1,true),"master automation toggle absent from overrides editor")
     f.ui.view="requests";f.ui.draw()
     local text=f.monitor.dump()
     assert(text:find("6 / 4 / 2",1,true) and text:find("IN PROGRESS",1,true))
     assert(text:find("completion requires MineColonies",1,true))
     Test.equal(f.store.failures,0,"protected drawing swallowed a rendering failure")
+end)
+
+Test.case("master header automation toggle persists, resumes, and rolls back failed saves",function()
+    local f=fixture("master")
+    f.ui.view="history";f.ui.draw();f.click("RUNNING")
+    Test.equal(f.config.automationEnabled,false)
+    Test.equal(Config.load("master").automationEnabled,false)
+    assert(f.monitor.dump():find("PAUSED",1,true),"paused state not displayed in the header")
+    f.ui.view="errors";f.ui.draw();f.click("PAUSED")
+    Test.equal(f.config.automationEnabled,true)
+    Test.equal(Config.load("master").automationEnabled,true)
+    f.w.writeFail=true;f.ui.view="requests";f.ui.draw();f.click("RUNNING")
+    Test.equal(f.config.automationEnabled,true,"failed save changed live automation state")
+    Test.equal(Config.load("master").automationEnabled,true,"failed save changed persisted automation state")
+    assert(f.monitor.dump():find("RUNNING",1,true),"failed save displayed an unsaved paused state")
+    Test.equal(f.store.failures,1,"failed header save was not recorded")
+end)
+
+Test.case("colony and read-only dashboards do not expose the master automation toggle",function()
+    local supply=fixture("supply");supply.ui.draw()
+    assert(not supply.monitor.dump():find("RUNNING",1,true) and not supply.monitor.dump():find("PAUSED",1,true))
+    local remote=fixture("supply",true,80,24,{readOnly=true});remote.ui.draw()
+    local text=remote.monitor.dump()
+    assert(text:find("READ ONLY",1,true))
+    assert(not text:find("RUNNING",1,true) and not text:find("PAUSED",1,true))
 end)
 
 Test.case("UI editor validates values and persists scalar settings without blocking read",function()

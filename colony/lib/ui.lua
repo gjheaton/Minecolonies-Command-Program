@@ -1,9 +1,9 @@
 -- MineColonies Control Suite - shared monitor UI framework
--- Component version: 1.1.0
+-- Component version: 1.1.1
 local Util = require("colony.lib.util")
 
 local M = {}
-M.COMPONENT_VERSION = "1.1.0"
+M.COMPONENT_VERSION = "1.1.1"
 
 local BASE = {
     bg = colors.black,
@@ -211,17 +211,27 @@ function M.newMonitor(options)
         ctx.center(2, opts.subtitle or "", opts.subtitleFg or theme.title, headBg)
         ctx.fill(1, 3, w, 3, opts.statusBg or theme.panel)
 
-        local rightWidth = 0
-        if opts.button and opts.button.label then
-            rightWidth = math.min(w, math.max(opts.button.minWidth or 14, #opts.button.label + 2))
-            local bx = math.max(1, w - rightWidth + 1)
-            ctx.addButton(opts.button.id or "header_button", bx, 3, w, 3,
-                opts.button.label, opts.button.bg or theme.navActive,
-                opts.button.fg or theme.navText, opts.button.action)
-            rightWidth = w - bx + 1
+        local headerButtons = opts.buttons
+        if type(headerButtons) ~= "table" then
+            headerButtons = opts.button and {opts.button} or {}
+        end
+        local rightEdge = w
+        -- Button specifications are supplied left-to-right. Draw from the
+        -- right so the final control retains the established upper-right
+        -- position while earlier controls line up beside it.
+        for index = #headerButtons, 1, -1 do
+            local button = headerButtons[index]
+            if button and button.label and rightEdge >= 1 then
+                local width = math.min(rightEdge, math.max(button.minWidth or 14, #button.label + 2))
+                local bx = math.max(1, rightEdge - width + 1)
+                ctx.addButton(button.id or ("header_button_" .. tostring(index)), bx, 3, rightEdge, 3,
+                    button.label, button.bg or theme.navActive,
+                    button.fg or theme.navText, button.action)
+                rightEdge = bx - 1
+            end
         end
 
-        local statusRight = math.max(1, w - rightWidth)
+        local statusRight = math.max(1, rightEdge)
         ctx.center(3, opts.status or "", opts.statusFg or theme.dim,
             opts.statusBg or theme.panel, 1, statusRight)
 

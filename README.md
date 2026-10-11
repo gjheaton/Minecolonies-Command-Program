@@ -1,6 +1,6 @@
 # MineColonies Control Suite
 
-The `supply-master-colony` branch provides Supply 4.0.17: one dedicated computer owns
+The `supply-master-colony` branch provides Supply 4.0.18: one dedicated computer owns
 Player Refined Storage (PRS), and colony supply computers communicate with it over
 rednet. Each colony has a delivery and a return Ender Chest channel. Command Center
 is also available through the same installer.
@@ -57,6 +57,12 @@ Use the UI's **CHECK UPDATE / UPDATE** control or the same installer:
 install_colony --update master
 ```
 
+The master also has a saved **RUNNING / PAUSED** toggle beside the update control
+at the top of every local tab. Press **RUNNING** to stop new turns while active
+handshakes finish safely; press **PAUSED** to resume. The SETTINGS control remains
+available. Colony-local screens and read-only colony dashboards do not expose the
+master toggle.
+
 Use `supply` or `command` instead of `master` on those computers. The stored update
 source remains this development branch until explicitly changed. In 4.0.9, the
 master UPDATE button saves an automation pause, drains reserved turns, then installs
@@ -101,7 +107,7 @@ Versions use **MAJOR.MINOR.PATCH**:
 - **Minor**, the second number, changes for compatible new features.
 - **Patch**, the third number, changes for fixes and maintenance updates.
 
-This update is **4.0.17**. Future fixes increase the patch number so **CHECK UPDATE**
+This update is **4.0.18**. Future fixes increase the patch number so **CHECK UPDATE**
 can detect them. A minor release resets the patch number, such as `4.1.0`; a major
 release resets both later numbers, such as `5.0.0`.
 
@@ -131,7 +137,7 @@ It saves an automation pause, verifies the held transfer, and displays RECOVERED
 or BLOCKED without stopping the application. A recorded zero export may send one
 guarded recovery item. Automation stays paused afterward; error history is kept.
 
-Command Center is now **4.0.1**, packaged in suite **4.0.17**. Its monitor header
+Command Center is now **4.0.1**, packaged in suite **4.0.18**. Its monitor header
 and installer metadata use the same application version. Existing V4 Command
 installations can update without resetting their settings.
 
@@ -210,3 +216,12 @@ the physical chest increase, and tells the colony to import that exact chest slo
 Lodestone compasses, renamed items, enchantments, and every additional NBT field
 remain exact variants. Existing held clock exports can use the guarded recovery
 after both master and colony are updated; no chest or ledger should be cleared.
+
+Suite 4.0.18 extends the guarded transport path to MineColonies Ancient Tomes
+whose only added metadata is the `raidWillHappen` boolean that MineColonies writes
+while the item is in a player inventory. Any additional metadata remains an exact
+variant. This release also adds the persistent master **RUNNING / PAUSED** header
+toggle described above; a failed configuration save retains and displays the
+prior automation state. For an already held Ancient Tome, update both master and
+colony, leave the chest and ledger intact, then use
+**HEALTH → RECOVER TRANSFER → RUN RECOVERY** on the master.

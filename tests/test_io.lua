@@ -713,17 +713,24 @@ Test.case("plain-name physical verification rejects a tagged same-name gain whil
     Test.equal(plain.name,item.name);Test.equal(plain.nbt,nil)
 end)
 
-Test.case("clock and compass Quark calculated tags use a guarded name selector while every other NBT variant stays exact",function()
+Test.case("calculated and Ancient Tome transport tags use a guarded name selector while every additional variant stays exact",function()
     for _,case in ipairs({
-        {name="minecraft:clock",tag="quark:clock_calculated"},
-        {name="minecraft:compass",tag="quark:compass_calculated"},
+        {name="minecraft:clock",nbt={["quark:clock_calculated"]=1}},
+        {name="minecraft:compass",nbt={["quark:compass_calculated"]=1}},
+        {name="minecolonies:ancienttome",nbt={raidWillHappen=false}},
     }) do
         local _,m=targetFixture()
         local request=S.request("R",case.name,1)
         local candidate=m.matcher.requestCandidates(request)[1]
-        local tagged={name=case.name,nbt={[case.tag]=1},amount=9,fingerprint=case.name.."-tagged"}
+        local tagged={name=case.name,nbt=case.nbt,amount=9,fingerprint=case.name.."-tagged"}
         local plain={name=case.name,amount=1,fingerprint=case.name.."-plain"}
-        assert(m.matcher.exactlyMatches(candidate.raw,tagged),"sole calculated tag did not satisfy the generic request")
+        assert(m.matcher.exactlyMatches(candidate.raw,tagged),"exact transport tag did not satisfy the generic request")
+        if case.name=="minecolonies:ancienttome" then
+            assert(m.matcher.exactlyMatches(candidate.raw,{name=case.name,nbt={raidWillHappen=true}}),
+                "positive raid forecast did not satisfy the generic Tome request")
+            assert(not m.matcher.exactlyMatches(candidate.raw,{name=case.name,nbt={raidWillHappen=1}}),
+                "non-boolean Tome metadata was accepted as a transient tag")
+        end
         local filter,kind=m.io.exportSelection(candidate,tagged,{tagged,plain})
         Test.equal(kind,"transient-name");Test.equal(filter.name,case.name);Test.equal(filter.fingerprint,nil)
         local physical=assert(m.io.exportEvidence(assert(m.io.exportBaseline({})),
@@ -734,6 +741,9 @@ Test.case("clock and compass Quark calculated tags use a guarded name selector w
         if case.name=="minecraft:compass" then
             unsafe={name=case.name,nbt={LodestonePos={X=1,Y=64,Z=2},LodestoneDimension="minecraft:overworld"},
                 amount=1,fingerprint=case.name.."-lodestone"}
+        elseif case.name=="minecolonies:ancienttome" then
+            unsafe={name=case.name,nbt={raidWillHappen=false,display={Name="Named"}},
+                amount=1,fingerprint=case.name.."-named"}
         end
         assert(not m.matcher.exactlyMatches(candidate.raw,unsafe),"meaningful variant became a generic transport item")
         filter,kind=m.io.exportSelection(candidate,tagged,{tagged,plain,unsafe})

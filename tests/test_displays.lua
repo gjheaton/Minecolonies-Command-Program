@@ -79,6 +79,7 @@ Test.case("remote monitor settings and action controls cannot mutate local confi
     local localBefore=textutils.serialize(f.c.config)
     f.touch("alpha","SETTINGS")
     local rendered=f.monitors.alpha.dump();assert(rendered:find("READ ONLY",1,true))
+    assert(not rendered:find("RUNNING",1,true) and not rendered:find("PAUSED",1,true),"remote dashboard exposed the master automation toggle")
     assert(rendered:find("Read-only telemetry",1,true))
     f.event("monitor_touch","alpha",2,5)
     f.event("paste","replacement-hardware");f.event("key",keys.enter)
