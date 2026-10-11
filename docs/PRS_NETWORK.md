@@ -93,8 +93,8 @@ item transport alone does not provide computer communications.
    or Ender Modems for inter-colony messages, keep a local wired network at the
    master for its monitors, bridge, and chests, and a local wired network at each
    colony for that colony's peripherals.
-5. Run `colony_master diag` and `colony_master monitors` to check the visible
-   devices, then configure their exact names. Run the controlled `chesttest`
+5. Run `colony_master --diag` and `colony_master --monitors` to check the visible
+   devices, then configure their exact names. Run the controlled `--chesttest`
    described below for each colony before enabling automatic transfers.
 
 Stop all previous programs and disconnect other PRS bridge clients. Do not run a
@@ -121,7 +121,7 @@ command again. The missing name identifies it. Reconnect and re-enable the modem
 then verify the name again before selecting it in setup. Avoid disconnecting a
 backbone cable that removes several devices at once.
 
-`colony_master monitors` also lists monitor names, sizes, and dashboard mappings.
+`colony_master --monitors` also lists monitor names, sizes, and dashboard mappings.
 There is no automatic reading of a chest's dye colors: use its physical label,
 the configured color-channel label, and the controlled chest test together.
 
@@ -155,10 +155,20 @@ install_colony --install command
 These are **clean installations**, including when used on an existing v4 machine.
 Use `--update` or `--repair` to preserve data.
 
+All suite command-line options use the `--` prefix. Values such as the role,
+computer ID, setting key, peripheral name, item ID, shipment ID, or source URL
+remain unprefixed. For example, `colony_supply --clear-errors` and
+`colony_master --set automationEnabled false` follow the same convention as
+`install_colony --repair`. Bare options from earlier releases remain accepted
+as compatibility aliases. Running `colony_master` or `colony_supply` without an
+option starts the normal application.
+Use `install_colony --help`, `colony_master --help`, or `colony_supply --help` to
+list that program's options.
+
 Run the indicated setup command before starting automation:
 
 ```lua
-colony_master setup
+colony_master --setup
 ```
 
 For the master, select its overview monitor and PRS Bridge, then add each colony's
@@ -166,7 +176,7 @@ computer ID, label, master-side delivery and return inventories, color-channel
 labels, and optional dashboard monitor. On each colony run:
 
 ```lua
-colony_supply setup
+colony_supply --setup
 ```
 
 Enter the master computer ID, the colony's RS Bridge/Integrator, local chest names,
@@ -195,7 +205,7 @@ several monitors are attached, select the overview by its exact peripheral name.
 The following command also explicitly pauses the master before a hardware test:
 
 ```lua
-colony_master set automationEnabled false
+colony_master --set automationEnabled false
 ```
 
 Reboot colony computers so their clients are listening. Leave the master in the
@@ -230,8 +240,8 @@ item-delivery timeouts are separate configurable settings.
 First perform read-only checks on both endpoints:
 
 ```lua
-colony_master diag
-colony_supply diag
+colony_master --diag
+colony_supply --diag
 ```
 
 The report checks configured inventory names, size/list access, push/pull methods,
@@ -244,13 +254,13 @@ client running. Empty both channels and put a plain cobblestone in PRS. On the
 master run, replacing `12` with the colony computer ID:
 
 ```lua
-colony_master chesttest 12
+colony_master --chesttest 12
 ```
 
 You can specify another plain non-NBT test item:
 
 ```lua
-colony_master chesttest 12 minecraft:dirt
+colony_master --chesttest 12 minecraft:dirt
 ```
 
 The test:
@@ -269,14 +279,15 @@ Do not run the test from a second master computer. Stop the existing master prog
 first; if the startup launcher is running, terminate the application and launcher
 to reach the shell.
 
-An interrupted test retains its journal. Rerun the **same** `chesttest ID` to resume
-or reconcile its existing movement without repeating an uncertain export/import.
+An interrupted test retains its journal. Rerun the **same**
+`colony_master --chesttest ID` to resume or reconcile its existing movement without
+repeating an uncertain export/import.
 If the original return import can be proven from the saved before/after counts,
 the test can finish without a second import. If proof is unavailable, manually
 inspect/recover the test item and empty both channels, then use:
 
 ```lua
-colony_master chesttest abandon 12
+colony_master --chesttest --abandon 12
 ```
 
 This requires typing `ABANDON`, checks that the colony also sees empty channels,
@@ -365,21 +376,21 @@ screens share the same layout.
 List the master's available monitors and their mappings:
 
 ```lua
-colony_master monitors
+colony_master --monitors
 ```
 
 Names such as `monitor_0` are examples; use the names reported by your computer.
 If more than one monitor is visible, select the primary overview explicitly:
 
 ```lua
-colony_master set monitorName monitor_0
+colony_master --set monitorName monitor_0
 ```
 
 Assign a separate master-side monitor to a configured colony, replacing `12`
 with that colony computer's ID:
 
 ```lua
-colony_master monitor 12 monitor_1
+colony_master --monitor 12 monitor_1
 ```
 
 The main **SETTINGS** route editor labels this optional field **Master colony
@@ -388,7 +399,7 @@ the primary overview monitor. A master with N dashboard panels needs N + 1
 separate monitors, all built to the same 5 × 3 size. To remove a dashboard:
 
 ```lua
-colony_master monitor 12 none
+colony_master --monitor 12 none
 ```
 
 These assignments change displays only. The display assignment command preserves
@@ -396,8 +407,8 @@ pending supply work; it does not reconfigure bridges or chests. Stop the applica
 to use shell commands, then restart it to apply the saved mapping. Do not start
 another master process alongside the existing one.
 
-On each colony, `colony_supply setup` or the local **SETTINGS** page selects its
-own monitor; `colony_supply monitors` lists its visible monitors. A master-side
+On each colony, `colony_supply --setup` or the local **SETTINGS** page selects its
+own monitor; `colony_supply --monitors` lists its visible monitors. A master-side
 dashboard shows snapshots sent by that colony; it
 does not connect to the colony's local monitor or access its RS Bridge.
 
@@ -456,11 +467,11 @@ from a remote snapshot.
 Set these values in the appropriate computer's **SETTINGS** or while stopped:
 
 ```lua
-colony_supply set telemetryIntervalSeconds 5
-colony_supply set telemetryMaxRequests 256
-colony_master set telemetryMaxRequests 256
-colony_master set telemetryStaleSeconds 30
-colony_master set telemetryOfflineSeconds 90
+colony_supply --set telemetryIntervalSeconds 5
+colony_supply --set telemetryMaxRequests 256
+colony_master --set telemetryMaxRequests 256
+colony_master --set telemetryStaleSeconds 30
+colony_master --set telemetryOfflineSeconds 90
 ```
 
 ### Supply settings and policy
@@ -527,13 +538,13 @@ disable **Transfer by peripheral name** and configure each directional path. The
 chest test must pass for that physical arrangement. Do not disable inventory checks.
 
 The UI guards hardware/route changes while transfers, staged shipments, or uncertain
-work remain. The `setup` and `set` commands also check persisted work. Example scalar
+work remain. The `--setup` and `--set` options also check persisted work. Example scalar
 changes while stopped:
 
 ```lua
-colony_master set maxRequestsPerTurn 8
-colony_master set craftingTimeoutSeconds 900
-colony_master set autoCraftEnabled false
+colony_master --set maxRequestsPerTurn 8
+colony_master --set craftingTimeoutSeconds 900
+colony_master --set autoCraftEnabled false
 ```
 
 Use the master route editor for labels, inventory names, color codes, and per-colony
@@ -546,8 +557,8 @@ Two alternating, verified journal slots retain request, craft, and transfer stat
 stops further mutations. Retain these files when diagnosing a problem. Do not delete
 them to force a retry while there may be items in transit or accepted crafts.
 
-The **HEALTH / RECONCILE** action, or `colony_master reconcile` /
-`colony_supply reconcile`, checks recorded transfers. It credits existing physical
+The **HEALTH / RECONCILE** action, or `colony_master --reconcile` /
+`colony_supply --reconcile`, checks recorded transfers. It credits existing physical
 proof rather than blindly reissuing a movement. A definitely reported zero PRS
 export with an unchanged chest may use an explicitly requested, journaled one-item
 recovery export after the colony acknowledged its paused result. An ambiguous bridge
@@ -555,9 +566,11 @@ exception does not authorize that retry. Unprovable quantities stay blocked for
 inventory inspection. A processor crash requires restart after recovery; a storage
 failure must be repaired before restarting.
 
-For **PROCESSOR_ERROR: Cannot serialize table with repeated entries**, run
-`install_colony --repair` and reboot the master and colony computers. This code
-fix preserves configuration and request/transfer journals and allows shared
+For **PROCESSOR_ERROR: Cannot serialize table with repeated entries**, update
+the master and every colony supply computer to 4.0.1 or later, then restart them.
+Use **CHECK UPDATE → UPDATE**, or `install_colony --update master` on the master
+and `install_colony --update supply` on each colony. This code fix preserves
+configuration and request/transfer journals and allows shared
 request tables to be saved. Requests marked **timed out** can receive updated
 statuses when their next turn completes. If restart reports **TURN_INTERRUPTED**,
 **IMPORT_UNCERTAIN**, or a transfer verification fault, let the original turn
@@ -568,23 +581,24 @@ above; retained transfer safeguards still apply.
 
 Earlier 4.0.0 code could export a tool successfully but fail chest verification
 because it compared AP NBT data directly with a CC inventory hash. Leave those
-items untouched and pause master automation. Repair the **master and every Supply
-computer** before resuming transfers: the fix changes how exact item selectors
-are carried between them. Repair keeps their configuration and journals.
+items untouched and pause master automation. Update the **master and every Supply
+computer** to 4.0.1 or later before resuming transfers: the fix changes how exact
+item selectors are carried between them. Update keeps their configuration and journals.
 
 If the original Stardust turn is still open, leave both normal programs running
 with automation paused until its batch/result/acknowledgment handshake closes.
-Then stop the applications and startup launchers to reach their shells. Run
-`install_colony --repair` on each computer. On the **master**, for Stardust at
-colony computer ID `4`, run:
+Then use **CHECK UPDATE → UPDATE** on each computer, or stop the applications and
+startup launchers to reach their shells and run `install_colony --update master`
+on the master and `install_colony --update supply` on each colony. On the **master**,
+for Stardust at colony computer ID `4`, run:
 
 ```lua
-colony_master transferdiag
-colony_master reconcile-bind 4
+colony_master --transferdiag
+colony_master --reconcile-bind 4
 ```
 
-`transferdiag` is read-only and shows the held AP selection beside the physical
-CC identity. `reconcile-bind` previews an older, single-item export with a known
+`--transferdiag` is read-only and shows the held AP selection beside the physical
+CC identity. `--reconcile-bind` previews an older, single-item export with a known
 reported count of one, an original count of zero, and no complete saved chest
 baseline. It requires restored PRS access, a finished handshake, one unambiguous
 physical identity, and the other retained deliveries still present.
@@ -593,7 +607,7 @@ Type the literal `BIND 4` only after confirming the shears were **absent before
 that export** and the delivered pair has remained untouched and unreplaced. The
 command durably records **OPERATOR_BIND_EXPORT** and creates one verified shipment
 for the existing item without exporting again. A false confirmation can credit
-an unrelated item; any other input cancels. Only after **OK:** and repairs on all
+an unrelated item; any other input cancels. Only after **OK:** and updates on all
 computers, reboot the master and clients, then resume master automation. If
 **BLOCKED:** appears, retain the items and journals and inspect the reported cause.
 
@@ -601,11 +615,11 @@ computers, reboot the master and clients, then resume master automation. If
 
 For local **TRANSFER_DESYNC: Transfer result unknown**, pause master automation.
 Stop the affected colony application and startup launcher to reach the shell,
-then fetch the latest same-version fix and run its read-only diagnostic:
+then update to the current release and run its read-only diagnostic:
 
 ```lua
-install_colony --repair
-colony_supply diag
+install_colony --update supply
+colony_supply --diag
 ```
 
 The report shows the selected RS Bridge name, `isConnected`, stock-read result,
@@ -629,20 +643,20 @@ automatic reconciliation will succeed.
 
 #### Operator-confirmed zero colony import
 
-`colony_supply reconcile-zero <shipment ID>` is a local Supply recovery for an
+`colony_supply --reconcile-zero <shipment ID>` is a local Supply recovery for an
 unknown import that you can confirm moved **no items**, with none subsequently
 replaced in the source chest. An unchanged stack alone cannot prove that; a
 false zero confirmation can cause excess deliveries when normal imports resume.
 Ordinary reconciliation still blocks an unknown return.
 
-Keep master automation paused and repair the affected Supply computer to obtain
+Keep master automation paused and update the affected Supply computer to obtain
 the command. If its original turn is still waiting for the master result, run
 both normal programs while paused until that handshake finishes, then stop the
 colony application and startup launcher again. For Stardust's held rice import:
 
 ```lua
-install_colony --repair
-colony_supply reconcile-zero shipment-27
+install_colony --update supply
+colony_supply --reconcile-zero shipment-27
 ```
 
 Before confirming, inspect the delivery chest and warehouse: the original one
@@ -665,16 +679,18 @@ the reported cause; do not clear the journal to bypass the guard.
 1. Pause **Run supply automation** on the master, then stop the server or leave
    the singleplayer world. If the full disk prevents saving the pause setting,
    after increasing the quota stop the master application and startup launcher
-   at the shell, run `colony_master set automationEnabled false`, then repair
+   at the shell, run `colony_master --set automationEnabled false`, then update
    and reboot it as below.
 2. In the existing `<world>/serverconfig/computercraft-server.toml`, change the
    root setting to `computer_space_limit = 10000000` (10 MB), then restart the
    server or reopen the world. A computer `reboot` alone does not apply the new
    capacity. This keeps computer IDs, files, journals, and inventories intact.
-3. On the master and **every** colony supply computer, stop the application and
-   startup launcher to reach the shell, run `install_colony --repair`, then
-   run `reboot`. Repair fetches this fix even though the
-   release remains 4.0.0; it preserves configuration and request/transfer journals.
+3. On the master and **every** colony supply computer, update to 4.0.1 or later
+   with **CHECK UPDATE → UPDATE**. Alternatively, stop the application and startup
+   launcher to reach the shell, run `install_colony --update master` on the master
+   or `install_colony --update supply` on a colony, then run `reboot`. Updates
+   preserve configuration and request/transfer journals. If damaged files prevent
+   an ordinary update, use `install_colony --repair` for a forced reinstall.
    Do not use `CLEAN`, delete journal slots, or empty delivery chests to force a retry.
 4. Keep the master and affected colony programs running with new automation
    paused. Existing turns still finish their original batch/result/acknowledgment
@@ -696,8 +712,8 @@ a colony's history on its own Supply computer. At the shell, the equivalent
 commands are:
 
 ```lua
-colony_supply clear-errors
-colony_master clear-errors
+colony_supply --clear-errors
+colony_master --clear-errors
 ```
 
 Clearing recorded errors preserves active faults, transfer intents, shipments,
@@ -707,31 +723,40 @@ reboots. An active **ERROR** or stopped processor still needs attention on
 **HEALTH**; clearing history does not reconcile or restart it. If saving cannot be
 confirmed, the clear reports failure and retains the records in the current display.
 
-For updates, pause the master, let turns finish, then use the shared update control
-or the same installer:
+For updates, pause the master, let current turns finish, then use
+**CHECK UPDATE → UPDATE** on each computer or the same installer:
 
 ```lua
 install_colony --update master
 install_colony --update supply
-install_colony --repair
 ```
 
 Run the appropriate command on each role; do not update two processes concurrently
-on one computer. `--repair` restores code while keeping the same role/configuration
-and ledger. A legacy installation must use the first clean v4 installation rather
-than an in-place update. Update both roles for protocol-changing releases.
+on one computer. Update the master and every colony supply computer to 4.0.1 before
+resuming automation, and update both roles together for protocol-changing releases.
+An older v3 installation must use the first clean v4 installation instead of an
+in-place update.
 
 After the first clean Supply 4.0.0 installation, future **Update** and **Repair**
 operations preserve the schema 4 configuration, monitor assignments, and request
 journals. Do not use `--install` or type `CLEAN` when preserving an existing
 installation.
 
-For corrected setup screens or peripheral pickers within the same 4.0.0 version, use
-`install_colony --repair` to fetch the current code even when the version number
-has not changed. Repair preserves the configuration and request journals.
-Restart the application to use the new **SETTINGS** and **COLONY ROUTES** pickers.
-Run `colony_master setup` or `colony_supply setup` if you need to repeat the
-hardware wizard; do not use `CLEAN` to obtain a same-version fix.
+Use `install_colony --repair` for a forced reinstall when files are damaged or
+when retrieving a same-version code fix. Repair preserves configuration and
+request journals. The earlier fixes published as 4.0.0 required Repair because
+the update control only detects a greater version. Release 4.0.1 and subsequent
+fixes increment the patch number and can use the normal update control.
+Restart the application to use its updated screens and commands.
+Run `colony_master --setup` or `colony_supply --setup` if you need to repeat the
+hardware wizard; do not use `CLEAN` to obtain an update or repair.
+
+Versions follow **MAJOR.MINOR.PATCH**. The first number changes for incompatible
+behavior or migrations, the second for compatible new features, and the third
+for fixes and maintenance. This release is **4.0.1**; later fixes increase the
+third number. A minor release resets the patch number (`4.1.0`), and a major
+release resets both later numbers (`5.0.0`). The update control compares all three
+numbers and offers installation when the published version is greater.
 
 The installer resolves `supply-master-colony` to a Git SHA through GitHub's API and
 downloads all modules from that immutable revision. If GitHub API access is disabled,

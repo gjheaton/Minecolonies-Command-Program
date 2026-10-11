@@ -282,7 +282,7 @@ function M.runMaster(config,store,io,matcher,id,itemName,abandon)
             local returns=snapshot(io,route.returnChest); local after=io.stock()
             return countAll(returns)==0 and after and io.count(after,record.stockItem or record.item)>=record.prsBefore+1
         end)
-        if not confirmed then error("Interrupted PRS return cannot be proven and will not be repeated. Recover the test item manually, empty both channels, then use chesttest abandon "..id,0) end
+        if not confirmed then error("Interrupted PRS return cannot be proven and will not be repeated. Recover the test item manually, empty both channels, then use colony_master --chesttest --abandon "..id,0) end
         record.phase="release"; store.save()
     end
     if record.phase=="release" then

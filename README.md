@@ -1,6 +1,6 @@
 # MineColonies Control Suite
 
-The `supply-master-colony` branch provides Supply 4.0.0: one dedicated computer owns
+The `supply-master-colony` branch provides Supply 4.0.1: one dedicated computer owns
 Player Refined Storage (PRS), and colony supply computers communicate with it over
 rednet. Each colony has a delivery and a return Ender Chest channel. Command Center
 is also available through the same installer.
@@ -27,7 +27,7 @@ settings, request records, and logs from that computer. It preserves unrelated
 files and does not remove Minecraft inventories or items. Downloads are validated
 before cleanup. Later **Update** and **Repair** preserve the new settings and state.
 
-After installation, run `colony_master setup` or `colony_supply setup`, as indicated
+After installation, run `colony_master --setup` or `colony_supply --setup`, as indicated
 by the installer. Setup uses the computer's built-in keyboard screen, with one
 question at a time and numbered peripheral choices. Use `N`/`P` for pages or
 `:q` to cancel without saving; settings are saved only after the final confirmation.
@@ -42,6 +42,13 @@ compatible unused peripherals, so you do not have to type long device names.
 Names wrap in full, lists have pages, and choices refresh when hardware changes.
 Route selections are saved only when you choose **SAVE ROUTE**.
 
+Suite command-line options begin with `--`, including `colony_supply --clear-errors`
+and `colony_master --diag`. Their values stay unprefixed, for example
+`colony_master --set automationEnabled false`. Older bare options remain accepted
+as compatibility aliases; use the prefixed forms for new commands.
+Use `install_colony --help`, `colony_master --help`, or `colony_supply --help` to
+list the available options.
+
 ## Updates
 
 Use the UI's **CHECK UPDATE / UPDATE** control or the same installer:
@@ -51,18 +58,32 @@ install_colony --update master
 ```
 
 Use `supply` or `command` instead of `master` on those computers. The stored update
-source remains this development branch until explicitly changed. Update the master
-and all colony clients together when a release changes the protocol.
+source remains this development branch until explicitly changed. For 4.0.1, pause
+master automation, let current handshakes finish, then use **CHECK UPDATE → UPDATE**
+on the master and every colony supply computer. Settings and request/transfer
+journals are preserved. Resume automation after all computers have restarted with
+the new release. Update both roles together when a release changes the protocol.
 
 After the first clean installation, use **Update** or **Repair** for future
 releases. Both preserve settings and request journals. Pause master automation
 and let current handshakes finish before updating.
 
-For a fix to an already installed 4.0.0 build with the same version number, run
-`install_colony --repair`, then restart the application. Rerun
-`colony_master setup` or `colony_supply setup` if you need the hardware wizard.
+Use `install_colony --repair` for a forced reinstall of the installed role, including
+damaged files or a code fix that still has the same version number. Restart the
+application afterward. Rerun
+`colony_master --setup` or `colony_supply --setup` if you need the hardware wizard.
 Repair preserves configuration and journals; do not choose `CLEAN` to obtain
 the corrected setup screens or peripheral pickers.
+
+Versions use **MAJOR.MINOR.PATCH**:
+
+- **Major**, the first number, changes for incompatible behavior or migrations.
+- **Minor**, the second number, changes for compatible new features.
+- **Patch**, the third number, changes for fixes and maintenance updates.
+
+This update is **4.0.1**. Future fixes increase the patch number so **CHECK UPDATE**
+can detect them. A minor release resets the patch number, such as `4.1.0`; a major
+release resets both later numbers, such as `5.0.0`.
 
 ## Development checks
 

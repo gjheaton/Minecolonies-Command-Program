@@ -232,6 +232,64 @@ class InstallerTests(unittest.TestCase):
         self.assertIsNone(self.g.FILES["/colony/network/telemetry.lua"])
         self.assertIsNone(self.g.FILES["/colony/network/displays.lua"])
 
+    def seed_held_transfers(self, role):
+        """Add transfer safety state whose bytes must survive a package update."""
+        self.g.SEED_ROLE = role
+        self.g.SEED_MATCHER_SOURCE = (ROOT / "colony/supply/matcher.lua").read_text()
+        self.lua.execute('''
+            local matcher=assert(load(SEED_MATCHER_SOURCE,"matcher","t",_G))().new(
+                {equipmentAllowedNamespaces={minecraft=true}}, {})
+            local path="/colony/"..SEED_ROLE.."_v4_state"
+            for _, suffix in ipairs({".a", ".b"}) do
+                local journal=textutils.unserialize(FILES[path..suffix])
+                journal.history={{kind="OPERATOR_BIND_EXPORT",context={shipmentId="shipment-27"}}}
+                journal.errors={{code="TRANSFER_VERIFY",message="Held transfer must survive update"}}
+                local fingerprint=string.rep("a",32)
+                local physical={name="minecraft:shears",nbt=string.rep("b",32)}
+                local item={name=physical.name,nbt=physical.nbt,fingerprint=fingerprint}
+                local request={id="request-28",name="Shears",count=1,items={{name=item.name}}}
+                local shipment={id="shipment-27",requestId=request.id,generation=1,item=item,
+                    count=1,imported=0,verified=true,createdAt=90,session="master-1",turn=12}
+                if SEED_ROLE=="master" then
+                    local source={name=item.name,nbt={Damage=0},fingerprint=fingerprint}
+                    local previous={id="shipment-27",requestId="request-27",generation=1,
+                        item={name="minecraft:stone"},count=3,imported=0,verified=true,
+                        createdAt=80,session="master-1",turn=11}
+                    journal.master={sessionCounter=1,turnCounter=12,shipmentCounter=27,colonyCursor=0,
+                        pendingTransfer={kind="export",colonyId=4,requestId=request.id,generation=1,
+                            chest="delivery_4",item=source,candidate=matcher.requestCandidates(request)[1],
+                            variant={name=source.name,nbt=source.nbt,fingerprint=fingerprint,amount=8},
+                            count=1,before=0,reported=1,session="master-1",turn=12,startedAt=90,
+                            verifySeconds=5,pollSeconds=.25,uncertain=true,lastDelta=0},
+                        quarantine={code="TRANSFER_VERIFY",message="Held physical identity mismatch",
+                            context={colonyId=4,requestId=request.id,item=item.name,expected=1,reported=1}},
+                        colonies={["4"]={id=4,routeConfirmed=true,requestCursor=0,
+                            requests={[request.id]={id=request.id,generation=1,requested=1,status="error",
+                                errorCode="PRS_QUARANTINE",request=request,
+                                signature=matcher.itemIdentity(request.items[1]),createdAt=90},
+                                [previous.requestId]={id=previous.requestId,generation=1,requested=3,
+                                    status="in progress",request={id=previous.requestId,count=3,
+                                        items={{name="minecraft:stone"}}},createdAt=80}},
+                            shipments={previous}}},
+                        craftJobs={["minecraft:bread|NBT|"]={identity="minecraft:bread|NBT|",
+                            item={name="minecraft:bread"},count=64,baseline=0,exported=12,proven=12,
+                            createdAt=70,nextPollAt=105,timeoutSeconds=600,pollSeconds=15,
+                            stableReadsRequired=2,state="crafting",colonyId=4,requestId="request-26"}}}
+                else
+                    journal.client={intent={kind="import",shipmentId=shipment.id,item=item,
+                        chest="delivery_4",count=1,beforeChest=1,beforeImported=0,startedAt=90,
+                        session="master-1",turn=12,uncertain=true},
+                        fault={code="IMPORT_UNCERTAIN",message="Held import needs reconciliation",time=90},
+                        shipments={[shipment.id]=shipment},
+                        returnSelectors={[matcher.itemIdentity(physical)]={item=physical,fingerprint=fingerprint}},
+                        requests={[request.id]={id=request.id,request=request,status="in progress"}},
+                        session="master-1",turn={turn=12,phase="preparing",session="master-1"},
+                        retiredSessions={},seenTurns={["12"]=true},cursor=0}
+                end
+                put(path..suffix,textutils.serialize(journal))
+            end
+        ''')
+
     def test_metadata_is_safe_and_every_packaged_file_compiles(self):
         manifest = self.lua.eval('function(body) local c,e=load(body,"manifest","t",{}); assert(c,e); return c() end')(
             (ROOT / "colony/manifest.lua").read_text()
@@ -240,6 +298,22 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(self.info.installationSchema, 4)
         self.assertEqual(self.info.apps.command.version, "3.0.7")
         self.assertEqual(self.info.components.ui, "1.1.0")
+        self.assertEqual(self.info.installerVersion, CURRENT_VERSION)
+        self.assertEqual(self.info.apps.master.version, CURRENT_VERSION)
+        self.assertEqual(self.info.apps.supply.version, CURRENT_VERSION)
+        self.assertEqual(self.info.components.network, CURRENT_VERSION)
+        self.assertEqual(self.info.components.installer, CURRENT_VERSION)
+        config = self.lua.eval('function(body) local c,e=load(body,"config","t",{ipairs=ipairs}); assert(c,e); return c() end')(
+            (ROOT / "colony/network/config.lua").read_text()
+        )
+        self.assertEqual(config.VERSION, CURRENT_VERSION)
+        command_source = (ROOT / "colony_command.lua").read_text()
+        self.assertEqual(re.search(r'local SUITE_VERSION = "([^"]+)"', command_source).group(1), CURRENT_VERSION)
+        self.assertEqual(re.search(r'local PROGRAM_VERSION = "([^"]+)"', command_source).group(1), self.info.apps.command.version)
+        for app_id, app in self.info.apps.items():
+            self.assertEqual(app.version, manifest.apps[app_id].version)
+        for component_id, version in self.info.components.items():
+            self.assertEqual(version, manifest.components[component_id])
         self.assertEqual(len(self.info.files), len(manifest.files))
         for i in range(1, len(self.info.files) + 1):
             entry = self.info.files[i]
@@ -248,6 +322,22 @@ class InstallerTests(unittest.TestCase):
             path = ROOT / entry.remote
             self.assertTrue(path.is_file(), f"Missing advertised package file: {entry.remote}")
             self.lua.eval('function(body,name) local c,e=load(body,name,"t",{}); assert(c,e) end')(path.read_text(), entry.remote)
+
+    def test_help_needs_no_filesystem_http_or_terminal_and_lists_prefixed_options(self):
+        lines, result = self.lua.eval('''function(body)
+            local lines={}
+            local chunk,err=load(body,"installer help","t",{print=function(line) lines[#lines+1]=line end})
+            assert(chunk,err)
+            local result=chunk("--help")
+            return lines,result
+        end''')(INSTALLER)
+        self.assertTrue(result)
+        output="\n".join(lines.values())
+        for option in ("--install", "--update", "--repair", "--recover", "--metadata", "--help"):
+            self.assertIn(option, output)
+        self.assertIn("removes previous suite data", output)
+        self.assertIn("preserve data", output)
+        self.assertIn(CURRENT_VERSION, output)
 
     def test_clean_migration_removes_legacy_suite_data_only(self):
         self.g.seedLegacy()
@@ -394,11 +484,12 @@ class InstallerTests(unittest.TestCase):
             self.g.runInstaller("--update", "master", SOURCE)
         self.assertEqual(self.snapshot(), before)
 
-    def test_same_version_prototype_update_adds_new_modules_and_preserves_configuration_and_journal(self):
+    def test_prior_v4_update_adds_new_modules_and_preserves_configuration_and_journal(self):
         for role in ("master", "supply"):
             with self.subTest(role=role):
                 self.setUp()
                 self.seed_previous_v4(role)
+                self.seed_held_transfers(role)
                 before = self.snapshot()
                 # Updates must proceed without destructive confirmation.
                 self.g.CONFIRM = "do not clean"
@@ -417,7 +508,7 @@ class InstallerTests(unittest.TestCase):
                 self.assertIsNotNone(self.g.FILES["/colony/network/devices.lua"])
                 self.assertEqual(self.g.FILES["/my_other_program.lua"], "unrelated")
 
-    def test_failed_same_version_prototype_update_restores_old_package_and_journal(self):
+    def test_failed_prior_v4_update_restores_old_package_and_journal(self):
         self.seed_previous_v4()
         before = self.snapshot()
         self.g.FAIL_COPY = "/colony/network/master.lua"

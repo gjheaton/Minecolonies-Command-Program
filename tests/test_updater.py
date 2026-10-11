@@ -15,6 +15,7 @@ class UpdaterTests(unittest.TestCase):
     install = installer_fixture.InstallerTests.install
     seed_v4 = installer_fixture.InstallerTests.seed_v4
     seed_previous_v4 = installer_fixture.InstallerTests.seed_previous_v4
+    seed_held_transfers = installer_fixture.InstallerTests.seed_held_transfers
 
     def setUp(self):
         installer_fixture.InstallerTests.setUp(self)
@@ -174,10 +175,12 @@ class UpdaterTests(unittest.TestCase):
                 before = self.snapshot()
                 self.g.CONFIRM = "do not clean"
                 # Equal release versions do not advertise an automatic update.
-                # An explicit same-version repair still refreshes package files.
+                # An explicit repair can still refresh the package files.
+                self.g.REMOTE_FILES["install_colony.lua"] = installer_fixture.PREVIOUS_INSTALLER
                 self.assertFalse(self.g.makeUpdater("4.0.0", role).install())
                 self.assertEqual(self.snapshot(), before)
                 self.assertFalse(bool(self.g.REBOOTED))
+                self.g.REMOTE_FILES["install_colony.lua"] = INSTALLER
                 self.assertTrue(self.g.runInstaller("--repair", SOURCE))
                 for path in ("/colony/network.cfg", f"/colony/{role}_v4_state.a", f"/colony/{role}_v4_state.b"):
                     self.assertEqual(self.g.FILES[path], before[path], path)
@@ -193,6 +196,50 @@ class UpdaterTests(unittest.TestCase):
                 self.assertIsNotNone(self.g.FILES["/colony/network/devices.lua"])
                 self.assertFalse(bool(self.g.REBOOTED))
                 self.assertFalse(self.g.fs.exists("/install_colony.lua.update_tmp"))
+
+    def test_prior_4_0_0_update_button_installs_patch_and_preserves_held_transfers(self):
+        for role in ("master", "supply"):
+            with self.subTest(role=role):
+                self.setUp()
+                self.seed_previous_v4(role)
+                self.seed_held_transfers(role)
+                before = self.snapshot()
+                self.g.CONFIRM = "do not clean"
+                updater = self.g.makeUpdater("4.0.0", role)
+                newer, version = updater.check()
+                self.assertTrue(newer)
+                self.assertEqual(version, CURRENT_VERSION)
+                self.assertEqual(updater.buttonLabel(), f"UPDATE v{CURRENT_VERSION}")
+                self.assertTrue(updater.install())
+                self.assertEqual(list(self.g.SHELL_ARGUMENTS.values()), ["--update", role, SOURCE])
+                for path in ("/colony/network.cfg", f"/colony/{role}_v4_state.a", f"/colony/{role}_v4_state.b"):
+                    self.assertEqual(self.g.FILES[path], before[path], path)
+                cfg = self.g.textutils.unserialize(self.g.FILES["/colony/app.cfg"])
+                self.assertEqual(cfg.appVersion, CURRENT_VERSION)
+                self.assertEqual(cfg.suiteVersion, CURRENT_VERSION)
+                self.assertEqual(cfg.installationSchema, 4)
+                self.assertEqual(cfg.customExtension, "keep this")
+                self.assertEqual(cfg.role, role)
+                self.assertEqual(self.g.FILES["/install_colony.lua"], INSTALLER)
+                self.assertTrue(self.g.REBOOTED)
+                self.assertFalse(self.g.fs.exists("/install_colony.lua.update_tmp"))
+                self.assertFalse(self.g.fs.exists("/.colony_install_transaction"))
+
+    def test_current_patch_reports_current_without_writing_or_rebooting(self):
+        for role in ("master", "supply"):
+            with self.subTest(role=role):
+                self.setUp()
+                self.seed_v4(role)
+                before = self.snapshot()
+                updater = self.g.makeUpdater(CURRENT_VERSION, role)
+                newer, version = updater.check()
+                self.assertFalse(newer)
+                self.assertEqual(version, CURRENT_VERSION)
+                self.assertIsNone(updater.buttonLabel())
+                self.assertFalse(updater.install())
+                self.assertEqual(self.snapshot(), before)
+                self.assertIsNone(self.g.SHELL_PATH)
+                self.assert_no_reboot()
 
     def test_updater_does_not_delete_a_preexisting_temporary_file(self):
         updater = self.seed_update()

@@ -1,15 +1,62 @@
 -- Only the processor invokes engine methods or performs an RS operation.
 -- The receiver queues messages even while a bridge call yields.
-local Config=require("colony.network.config")
-local Store=require("colony.network.store")
-local IO=require("colony.network.io")
-local Protocol=require("colony.network.protocol")
-local Diagnostics=require("colony.network.diagnostics")
-local Matcher=require("colony.supply.matcher")
-local SuiteUpdater=require("colony.lib.updater")
-local Telemetry=require("colony.network.telemetry")
-local Displays=require("colony.network.displays")
 local M={}
+local commonModes={help=true,setup=true,diag=true,diagnostics=true,monitors=true,reconcile=true,["clear-errors"]=true,set=true}
+local masterModes={monitor=true,chesttest=true,transferdiag=true,["reconcile-bind"]=true}
+local supplyModes={["reconcile-zero"]=true}
+local function usage(role)
+    local program=role=="master" and "colony_master" or "colony_supply"
+    local lines={"Usage: "..program.." [option]",
+        "  --help                  Show these options",
+        "  --setup                 Configure hardware",
+        "  --diag                  Show diagnostics",
+        "  --monitors              List monitors",
+        "  --reconcile             Check held transfers",
+        "  --clear-errors          Clear recorded errors",
+        "  --set <key> <value>      Change a setting"}
+    if role=="master" then
+        lines[#lines+1]="  --monitor <ID> <name | none>"
+        lines[#lines+1]="  --chesttest <ID> [item]"
+        lines[#lines+1]="  --chesttest --abandon <ID>"
+        lines[#lines+1]="  --transferdiag          Inspect a held export"
+        lines[#lines+1]="  --reconcile-bind <ID>   Bind an existing export"
+    else
+        lines[#lines+1]="  --reconcile-zero <shipment ID>"
+    end
+    lines[#lines+1]="Run without options to start the application."
+    lines[#lines+1]="Earlier bare options and --diagnostics work too."
+    return table.concat(lines,"\n")
+end
+local function parseOptions(role,...)
+    local mode,arg2,arg3=...
+    local function invalid() error(usage(role),0) end
+    if role~="master" and role~="supply" then invalid() end
+    if select("#",...)>3 then invalid() end
+    if mode=="" then mode=nil end
+    if mode==nil then
+        if arg2~=nil or arg3~=nil then invalid() end
+        return
+    end
+    if type(mode)~="string" then invalid() end
+    -- Normalize only the option itself. IDs, names and other values remain
+    -- untouched, and the older bare spellings remain compatibility aliases.
+    if mode:sub(1,2)=="--" then mode=mode:sub(3) end
+    if not commonModes[mode] and not (role=="master" and masterModes[mode])
+        and not (role=="supply" and supplyModes[mode]) then invalid() end
+    if mode=="set" or mode=="monitor" then
+        if type(arg2)~="string" or arg2=="" or type(arg3)~="string"
+            or (mode=="monitor" and arg3=="") then invalid() end
+    elseif mode=="reconcile-bind" or mode=="reconcile-zero" then
+        if type(arg2)~="string" or arg2=="" or arg3~=nil then invalid() end
+    elseif mode=="chesttest" then
+        if arg2=="--abandon" then arg2="abandon" end
+        if arg2=="abandon" then
+            if type(arg3)~="string" or not tonumber(arg3) then invalid() end
+        elseif type(arg2)~="string" or not tonumber(arg2)
+            or (arg3~=nil and (type(arg3)~="string" or arg3=="")) then invalid() end
+    elseif arg2~=nil or arg3~=nil then invalid() end
+    return mode,arg2,arg3
+end
 local function staged(store,id)
     local data=store.data
     for _,entry in pairs(data.client and data.client.shipments or {}) do if (entry.count or 0)>(entry.imported or 0) then return true end end
@@ -35,7 +82,12 @@ local function retainedWork(store)
     return false
 end
 function M.run(role,...)
-    local mode,arg2,arg3=...
+    -- Help and invalid options must not load or rewrite a transfer journal,
+    -- construct an engine, or start the normal automation loop.
+    local mode,arg2,arg3=parseOptions(role,...)
+    if mode=="help" then print(usage(role));return end
+    local Config=require("colony.network.config")
+    local Store=require("colony.network.store")
     local config=Config.load(role)
     local store=Store.new("/colony/"..role.."_v4_state",config); store.load()
     if mode=="setup" or (not fs.exists(Config.PATH) and mode==nil) then
@@ -44,21 +96,24 @@ function M.run(role,...)
     end
     if mode=="clear-errors" then
         if (role~="master" and role~="supply") or arg2~=nil or arg3~=nil then
-            error("Usage: colony_master clear-errors | colony_supply clear-errors",0)
+            error("Usage: colony_master --clear-errors | colony_supply --clear-errors",0)
         end
         local cleared,detail=store.clearErrors()
         print((cleared and "OK: " or "BLOCKED: ")..tostring(detail));return
     end
+    local Matcher=require("colony.supply.matcher")
+    local IO=require("colony.network.io")
+    local Diagnostics=require("colony.network.diagnostics")
     local matcher=Matcher.new(config,store)
     local io=IO.new(config,store,matcher)
     if mode=="diag" or mode=="diagnostics" then Diagnostics.printReport(config,io,store); return end
     if mode=="transferdiag" then
-        if role~="master" or arg2~=nil or arg3~=nil then error("Usage: colony_master transferdiag",0) end
+        if role~="master" or arg2~=nil or arg3~=nil then error("Usage: colony_master --transferdiag",0) end
         Diagnostics.printHeldMaster(config,io,store);return
     end
     if mode=="reconcile-bind" then
         if role~="master" or type(arg2)~="string" or arg2=="" or arg3~=nil then
-            error("Usage: colony_master reconcile-bind <colony ID>",0)
+            error("Usage: colony_master --reconcile-bind <colony ID>",0)
         end
         local recovery=require("colony.network.master").legacyExportRecovery(config,store,io,matcher)
         local ok,preview=recovery.previewBindExport(arg2)
@@ -78,7 +133,7 @@ function M.run(role,...)
     end
     if mode=="reconcile-zero" then
         if role~="supply" or type(arg2)~="string" or arg2=="" or arg3~=nil then
-            error("Usage: colony_supply reconcile-zero <shipment ID>",0)
+            error("Usage: colony_supply --reconcile-zero <shipment ID>",0)
         end
         -- Preview before constructing the engine: boot recovery would rewrite
         -- the held fault. This command only records an operator-confirmed zero.
@@ -108,7 +163,7 @@ function M.run(role,...)
     end
     if mode=="monitor" and role=="master" then
         local id=tonumber(arg2)
-        if not id or type(arg3)~="string" or arg3=="" then error("Usage: colony_master monitor <colony ID> <monitor peripheral | none>",0) end
+        if not id or type(arg3)~="string" or arg3=="" then error("Usage: colony_master --monitor <colony ID> <monitor peripheral | none>",0) end
         local route
         for _,candidate in ipairs(config.colonies) do if candidate.id==id then
             route={}; for key,value in pairs(candidate) do route[key]=value end; break
@@ -133,11 +188,13 @@ function M.run(role,...)
         local ok,err=Config.set(config,arg2,value); if not ok then error(err,0) end
         Config.save(config); print("Saved "..arg2); return
     end
+    local Protocol=require("colony.network.protocol")
     local opened=Protocol.open()
     if not opened then error("No modem available for rednet. Connect a wired/wireless modem, then restart.",0) end
     if mode=="chesttest" then
         local abandon=arg2=="abandon"
-        Diagnostics.runMaster(config,store,io,matcher,assert(tonumber(abandon and arg3 or arg2),"Usage: colony_master chesttest <colony ID> [item] | chesttest abandon <ID>"),abandon and nil or arg3,abandon)
+        local item=not abandon and arg3 or nil
+        Diagnostics.runMaster(config,store,io,matcher,assert(tonumber(abandon and arg3 or arg2),"Usage: colony_master --chesttest <colony ID> [item] | --chesttest --abandon <ID>"),item,abandon)
         return
     end
     local Engine=require(role=="master" and "colony.network.master" or "colony.network.client")
@@ -169,7 +226,10 @@ function M.run(role,...)
         end
         print((ok and "OK: " or "BLOCKED: ")..tostring(err)); return
     end
-    if mode and mode~="" then error("Usage: "..(role=="master" and "colony_master" or "colony_supply").." [setup | diag | monitors | reconcile | clear-errors | set key value"..(role=="master" and " | monitor ID name | chesttest ID [item] | transferdiag | reconcile-bind colonyID" or " | reconcile-zero shipmentID").."]",0) end
+    if mode then error(usage(role),0) end
+    local SuiteUpdater=require("colony.lib.updater")
+    local Telemetry=require("colony.network.telemetry")
+    local Displays=require("colony.network.displays")
     local inbox,action={},nil
     local processorFault
     local telemetryFault

@@ -25,6 +25,9 @@ imports, craft reservation and timeout behavior, restart reconciliation,
 uncertain transfers, phantom stock, exact item variants, overflow safety, and
 completed-request retention. Runtime checks exercise typed CLI settings and
 prevent changing hardware around retained turns, crafts, or deliveries.
+CLI checks use the canonical `--` options and verify that older bare options
+remain compatibility aliases. Version checks cover `MAJOR.MINOR.PATCH`
+comparison and patch releases detected by the update control.
 Display checks exercise independent 5 by 3 monitor dashboards at scale 0.5,
 read-only colony settings, monitor reassignment and disconnects, and explicit
 partial/stale/offline telemetry. The real runtime event loop is simulated with
@@ -41,5 +44,5 @@ and that a successful update proves its package metadata before rebooting.
 
 These checks validate program behavior against the simulated API. They do not
 establish that a particular Minecraft mod version exposes those APIs or avoids
-desync. Use the installed `chesttest` command against the actual Ender Chests
-before enabling supply automation, following `docs/PRS_NETWORK.md`.
+desync. Use the installed `colony_master --chesttest` command against the actual
+Ender Chests before enabling supply automation, following `docs/PRS_NETWORK.md`.

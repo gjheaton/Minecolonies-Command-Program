@@ -778,7 +778,7 @@ function M.new(config, store, engine, io, updater, options)
                 end)
             end)
         end
-        if #schemas==0 then row(6,"Policy overrides are available with: colony_master.lua route",C.dim) end
+        if #schemas==0 then row(6,"No policy override fields are available.",C.dim) end
         row(h-2,"Save changes using SAVE ROUTE on the previous screen.",C.dim)
         footer("overrides",page,pages,"BACK",function() self.view="route" end)
     end
@@ -917,7 +917,7 @@ function M.new(config, store, engine, io, updater, options)
             screen.writeAt(1,1,"SUPPLY "..role():upper(),C.title)
             screen.writeAt(1,2,"Monitor too small.",C.warn)
             screen.writeAt(1,3,"Resize to 24 x 10+.",C.dim)
-            screen.writeAt(1,4,"CLI: setup / config",C.dim)
+            screen.writeAt(1,4,"CLI: --setup / --help",C.dim)
             return
         end
         if options.readOnly and (self.view=="routes" or self.view=="route" or self.view=="overrides") then self.view="settings" end
