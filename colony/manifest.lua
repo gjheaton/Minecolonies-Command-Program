@@ -1,17 +1,17 @@
 -- MineColonies Control Suite local manifest
--- Suite version: 4.0.9
+-- Suite version: 4.0.10
 return {
-    suiteVersion = "4.0.9",
+    suiteVersion = "4.0.10",
     installationSchema = 4,
     repositoryLayout = "cc-mirror",
     components = {
-        startup = "1.1.0", installer = "4.0.9", util = "1.1.0", ui = "1.1.0",
-        version = "1.0.0", updater = "1.2.0", network = "4.0.9",
+        startup = "1.1.0", installer = "4.0.10", util = "1.1.0", ui = "1.1.0",
+        version = "1.0.0", updater = "1.2.0", network = "4.0.10",
     },
     apps = {
-        master = { version = "4.0.9", program = "/colony_master.lua" },
-        supply = { version = "4.0.9", program = "/colony_supply.lua" },
-        command = { version = "4.0.0", program = "/colony_command.lua" },
+        master = { version = "4.0.10", program = "/colony_master.lua" },
+        supply = { version = "4.0.10", program = "/colony_supply.lua" },
+        command = { version = "4.0.1", program = "/colony_command.lua" },
     },
     files = {
         { path = "/install_colony.lua", app = "common" },
@@ -40,5 +40,6 @@ return {
         { path = "/colony/network/client.lua", app = "supply" },
         { path = "/colony_command.lua", app = "command" },
         { path = "/colony/command/visitor_jobs.lua", app = "command" },
+        { path = "/colony/command/waypoints.lua", app = "command" },
     },
 }

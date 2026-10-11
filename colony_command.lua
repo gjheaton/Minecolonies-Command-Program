@@ -21,13 +21,14 @@
 local REFRESH_SECONDS = 10
 local RAID_BLINK_SECONDS = 0.75
 local TEXT_SCALE = 0.5
-local PROGRAM_VERSION = "4.0.0"
-local SUITE_VERSION = "4.0.9"
+local PROGRAM_VERSION = "4.0.1"
+local SUITE_VERSION = "4.0.10"
 
 local Util = require("colony.lib.util")
 local SharedUI = require("colony.lib.ui")
 local SuiteUpdater = require("colony.lib.updater")
 local VisitorJobs = require("colony.command.visitor_jobs")
+local Waypoints = require("colony.command.waypoints")
 
 -- Suite update settings.
 local UPDATE_CHECK_SECONDS = 1800  -- Recheck suite package every 30 minutes
@@ -1717,7 +1718,7 @@ local function drawListPage(page)
     elseif buildingTable then
         -- Clean fixed-column building table. The WORKER(S) column shows names
         -- directly; tapping the row opens the complete worker list.
-        local usable = w - 2
+        local usable = w - 9
         local separatorCount = 3
         local content = math.max(24, usable - separatorCount)
 
@@ -1744,7 +1745,7 @@ local function drawListPage(page)
             buildingX = buildingX, buildingW = buildingW, sep1X = sep1X,
             levelX = levelX, levelW = levelW, sep2X = sep2X,
             workersX = workersX, workersW = workersW, sep3X = sep3X,
-            statusX = statusX, statusW = math.max(1, w - statusX + 1),
+            statusX = statusX, statusW = math.max(1, w - 7 - statusX + 1),
         }
 
         fill(1, 5, w, 5, C.panel2)
@@ -1758,7 +1759,7 @@ local function drawListPage(page)
 
     elseif helpTable then
         -- Help Wanted: BUILDING | LEVEL | FILLED | OPEN | BEST FIT
-        local usable = w - 2
+        local usable = w - 9
         local separatorCount = 4
         local content = math.max(32, usable - separatorCount)
 
@@ -1791,7 +1792,7 @@ local function drawListPage(page)
             levelX = levelX, levelW = levelW, sep2X = sep2X,
             filledX = filledX, filledW = filledW, sep3X = sep3X,
             openX = openX, openW = openW, sep4X = sep4X,
-            bestX = bestX, bestW = math.max(1, w - bestX + 1),
+            bestX = bestX, bestW = math.max(1, w - 7 - bestX + 1),
         }
 
         fill(1, 5, w, 5, C.panel2)
@@ -1893,7 +1894,7 @@ local function drawListPage(page)
     elseif orderTable then
         -- Fixed-column construction/work-order table tuned for the 5x3 monitor.
         -- Q# | BUILDING | TARGET | BUILDER | STATUS
-        local usable = w - 2
+        local usable = w - 9
         local separatorCount = 4
         local content = math.max(28, usable - separatorCount)
 
@@ -1924,7 +1925,7 @@ local function drawListPage(page)
             buildingX = buildingX, buildingW = buildingW, sep1X = sep1X,
             targetX = targetX, targetW = targetW, sep2X = sep2X,
             builderX = builderX, builderW = builderW, sep3X = sep3X,
-            statusX = statusX, statusW = math.max(1, w - statusX + 1),
+            statusX = statusX, statusW = math.max(1, w - 7 - statusX + 1),
         }
 
         fill(1, 5, w, 5, C.panel2)
@@ -2162,8 +2163,21 @@ local function drawListPage(page)
             end
 
             if not item._sectionHeader then
-                addTouchArea("row_" .. rowIndex, 1, y, w, y, function()
+                addTouchArea("row_" .. rowIndex, 1, y, (buildingTable or helpTable or orderTable) and w - 7 or w, y, function()
                     detail = { page = page, index = rowIndex }
+                    detailScroll = 1
+                end)
+            end
+            if (buildingTable or helpTable or orderTable) and not item._sectionHeader then
+                local hut = buildingTable and item or helpTable and item.building or Waypoints.orderHut(item,D.buildings)
+                addButton("mark_row_" .. rowIndex, w - 5, y, w, y, "MARK", C.accent, colors.white, function()
+                    local sent, notice
+                    if hut then
+                        sent, notice = Waypoints.share(D.name, cleanBuildingName(hut.name or hut.type or "Hut"), hut.location)
+                    else
+                        sent, notice = false, "Target hut is not uniquely identified. Select the hut on BUILDINGS to mark it."
+                    end
+                    detail = { page = page, index = rowIndex, waypointSuccess = sent, waypointNotice = notice }
                     detailScroll = 1
                 end)
             end
@@ -2518,6 +2532,11 @@ local function drawDetail()
     center(4, names[detail.page] .. " DETAILS", C.title, C.bg)
 
     local lines = flattenDetailLines(detailLines(detail.page, item), w - 4)
+    if detail.waypointNotice then
+        for index,text in ipairs(wrapText(detail.waypointNotice,w-4)) do
+            table.insert(lines,index,{text=text,color=detail.waypointSuccess and C.good or C.warn})
+        end
+    end
     local top = 5
     local bottom = h - 2
     local rows = math.max(1, bottom - top + 1)
@@ -2537,8 +2556,25 @@ local function drawDetail()
         detailScroll = 1
     end)
 
+    local hut=detail.page=="buildings" and item or detail.page=="help" and item.building
+        or detail.page=="orders" and Waypoints.orderHut(item,D.buildings)
+    local canMark=detail.page=="buildings" or detail.page=="help" or detail.page=="orders"
+    if canMark then
+        addButton("mark_hut",backEnd+2,h-1,backEnd+13,h-1,"MARK HUT",C.accent,C.text,function()
+            if hut then
+                detail.waypointSuccess,detail.waypointNotice=Waypoints.share(D.name,
+                    cleanBuildingName(hut.name or hut.type or "Hut"),hut.location)
+            else
+                detail.waypointSuccess,detail.waypointNotice=false,
+                    "Target hut is not uniquely identified. Select the hut on BUILDINGS to mark it."
+            end
+            detailScroll=1
+        end)
+    end
+
     if #lines > rows then
-        local upX1 = math.max(backEnd + 2, w - 19)
+        local controlEnd=canMark and backEnd+13 or backEnd
+        local upX1 = math.max(controlEnd + 2, w - 19)
         local upX2 = math.min(w - 10, upX1 + 8)
         local downX1 = math.max(upX2 + 1, w - 9)
         addButton("up", upX1, h - 1, upX2, h - 1, "UP", C.panel, C.text, function()
@@ -2547,7 +2583,7 @@ local function drawDetail()
         addButton("down", downX1, h - 1, w, h - 1, "DOWN", C.panel, C.text, function()
             detailScroll = math.min(maxScroll, detailScroll + rows)
         end)
-    else
+    elseif not canMark then
         center(h - 1, "Touch BACK to return", C.dim, C.panel, backEnd + 1, w)
     end
 end

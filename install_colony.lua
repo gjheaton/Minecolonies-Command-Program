@@ -1,5 +1,5 @@
 -- MineColonies Control Suite Installer
--- Suite package version 4.0.9
+-- Suite package version 4.0.10
 -- Download this one file to install, update, or repair any suite role.
 -- A clean installation removes previous SUITE data after the entire package
 -- has been downloaded and validated. Updates and repairs preserve all data.
@@ -9,15 +9,15 @@ local mode, arg2, arg3 = ...
 -- Keep this literal before any access to globals: the shared updater evaluates
 -- --metadata in an empty environment without executing installation code.
 local SUITE_INFO = {
-    suiteVersion = "4.0.9", installerVersion = "4.0.9", installationSchema = 4,
+    suiteVersion = "4.0.10", installerVersion = "4.0.10", installationSchema = 4,
     apps = {
-        master = { version = "4.0.9", program = "/colony_master.lua", displayName = "MineColonies Supply Master" },
-        supply = { version = "4.0.9", program = "/colony_supply.lua", displayName = "MineColonies Colony Supply" },
-        command = { version = "4.0.0", program = "/colony_command.lua", displayName = "MineColonies Command Center" },
+        master = { version = "4.0.10", program = "/colony_master.lua", displayName = "MineColonies Supply Master" },
+        supply = { version = "4.0.10", program = "/colony_supply.lua", displayName = "MineColonies Colony Supply" },
+        command = { version = "4.0.1", program = "/colony_command.lua", displayName = "MineColonies Command Center" },
     },
     components = {
-        startup = "1.1.0", installer = "4.0.9", util = "1.1.0", ui = "1.1.0",
-        version = "1.0.0", updater = "1.2.0", network = "4.0.9",
+        startup = "1.1.0", installer = "4.0.10", util = "1.1.0", ui = "1.1.0",
+        version = "1.0.0", updater = "1.2.0", network = "4.0.10",
     },
     files = {
         { path = "/install_colony.lua", app = "common", remote = "install_colony.lua" },
@@ -46,6 +46,7 @@ local SUITE_INFO = {
         { path = "/colony/network/client.lua", app = "supply", remote = "colony/network/client.lua" },
         { path = "/colony_command.lua", app = "command", remote = "colony_command.lua" },
         { path = "/colony/command/visitor_jobs.lua", app = "command", remote = "colony/command/visitor_jobs.lua" },
+        { path = "/colony/command/waypoints.lua", app = "command", remote = "colony/command/waypoints.lua" },
     },
 }
 if mode == "--metadata" then return SUITE_INFO end

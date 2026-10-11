@@ -1,6 +1,6 @@
 # MineColonies Control Suite
 
-The `supply-master-colony` branch provides Supply 4.0.9: one dedicated computer owns
+The `supply-master-colony` branch provides Supply 4.0.10: one dedicated computer owns
 Player Refined Storage (PRS), and colony supply computers communicate with it over
 rednet. Each colony has a delivery and a return Ender Chest channel. Command Center
 is also available through the same installer.
@@ -101,7 +101,7 @@ Versions use **MAJOR.MINOR.PATCH**:
 - **Minor**, the second number, changes for compatible new features.
 - **Patch**, the third number, changes for fixes and maintenance updates.
 
-This update is **4.0.9**. Future fixes increase the patch number so **CHECK UPDATE**
+This update is **4.0.10**. Future fixes increase the patch number so **CHECK UPDATE**
 can detect them. A minor release resets the patch number, such as `4.1.0`; a major
 release resets both later numbers, such as `5.0.0`.
 
@@ -131,7 +131,7 @@ It saves an automation pause, verifies the held transfer, and displays RECOVERED
 or BLOCKED without stopping the application. A recorded zero export may send one
 guarded recovery item. Automation stays paused afterward; error history is kept.
 
-Command Center is now **4.0.0**, packaged in suite **4.0.9**. Its monitor header
+Command Center is now **4.0.1**, packaged in suite **4.0.10**. Its monitor header
 and installer metadata use the same application version. Existing V4 Command
 installations can update without resetting their settings.
 
@@ -150,3 +150,14 @@ The published Codex cloud environment already provides Lua 5.2 through Lupa.
 Tests simulate the CC:Tweaked hardware boundary, messages, inventories, persistence,
 installer failure/recovery, and shared UI. Actual mod interoperability still needs
 in-game testing; run the Ender Chest diagnostics before automatic transfers.
+
+Command 4.0.1 adds **MARK** beside huts on **BUILDINGS**, **HELP WANTED**, and **CONSTRUCTION**,
+and **MARK HUT** in their detail views. Connect an Advanced Peripherals Chat Box
+to the Command computer, directly or through its wired peripheral network.
+Press MARK to share the hut's coordinates in public chat. Click the location
+message while in the colony's dimension to create a JourneyMap waypoint; enable
+its beacon in JourneyMap if needed. The Chat Box's configured range and dimension
+rules apply. A successful send confirms chat delivery, not waypoint creation.
+
+Construction Orders marks only a uniquely identified target hut. If duplicate
+huts make the target ambiguous, select the desired hut from Buildings.

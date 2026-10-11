@@ -888,7 +888,7 @@ hardware wizard; do not use `CLEAN` to obtain an update or repair.
 
 Versions follow **MAJOR.MINOR.PATCH**. The first number changes for incompatible
 behavior or migrations, the second for compatible new features, and the third
-for fixes and maintenance. This release is **4.0.9**; later fixes increase the
+for fixes and maintenance. This release is **4.0.10**; later fixes increase the
 third number. A minor release resets the patch number (`4.1.0`), and a major
 release resets both later numbers (`5.0.0`). The update control compares all three
 numbers and offers installation when the published version is greater.
@@ -992,3 +992,20 @@ within those groups. A nonexistent netherite hoe can no longer hide stocked wood
 stone, or diamond hoes or a craftable iron hoe. MineColonies' item alternatives
 remain authoritative for allowed levels; the matcher does not invent tools outside
 that list or weaken exact NBT / fingerprint rules for damaged or enchanted variants.
+
+### Command hut waypoints in 4.0.1 (suite 4.0.10)
+
+Connect an Advanced Peripherals Chat Box to the Command computer directly or
+via an enabled wired modem and networking cable. Command discovers it when you
+press **MARK** on a **BUILDINGS**, **HELP WANTED**, or **CONSTRUCTION** row, or **MARK HUT** in
+their detail views. Help Wanted marks the hiring hut, not a citizen's position.
+
+The button broadcasts a JourneyMap location message in public chat. Players click
+that message in the colony's dimension to create their own waypoint and select
+its beacon display in JourneyMap. Chat Box range/dimension settings control who
+receives it. Command reports missing hardware, cooldowns, and rejected messages
+without requiring a Chat Box for its normal operation. It never places blocks
+or automatically creates waypoints on players' clients.
+
+Construction Orders marks only a uniquely identified target hut. If duplicate
+huts make the target ambiguous, select the desired hut from Buildings.
