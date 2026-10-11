@@ -73,6 +73,30 @@ function M.new(path,config)
         while #entries>(config and config.maxErrorEntries or 100) do table.remove(entries,1) end
         self.save()
     end
+    -- Error entries are a display archive. Live faults and transfer intents
+    -- stay in their own journal fields and must survive clearing this list.
+    function self.clearErrors()
+        local previousErrors,previousHistory=self.data.errors,self.data.history
+        if type(previousErrors)~="table" or type(previousHistory)~="table" then
+            return false,"Error history is invalid; restore the journal before clearing it"
+        end
+        local count=0;for _ in pairs(previousErrors) do count=count+1 end
+        if count==0 then return true,"No recorded errors to clear; active faults are unchanged" end
+        local previousRevision=self.data.revision
+        local history={};for index,entry in ipairs(previousHistory) do history[index]=entry end
+        history[#history+1]={time=os.epoch and os.epoch("utc")/1000 or os.clock(),kind="ERROR_HISTORY_CLEARED",
+            message="Recorded error history cleared; active faults and transfer records retained",context={count=count}}
+        while #history>(config and config.maxHistoryEntries or 400) do table.remove(history,1) end
+        self.data.errors,self.data.history={},history
+        local ok,saved,reason=pcall(self.save)
+        if not ok or saved~=true then
+            self.data.errors,self.data.history,self.data.revision=previousErrors,previousHistory,previousRevision
+            local detail=tostring(ok and (reason or "Journal save did not confirm durability") or saved)
+            self.fault=self.fault or ("Persistence failure: "..detail)
+            return false,"Error history save could not be confirmed; records retained in the current session: "..detail
+        end
+        return true,"Cleared "..count.." recorded errors; active faults and transfer records are unchanged"
+    end
     self.addError=self.error
     return self
 end

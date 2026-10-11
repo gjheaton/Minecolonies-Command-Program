@@ -162,7 +162,7 @@ Test.case("UI shows effective master policy and paused automation while serializ
     master.ui.view="health";master.ui.draw();master.touch(40,23);Test.equal(reconciles,1)
 end)
 
-Test.case("UI history and terminal diagnostics show newest records without mirroring requests",function()
+Test.case("UI history shows newest records while terminal diagnostics show only current issues",function()
     local f=fixture()
     f.store.data.history={{time=100,kind="INFO",message="oldest"},{time=101,kind="INFO",message="newest"}}
     f.store.data.errors={{code="OLD",message="old fault"},{code="NEW",message="new fault",severity="WARNING"}}
@@ -177,7 +177,7 @@ Test.case("UI history and terminal diagnostics show newest records without mirro
     _G.print=originalPrint
     assert(ok,err)
     local text=table.concat(output,"\n")
-    assert(text:find("new fault",1,true) and not text:find("old fault",1,true))
+    assert(not text:find("new fault",1,true) and not text:find("old fault",1,true),"native terminal displayed archived records")
     assert(text:find("Download unavailable",1,true),"terminal hid failed update check")
     assert(not text:find("minecraft:stone",1,true),"terminal mirrored request list")
 end)

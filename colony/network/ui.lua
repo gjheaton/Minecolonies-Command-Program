@@ -82,7 +82,7 @@ end
 
 function M.new(config, store, engine, io, updater, options)
     options=options or {}
-    local self = {view="home", pages={}, edit=nil, route=nil, routeSelections={}, notice=nil, checkingUpdate=false}
+    local self = {view="home", pages={}, edit=nil, route=nil, routeSelections={}, notice=nil, checkingUpdate=false, clearingErrors=false}
     local mon, monName, hasMonitor
     local monitorSizeError
     local snapshot = {}
@@ -180,6 +180,26 @@ function M.new(config, store, engine, io, updater, options)
 
     local function errors()
         return newestFirst(snapshot.errors or data().errors)
+    end
+
+    local function clearErrors()
+        if options.readOnly or self.clearingErrors or type(engine.requestClearErrors)~="function" then return end
+        self.clearingErrors=true
+        self.notice="Clearing recorded errors..."
+        local ok,accepted,reason=pcall(engine.requestClearErrors,function(success,detail)
+            self.clearingErrors=false
+            if success==true then
+                self.pages.errors=1
+                self.notice="Recorded errors cleared. Current faults remain on HEALTH."
+            else
+                self.notice="Could not clear recorded errors: "..tostring(detail or "Save failed.")
+            end
+            draw()
+        end)
+        if not ok or accepted~=true then
+            self.clearingErrors=false
+            self.notice="Could not clear recorded errors: "..tostring(reason or accepted)
+        end
     end
 
     local function isBusy()
@@ -581,12 +601,14 @@ function M.new(config, store, engine, io, updater, options)
         local w,h=screen.size()
         local records=errors()
         local page=Util.clamp(self.pages.errors or 1,1,math.max(1,#records)); self.pages.errors=page
-        frame("ERROR / DEBUG DETAILS  "..page.."/"..math.max(1,#records),#records.." recorded; see HEALTH for current status.",#records>0 and C.warn or C.good)
+        local healthy=true
+        for _,check in ipairs(healthRows()) do if not check.ok then healthy=false;break end end
+        frame("RECORDED ERRORS  "..page.."/"..math.max(1,#records),#records.." recorded; see HEALTH for current status.",healthy and C.dim or C.warn)
         if #records==0 then row(6,"No recorded errors.",C.good)
         else
             local e=records[page]
             row(5,timeOf(e.time or e.at).." ["..tostring(e.severity or "ERROR").."] "..tostring(e.code or ""),
-                tostring(e.severity or ""):upper()=="WARNING" and C.warn or C.danger)
+                healthy and C.dim or (tostring(e.severity or ""):upper()=="WARNING" and C.warn or C.danger))
             local context=type(e.context)=="table" and e.context or {}
             local intent=type(context.intent)=="table" and context.intent or nil
             local text=textOf(e).."\n"..textOf(context)
@@ -619,9 +641,12 @@ function M.new(config, store, engine, io, updater, options)
                     end
                 end
             end
-            for i,line in ipairs(Util.wrapText(text,math.max(1,w-4))) do row(5+i,line,C.text) end
+            for i,line in ipairs(Util.wrapText(text,math.max(1,w-4))) do row(5+i,line,healthy and C.dim or C.text) end
         end
-        footer("errors",page,math.max(1,#records))
+        if self.notice then row(h-2,self.notice,C.warn) end
+        local canClear=#records>0 and not options.readOnly and type(engine.requestClearErrors)=="function"
+        footer("errors",page,math.max(1,#records),canClear and (self.clearingErrors and "CLEARING..." or "CLEAR HISTORY") or nil,
+            canClear and clearErrors or nil)
     end
 
     local function drawSettings()
@@ -926,12 +951,6 @@ function M.new(config, store, engine, io, updater, options)
         end
         for _,check in ipairs(healthRows()) do
             if not check.ok then lines[#lines+1]={text=check.severity..": "..check.label.." - "..check.detail,color=check.severity=="WARNING" and C.warn or C.danger} end
-        end
-        local currentErrors=errors()
-        if #currentErrors>0 then
-            local e=currentErrors[1]
-            lines[#lines+1]={text="RECORDED "..tostring(e.severity or "ERROR"):upper().." "..timeOf(e.time or e.at)..": "..tostring(e.code or "").." "..textOf(e),
-                color=tostring(e.severity or ""):upper()=="WARNING" and C.warn or C.danger}
         end
         if updater and updater.checkError then lines[#lines+1]={text="WARNING: Update check failed - "..tostring(updater.checkError),color=C.warn} end
         if self.edit then

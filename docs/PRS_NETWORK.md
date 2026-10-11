@@ -688,9 +688,24 @@ the reported cause; do not clear the journal to bypass the guard.
    inspection of the reported transfer; do not reset its ledger to bypass it.
 
 The **ERRORS** page contains recorded history; use **HEALTH** for current faults.
-Old errors, including terminal lines labeled **RECORDED**, remain after recovery;
-their presence alone does not mean supply is still stopped. An active **ERROR**
-or stopped processor still needs attention.
+Resolved historical entries disappear from the terminal status display. Recorded
+errors remain saved across reboots and are available on **ERRORS** until cleared.
+On the computer that owns those records, select **ERRORS → CLEAR HISTORY** to
+remove the saved list. Master-side remote colony dashboards are read-only; clear
+a colony's history on its own Supply computer. At the shell, the equivalent
+commands are:
+
+```lua
+colony_supply clear-errors
+colony_master clear-errors
+```
+
+Clearing recorded errors preserves active faults, transfer intents, shipments,
+requests, craft jobs, configuration, and the separate **HISTORY** event list. A
+successful clear adds an **ERROR_HISTORY_CLEARED** event and persists across
+reboots. An active **ERROR** or stopped processor still needs attention on
+**HEALTH**; clearing history does not reconcile or restart it. If saving cannot be
+confirmed, the clear reports failure and retains the records in the current display.
 
 For updates, pause the master, let turns finish, then use the shared update control
 or the same installer:

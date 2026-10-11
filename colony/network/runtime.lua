@@ -42,6 +42,13 @@ function M.run(role,...)
         if retainedWork(store) then error("Finish/reconcile retained turns, deliveries, crafts and chest tests before changing hardware setup",0) end
         if not require("colony.network.setup").run(config) or mode=="setup" then return end
     end
+    if mode=="clear-errors" then
+        if (role~="master" and role~="supply") or arg2~=nil or arg3~=nil then
+            error("Usage: colony_master clear-errors | colony_supply clear-errors",0)
+        end
+        local cleared,detail=store.clearErrors()
+        print((cleared and "OK: " or "BLOCKED: ")..tostring(detail));return
+    end
     local matcher=Matcher.new(config,store)
     local io=IO.new(config,store,matcher)
     if mode=="diag" or mode=="diagnostics" then Diagnostics.printReport(config,io,store); return end
@@ -162,7 +169,7 @@ function M.run(role,...)
         end
         print((ok and "OK: " or "BLOCKED: ")..tostring(err)); return
     end
-    if mode and mode~="" then error("Usage: "..(role=="master" and "colony_master" or "colony_supply").." [setup | diag | monitors | reconcile | set key value"..(role=="master" and " | monitor ID name | chesttest ID [item] | transferdiag | reconcile-bind colonyID" or " | reconcile-zero shipmentID").."]",0) end
+    if mode and mode~="" then error("Usage: "..(role=="master" and "colony_master" or "colony_supply").." [setup | diag | monitors | reconcile | clear-errors | set key value"..(role=="master" and " | monitor ID name | chesttest ID [item] | transferdiag | reconcile-bind colonyID" or " | reconcile-zero shipmentID").."]",0) end
     local inbox,action={},nil
     local processorFault
     local telemetryFault
@@ -192,12 +199,21 @@ function M.run(role,...)
         if staged(store,id) then return false,"This colony still has staged shipments" end
         return true
     end
-    function engine.requestReconcile() action="reconcile"; return true end
+    local function queueAction(pending)
+        if action~=nil then return false,"Another action is queued; try again" end
+        action=pending;return true
+    end
+    function engine.requestReconcile() return queueAction("reconcile") end
+    function engine.requestClearErrors(callback)
+        if callback~=nil and type(callback)~="function" then return false,"Invalid completion callback" end
+        local queued,reason=queueAction({kind="clear_errors",callback=callback})
+        return queued,reason or "Clearing recorded errors queued"
+    end
     local actualUpdater=SuiteUpdater.new({appId=role,appVersion=Config.VERSION,suiteVersion=Config.VERSION,
         displayName=role=="master" and "PRS MASTER" or "COLONY SUPPLY",checkSeconds=config.updateCheckSeconds})
     local updater=setmetatable({}, {__index=actualUpdater})
-    function updater.check() action="check"; return true end
-    function updater.install() action="update"; return true end
+    function updater.check() return queueAction("check") end
+    function updater.install() return queueAction("update") end
     local telemetry=Telemetry.new(config,store,io,engine)
     local ui=Displays.new(config,store,engine,io,updater,telemetry)
     local nextCheck=io.now()
@@ -217,7 +233,11 @@ function M.run(role,...)
                 end
                 if action then
                     local pending=action; action=nil
-                    if pending=="check" then
+                    if type(pending)=="table" and pending.kind=="clear_errors" then
+                        local cleared,detail=store.clearErrors()
+                        if pending.callback then pcall(pending.callback,cleared,detail) end
+                        if not cleared and store.fault then error(store.fault,0) end
+                    elseif pending=="check" then
                         actualUpdater.checking=true
                         local checked,checkError=pcall(actualUpdater.check)
                         actualUpdater.checking=false
