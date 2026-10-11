@@ -1,6 +1,6 @@
 # MineColonies Control Suite
 
-The `supply-master-colony` branch provides Supply 4.0.12: one dedicated computer owns
+The `supply-master-colony` branch provides Supply 4.0.13: one dedicated computer owns
 Player Refined Storage (PRS), and colony supply computers communicate with it over
 rednet. Each colony has a delivery and a return Ender Chest channel. Command Center
 is also available through the same installer.
@@ -101,7 +101,7 @@ Versions use **MAJOR.MINOR.PATCH**:
 - **Minor**, the second number, changes for compatible new features.
 - **Patch**, the third number, changes for fixes and maintenance updates.
 
-This update is **4.0.12**. Future fixes increase the patch number so **CHECK UPDATE**
+This update is **4.0.13**. Future fixes increase the patch number so **CHECK UPDATE**
 can detect them. A minor release resets the patch number, such as `4.1.0`; a major
 release resets both later numbers, such as `5.0.0`.
 
@@ -131,7 +131,7 @@ It saves an automation pause, verifies the held transfer, and displays RECOVERED
 or BLOCKED without stopping the application. A recorded zero export may send one
 guarded recovery item. Automation stays paused afterward; error history is kept.
 
-Command Center is now **4.0.1**, packaged in suite **4.0.12**. Its monitor header
+Command Center is now **4.0.1**, packaged in suite **4.0.13**. Its monitor header
 and installer metadata use the same application version. Existing V4 Command
 installations can update without resetting their settings.
 
@@ -169,3 +169,8 @@ The command checks the original physical inventory and outstanding deliveries,
 then asks you to type `ZERO` to acknowledge the displayed operation (4.0.12). It audits the acknowledgment
 without moving or crediting items. Changed or ambiguous inventories remain held.
 Restart the colony program after success, verify HEALTH, then resume automation.
+
+Suite 4.0.13 refreshes the master's reported colony fault from route-confirmed
+connection messages, even while automation is paused. After local recovery,
+restart the colony program; its next hello clears the old colony fault on the
+updated master. Master-detected transfer holds and recorded error history remain.

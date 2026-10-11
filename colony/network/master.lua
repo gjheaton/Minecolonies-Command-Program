@@ -621,6 +621,7 @@ function M.new(config, store, io, matcher)
         local items, err = io.snapshot(colony.returnChest)
         if type(items) ~= "table" then
             cs.error = "Cannot inspect return chest: " .. tostring(err)
+            cs.errorSource = "master"
             errorEvent("RETURN_CHEST", cs.error, {colonyId=colony.id})
             work.returnDone = true
             return
@@ -849,6 +850,7 @@ function M.new(config, store, io, matcher)
             local imported, importError = acknowledgeImports(cs, message.imports)
             if not imported then turn.batch.clientError = turn.batch.clientError .. "; " .. importError end
             cs.error = turn.batch.clientError
+            cs.errorSource = imported and "client" or "master"
             cs.returnSelectors = selectorMap
             turn.phase = "READY"
             save()
@@ -877,6 +879,7 @@ function M.new(config, store, io, matcher)
         local imported, importError = acknowledgeImports(cs, message.imports)
         if not imported then
             cs.error = importError
+            cs.errorSource = "master"
             errorEvent("IMPORT_ACK", importError, {colonyId=colony.id})
             turn.batch = {requests={}, clientError=importError}
             turn.phase = "READY"
@@ -888,6 +891,7 @@ function M.new(config, store, io, matcher)
         cs.returnSelectors = selectorMap
         cs.colonyName = message.colonyName or cs.colonyName
         cs.error = message.clientError and tostring(message.clientError) or nil
+        cs.errorSource = cs.error and "client" or nil
         if message.authoritative ~= false then
             for id, record in pairs(cs.requests) do
                 if not active[id] and record.status ~= "delivered" then
@@ -947,6 +951,20 @@ function M.new(config, store, io, matcher)
                     cs.routeError = detail
                 else
                     cs.routeError = nil
+                end
+                if confirmed and (message.clientError == nil or type(message.clientError) == "string") then
+                    -- Connection messages report the current colony fault even
+                    -- while paused. Never release a master-detected hold here.
+                    -- Older journals lack provenance: migrate only these exact
+                    -- known colony transfer messages, leaving other errors held.
+                    local legacyClient = cs.errorSource == nil and (
+                        cs.error == "Colony bridge result does not match the chest inventory change"
+                        or cs.error == "An interrupted chest transfer needs reconciliation; automatic transfers are paused"
+                        or cs.error == "Turn preparation was interrupted; transfers need reconciliation")
+                    if cs.error == nil or cs.errorSource == "client" or legacyClient then
+                        cs.error = message.clientError
+                        cs.errorSource = cs.error and "client" or nil
+                    end
                 end
             end
             save()
@@ -1052,6 +1070,7 @@ function M.new(config, store, io, matcher)
                         startWork(colony, cs)
                     else
                         cs.error = cs.routeError
+                        cs.errorSource = "route"
                         finishTurn(colony, cs)
                     end
                     return

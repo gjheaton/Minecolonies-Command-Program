@@ -226,4 +226,38 @@ Test.case("actual connected paused colony runtime shows connection status on HOM
     Test.equal(#native.w.calls,0);Test.equal(native.connectionReads,0)
 end)
 
+
+Test.case("paused master clears a recovered colony fault from hello without granting turns or reading inventories",function()
+    local w,m,c=pair();w.step()
+    local cs=m.store.data.master.colonies["2"]
+    cs.error="Colony bridge result does not match the chest inventory change"
+    local history=textutils.serialize(m.store.data.errors)
+    w.step(6);w.step()
+    assert(not cs.error and not cs.errorSource)
+    Test.equal(textutils.serialize(m.store.data.errors),history)
+    Test.equal(w.reads(),0);Test.equal(#w.calls,0);assert(not cs.turn)
+    m.restart();assert(not m.store.data.master.colonies["2"].error)
+end)
+Test.case("paused master reports active client faults and clears them only after a healthy route-confirmed hello",function()
+    local w,m,c=pair();w.step();local cs=m.store.data.master.colonies["2"]
+    c.store.data.client.fault={code="OTHER",message="Active colony fault"}
+    w.step(6);w.step();Test.equal(cs.error,"Active colony fault");Test.equal(cs.errorSource,"client")
+    c.store.data.client.fault=nil;c.config.deliveryChannel="wrong"
+    w.step(6);w.step();Test.equal(cs.error,"Active colony fault")
+    c.config.deliveryChannel=m.config.colonies[1].deliveryChannel
+    w.step(6);w.step();assert(not cs.error);Test.equal(w.reads(),0);Test.equal(#w.calls,0)
+end)
+Test.case("healthy colony hellos preserve master faults, ambiguous legacy faults and global transfer quarantine",function()
+    for _,value in ipairs({{source="master",error="Cannot inspect return chest: detached"},
+        {error="Unknown retained error"},{source="master",error="Invalid cumulative shipment acknowledgement: D1"}}) do
+        local w,m,c=pair();w.step();local cs=m.store.data.master.colonies["2"]
+        cs.error,cs.errorSource=value.error,value.source
+        m.store.data.master.quarantine={code="TRANSFER_VERIFY",message="Held PRS operation"}
+        local quarantine=textutils.serialize(m.store.data.master.quarantine)
+        w.step(6);w.step();Test.equal(cs.error,value.error)
+        Test.equal(textutils.serialize(m.store.data.master.quarantine),quarantine)
+        Test.equal(w.reads(),0);Test.equal(#w.calls,0);assert(not cs.turn)
+    end
+end)
+
 return true

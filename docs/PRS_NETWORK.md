@@ -888,7 +888,7 @@ hardware wizard; do not use `CLEAN` to obtain an update or repair.
 
 Versions follow **MAJOR.MINOR.PATCH**. The first number changes for incompatible
 behavior or migrations, the second for compatible new features, and the third
-for fixes and maintenance. This release is **4.0.12**; later fixes increase the
+for fixes and maintenance. This release is **4.0.13**; later fixes increase the
 third number. A minor release resets the patch number (`4.1.0`), and a major
 release resets both later numbers (`5.0.0`). The update control compares all three
 numbers and offers installation when the published version is greater.
@@ -1033,3 +1033,13 @@ and return-selector ledgers. Disk-write failures retain the hold. Restart the
 colony program, verify its HEALTH and the master's reported colony status, and
 only then resume automation. If the master drained the return chest or anyone
 replaced items, this acknowledgment must not be used.
+
+### Refreshing recovered colony status (4.0.13)
+
+The master now accepts current colony fault status from a hello whose configured
+color routes match. This works with automation paused and does not grant a turn
+or touch inventories. Recovered colonies clear their reported fault within the
+normal hello interval (five seconds by default) after their program resumes.
+Master-detected faults, transfer quarantine, and recorded error history remain.
+Older journals without fault provenance migrate only the known colony transfer
+error messages; other ambiguous errors still require normal reconciliation.
