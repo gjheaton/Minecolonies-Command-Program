@@ -888,7 +888,7 @@ hardware wizard; do not use `CLEAN` to obtain an update or repair.
 
 Versions follow **MAJOR.MINOR.PATCH**. The first number changes for incompatible
 behavior or migrations, the second for compatible new features, and the third
-for fixes and maintenance. This release is **4.0.11**; later fixes increase the
+for fixes and maintenance. This release is **4.0.12**; later fixes increase the
 third number. A minor release resets the patch number (`4.1.0`), and a major
 release resets both later numbers (`5.0.0`). The update control compares all three
 numbers and offers installation when the published version is greater.
@@ -1024,7 +1024,7 @@ colony_supply --reconcile-zero-return
 The preview identifies the exact held item, quantity, and return chest. The
 command requires a finished reserved turn, a connected/readable colony network,
 an unchanged full physical return-chest baseline, and intact outstanding
-deliveries. Enter the exact `ZERO RETURN <item ID> <count>` shown only when the
+deliveries. Starting in 4.0.12, enter `ZERO` to acknowledge the displayed operation only when the
 zero-movement conditions above are true. Any other answer cancels.
 
 Recovery saves an audit acknowledgment before releasing the intent and fault;

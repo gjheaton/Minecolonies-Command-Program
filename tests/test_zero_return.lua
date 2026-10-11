@@ -14,12 +14,12 @@ local function fixture()
     local recovery=Client.zeroReturnRecovery(c.config,c.store,c.io,c.matcher)
     local f={w=w,c=c,api=api,recovery=recovery}
     function f.preview() return w.at(2,recovery.previewZeroReturn) end
-    function f.confirm(text) return w.at(2,recovery.reconcileZeroReturn,text or 'ZERO RETURN minecraft:cherry_sapling 53') end
+    function f.confirm(text) return w.at(2,recovery.reconcileZeroReturn,text or 'ZERO') end
     return f
 end
 Test.case('unknown overflow zero recovery previews without modifying storage or journal and cancels safely',function()
     local f=fixture();local state=textutils.serialize(f.c.store.data,{allow_repetitions=true});local files=textutils.serialize(f.w.files)
-    local preview=assert(f.preview());Test.equal(preview.count,53);Test.equal(preview.beforeChest,0);Test.equal(preview.currentChest,0)
+    local preview=assert(f.preview());Test.equal(preview.confirmation,"ZERO");Test.equal(preview.count,53);Test.equal(preview.beforeChest,0);Test.equal(preview.currentChest,0)
     assert(not f.confirm('wrong'));Test.equal(textutils.serialize(f.c.store.data,{allow_repetitions=true}),state)
     Test.equal(textutils.serialize(f.w.files),files)
 end)

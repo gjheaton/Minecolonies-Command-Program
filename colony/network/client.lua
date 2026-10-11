@@ -274,7 +274,7 @@ function M.zeroReturnRecovery(config, store, io, matcher)
             if not quantity(present) or present<entry.count then return nil,"An outstanding delivery is missing; restore it first" end
         end
         local preview={item=copy(intent.item),count=intent.count,chest=intent.chest,beforeChest=intent.beforeChest,
-            currentChest=current,confirmation="ZERO RETURN "..intent.item.name.." "..intent.count}
+            currentChest=current,confirmation="ZERO"}
         local guard=matcher.canonicalNBT({intent=intent,fault=data.fault,turn=data.turn,shipments=data.shipments,
             selectors=data.returnSelectors,bridgeName=bridge.name,configuredBridge=config.colonyBridgeName,
             deliveryChest=config.deliveryChestName,returnChest=config.returnChestName})
