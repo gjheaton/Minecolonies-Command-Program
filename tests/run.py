@@ -31,6 +31,7 @@ try:
     for suite in ("tests.test_io", "tests.test_client", "tests.test_network", "tests.test_diagnostics", "tests.test_ui", "tests.test_displays", "tests.test_telemetry", "tests.test_runtime", "tests.test_runtime_displays", "tests.test_setup", "tests.test_devices", "tests.test_peripheral_picker", "tests.test_connections", "tests.test_serialization", "tests.test_health_diagnostics", "tests.test_legacy_binding", "tests.test_error_history", "tests.test_cli_options", "tests.test_runtime_updates"):
         lua.execute(f"require('{suite}')")
     lua.execute("require('tests.test_command_waypoints')")
+    lua.execute("require('tests.test_zero_return')")
     passed, failed = lua.eval("Test.run()")
 except Exception as error:
     sys.exit(f"Simulation could not run: {error}")

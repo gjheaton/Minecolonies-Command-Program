@@ -211,6 +211,119 @@ function M.zeroImportRecovery(config, store, io, matcher)
     return self
 end
 
+-- An operator may acknowledge an unknown overflow call only as ZERO movement.
+-- This never credits returned stock or repeats the interrupted bridge call.
+function M.zeroReturnRecovery(config, store, io, matcher)
+    local self, previewGuard = {}, nil
+    local allowed = { TRANSFER_DESYNC=true, TRANSFER_UNCERTAIN=true, IMPORT_UNCERTAIN=true }
+    local function quantity(n, minimum)
+        return type(n)=="number" and n==n and n~=math.huge and n~=-math.huge
+            and n%1==0 and n>=(minimum or 0)
+    end
+    local function inspect()
+        local data=store.data.client
+        if config.role~="supply" or type(data)~="table" or type(data.intent)~="table" then
+            return nil,"No interrupted colony overflow return is held"
+        end
+        local intent=data.intent
+        if intent.kind~="return" or intent.reported~=nil or type(data.fault)~="table" or not allowed[data.fault.code] then
+            return nil,"Only a held overflow return with an unknown bridge result can be acknowledged here"
+        end
+        if type(data.turn)~="table" or data.turn.phase~="finished" then
+            return nil,"Wait for the master result to close the reserved turn before repairing"
+        end
+        if type(config.returnChestName)~="string" or config.returnChestName==""
+            or config.returnChestName==config.deliveryChestName or intent.chest~=config.returnChestName then
+            return nil,"Restore the original separate return chest configuration first"
+        end
+        if type(intent.item)~="table" or type(intent.item.name)~="string" or intent.item.name==""
+            or #intent.item.name>256 or not validFingerprint(intent.item.fingerprint)
+            or not quantity(intent.count,1) or not quantity(intent.beforeChest)
+            or type(intent.physicalBefore)~="table" then
+            return nil,"The held return lacks valid original quantities, identity, or physical chest evidence"
+        end
+        local bridge=io.bridgeStatus()
+        if type(bridge)~="table" or bridge.connected~=true then return nil,"Restore the colony RS connection first" end
+        local stock,err=io.colonyStock()
+        if type(stock)~="table" then return nil,"Cannot read the restored colony warehouse: "..tostring(err) end
+        local items,chestError=io.snapshot(intent.chest)
+        if type(items)~="table" then return nil,"Cannot inspect the original return chest: "..tostring(chestError) end
+        local physical,physicalError=io.exportBaseline(items)
+        if type(physical)~="table" then return nil,"Cannot verify physical return items: "..tostring(physicalError) end
+        if matcher.canonicalNBT(physical)~=matcher.canonicalNBT(intent.physicalBefore) then
+            return nil,"The physical return chest changed; zero-movement acknowledgment is unsafe"
+        end
+        local current=io.count(items,intent.item)
+        if not quantity(current) or current~=intent.beforeChest then return nil,"The original return item quantity changed" end
+        if type(data.shipments)~="table" then return nil,"The delivery ledger is invalid" end
+        local delivery,deliveryError=io.snapshot(config.deliveryChestName)
+        if type(delivery)~="table" then return nil,"Cannot verify outstanding deliveries: "..tostring(deliveryError) end
+        local outstanding={}
+        for id,shipment in pairs(data.shipments) do
+            if type(shipment)~="table" or shipment.verified~=true or shipment.id~=id
+                or type(shipment.item)~="table" or type(shipment.item.name)~="string"
+                or not quantity(shipment.count,1) or not quantity(shipment.imported) or shipment.imported>shipment.count then
+                return nil,"A retained delivery has invalid identity or quantities"
+            end
+            local key=matcher.itemIdentity(shipment.item)
+            outstanding[key]=outstanding[key] or {item=shipment.item,count=0}
+            outstanding[key].count=outstanding[key].count+shipment.count-shipment.imported
+        end
+        for _,entry in pairs(outstanding) do
+            local present=io.count(delivery,entry.item)
+            if not quantity(present) or present<entry.count then return nil,"An outstanding delivery is missing; restore it first" end
+        end
+        local preview={item=copy(intent.item),count=intent.count,chest=intent.chest,beforeChest=intent.beforeChest,
+            currentChest=current,confirmation="ZERO RETURN "..intent.item.name.." "..intent.count}
+        local guard=matcher.canonicalNBT({intent=intent,fault=data.fault,turn=data.turn,shipments=data.shipments,
+            selectors=data.returnSelectors,bridgeName=bridge.name,configuredBridge=config.colonyBridgeName,
+            deliveryChest=config.deliveryChestName,returnChest=config.returnChestName})
+        return preview,guard
+    end
+    local function checkedInspect()
+        local ok,preview,guard=pcall(inspect)
+        if not ok then return nil,"Cannot verify the held return: "..tostring(preview) end
+        return preview,guard
+    end
+    local function persist()
+        local ok,saved,err=pcall(store.save)
+        if not ok then return false,tostring(saved) end
+        return saved==true,tostring(err or "Journal durability was not confirmed")
+    end
+    function self.previewZeroReturn()
+        previewGuard=nil
+        local preview,guard=checkedInspect()
+        if not preview then return nil,guard end
+        previewGuard=guard
+        return preview
+    end
+    function self.reconcileZeroReturn(confirmation)
+        if not previewGuard then return false,"Preview the held return first" end
+        local preview,guard=checkedInspect()
+        if not preview then return false,guard end
+        if guard~=previewGuard then return false,"The held return changed after preview; inspect a fresh preview" end
+        if confirmation~=preview.confirmation then return false,"Exact zero-movement confirmation required" end
+        if type(store.data.history)~="table" then return false,"Audit history is invalid" end
+        local data,oldHistory=store.data.client,store.data.history
+        local nextHistory=copy(oldHistory)
+        nextHistory[#nextHistory+1]={time=io.now(),kind="OPERATOR_ZERO_RETURN",
+            message="Operator confirmed master remained paused and no items moved or were replaced; no returned quantity credited",
+            context={item={name=preview.item.name},count=preview.count,chest=preview.chest,
+                beforeChest=preview.beforeChest,currentChest=preview.currentChest,operatorConfirmation=confirmation}}
+        while #nextHistory>math.max(1,amount(config.maxHistoryEntries or 400)) do table.remove(nextHistory,1) end
+        store.data.history=nextHistory
+        local audited,err=persist()
+        if not audited then store.data.history=oldHistory;return false,"Cannot persist acknowledgment: "..err end
+        local intent,fault=data.intent,data.fault
+        data.intent,data.fault=nil,nil
+        local saved,saveError=persist()
+        if not saved then data.intent,data.fault=intent,fault;return false,"Acknowledgment recorded, but return remains held: "..saveError end
+        previewGuard=nil
+        return true,"Zero return movement acknowledged; no items moved or credited. Restart the colony program before resuming automation."
+    end
+    return self
+end
+
 function M.new(config, store, io, matcher)
     local self = {}
     store.data.client = type(store.data.client) == "table" and store.data.client or {}

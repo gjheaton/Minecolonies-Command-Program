@@ -3,7 +3,7 @@
 local M={}
 local commonModes={help=true,setup=true,diag=true,diagnostics=true,monitors=true,reconcile=true,["clear-errors"]=true,set=true}
 local masterModes={monitor=true,chesttest=true,transferdiag=true,["reconcile-bind"]=true}
-local supplyModes={["reconcile-zero"]=true}
+local supplyModes={["reconcile-zero"]=true,["reconcile-zero-return"]=true}
 local function usage(role)
     local program=role=="master" and "colony_master" or "colony_supply"
     local lines={"Usage: "..program.." [option]",
@@ -22,6 +22,7 @@ local function usage(role)
         lines[#lines+1]="  --reconcile-bind <ID>   Bind an existing export"
     else
         lines[#lines+1]="  --reconcile-zero <shipment ID>"
+        lines[#lines+1]="  --reconcile-zero-return  Acknowledge zero overflow movement"
     end
     lines[#lines+1]="Run without options to start the application."
     lines[#lines+1]="Earlier bare options and --diagnostics work too."
@@ -130,6 +131,23 @@ function M.run(role,...)
         if confirmation~=preview.confirmation then print("CANCELLED: Held transfer unchanged");return end
         local bound,detail=recovery.reconcileBindExport(arg2,confirmation)
         print((bound and "OK: " or "BLOCKED: ")..tostring(detail));return
+    end
+    if mode=="reconcile-zero-return" then
+        local recovery=require("colony.network.client").zeroReturnRecovery(config,store,io,matcher)
+        local preview,reason=recovery.previewZeroReturn()
+        if not preview then print("BLOCKED: "..tostring(reason));return end
+        print("HELD OVERFLOW RETURN")
+        print("Item: "..preview.item.name.." x"..preview.count)
+        print("Chest: "..preview.chest)
+        print("Original/current quantity: "..preview.beforeChest.." / "..preview.currentChest)
+        print("Confirm ONLY if master automation stayed PAUSED since the failure,")
+        print("NO items moved in the failed call, and nobody moved or replaced chest items.")
+        print("This records zero movement; it moves no items and preserves delivery ledgers.")
+        print("Type "..preview.confirmation.." to confirm, or anything else to cancel:")
+        local confirmation=read()
+        if confirmation~=preview.confirmation then print("CANCELLED: Held return unchanged");return end
+        local ok,detail=recovery.reconcileZeroReturn(confirmation)
+        print((ok and "OK: " or "BLOCKED: ")..tostring(detail));return
     end
     if mode=="reconcile-zero" then
         if role~="supply" or type(arg2)~="string" or arg2=="" or arg3~=nil then

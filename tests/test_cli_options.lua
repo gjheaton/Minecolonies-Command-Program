@@ -242,3 +242,26 @@ Test.case("prefixed monitor assignment retains active transfers and treats none 
     Test.equal(Config.load("master").colonies[1].monitorName,"")
     Test.equal(encode(w.loaded()),journal);Test.equal(#w.calls,0);Test.equal(#w.sent,0)
 end)
+
+Test.case("zero-return CLI previews without starting an engine and cancels without releasing a hold",function()
+    local w=fixture("supply");local files=encode(w.files);local acknowledged=0
+    patched({{Client,"zeroReturnRecovery",function() return {
+        previewZeroReturn=function() return {item={name="minecraft:cherry_sapling"},count=53,chest="returns",
+            beforeChest=0,currentChest=0,confirmation="ZERO RETURN minecraft:cherry_sapling 53"} end,
+        reconcileZeroReturn=function() acknowledged=acknowledged+1;return true,"Acknowledged" end} end},
+        {Client,"new",unexpected("zero return engine")},{Protocol,"open",unexpected("zero return modem")},
+        {_G,"read",function() return "cancel" end},quiet()},function() w.run("--reconcile-zero-return") end)
+    Test.equal(acknowledged,0);Test.equal(encode(w.files),files);Test.equal(#w.calls,0)
+end)
+
+Test.case("zero-return CLI passes the exact preview confirmation to recovery without engine startup",function()
+    local w=fixture("supply");local received
+    local answer="ZERO RETURN minecraft:cherry_sapling 53"
+    patched({{Client,"zeroReturnRecovery",function() return {
+        previewZeroReturn=function() return {item={name="minecraft:cherry_sapling"},count=53,chest="returns",
+            beforeChest=0,currentChest=0,confirmation=answer} end,
+        reconcileZeroReturn=function(value) received=value;return true,"Acknowledged" end} end},
+        {Client,"new",unexpected("zero return engine")},{Protocol,"open",unexpected("zero return modem")},
+        {_G,"read",function() return answer end},quiet()},function() w.run("--reconcile-zero-return") end)
+    Test.equal(received,answer);Test.equal(#w.calls,0)
+end)
