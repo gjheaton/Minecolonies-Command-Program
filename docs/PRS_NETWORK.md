@@ -577,6 +577,34 @@ statuses when their next turn completes. If restart reports **TURN_INTERRUPTED**
 close and use the corresponding reconciliation command or action described
 above; retained transfer safeguards still apply.
 
+### Identifying an active held PRS transfer
+
+Release 4.0.3 shows the attempted item and quantity, affected colony, and chest
+with the master's active transfer fault on **HEALTH**. This information comes
+from the retained transfer record. The attempted quantity describes the bridge
+call; it does not prove that the items moved.
+
+For the exact registry ID, recorded bridge result, and AP fingerprint/NBT, pause
+master automation, stop its application and startup launcher to reach the shell,
+then run:
+
+```lua
+colony_master --transferdiag
+```
+
+This command is read-only. It also compares the held selection with the chest's
+current contents. Use the registry ID and variant details to identify the item
+in the PRS grid. Leave delivery chest items untouched and retain the transfer
+hold and journals while investigating; moving items or clearing the hold can
+invalidate the saved transfer evidence. If no held master transfer exists, the
+command reports that rather than guessing from historical errors.
+
+If the active hold blocks the UI's **UPDATE** action, pause automation and let
+the current colony result handshake finish. Then stop the master application
+and launcher and run `install_colony --repair`, followed by `reboot`, to install
+the diagnostic improvement. Repair preserves the held transfer and its original
+evidence. The fault still needs reconciliation; updating does not clear it.
+
 ### Tools held after an identity mismatch
 
 Earlier 4.0.0 code could export a tool successfully but fail chest verification
@@ -732,7 +760,7 @@ install_colony --update supply
 ```
 
 Run the appropriate command on each role; do not update two processes concurrently
-on one computer. Update the master and every colony supply computer to 4.0.2 before
+on one computer. Update the master and every colony supply computer to 4.0.3 before
 resuming automation, and update both roles together for protocol-changing releases.
 An older v3 installation must use the first clean v4 installation instead of an
 in-place update.
@@ -763,7 +791,7 @@ reboot
 The same command works for either installed role. It preserves configuration and
 request/transfer journals, and resets `suiteSourceUrl` to the moving
 `supply-master-colony` branch. This lets future **CHECK UPDATE** actions find later
-patch releases instead of remaining pinned to an old commit. Do not choose
+patch releases, including when the previous source was pinned to an old commit. Do not choose
 `CLEAN`. Resume automation only after every computer has restarted.
 
 Use `install_colony --repair` for a forced reinstall when files are damaged or
@@ -777,7 +805,7 @@ hardware wizard; do not use `CLEAN` to obtain an update or repair.
 
 Versions follow **MAJOR.MINOR.PATCH**. The first number changes for incompatible
 behavior or migrations, the second for compatible new features, and the third
-for fixes and maintenance. This release is **4.0.2**; later fixes increase the
+for fixes and maintenance. This release is **4.0.3**; later fixes increase the
 third number. A minor release resets the patch number (`4.1.0`), and a major
 release resets both later numbers (`5.0.0`). The update control compares all three
 numbers and offers installation when the published version is greater.

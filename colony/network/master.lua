@@ -158,6 +158,32 @@ function M.new(config, store, io, matcher)
         end
     end
 
+    local function transferColonyLabel(pending)
+        local colony = definition(pending.colonyId)
+        local cs = state.colonies[tostring(pending.colonyId)]
+        return colony and colony.label or cs and cs.colonyName or tostring(pending.colonyId)
+    end
+
+    local function transferItemLabel(pending)
+        local item = type(pending.item) == "table" and pending.item or {}
+        return tostring(item.displayName or item.name or "UNKNOWN")
+    end
+
+    local function transferFaultDetail()
+        local fault, pending = state.quarantine, state.pendingTransfer
+        if not fault then return "No uncertain transfer" end
+        local detail = tostring(fault.message)
+        if type(pending) ~= "table" then return detail end
+        local item = type(pending.item) == "table" and pending.item or {}
+        local function value(raw) return raw == nil and "UNKNOWN" or tostring(raw) end
+        return detail .. "\nItem: " .. transferItemLabel(pending)
+            .. "\nID: " .. value(item.name)
+            .. "\nQuantity: " .. value(pending.count) .. " (PRS " .. value(pending.kind) .. ")"
+            .. "\nColony: " .. transferColonyLabel(pending) .. " [" .. value(pending.colonyId) .. "]"
+            .. "\nChest: " .. value(pending.chest)
+            .. "\nReported / chest change: " .. value(pending.reported) .. " / " .. value(pending.lastDelta)
+    end
+
     local function colonyState(colony)
         local key = tostring(colony.id)
         local cs = state.colonies[key]
@@ -495,7 +521,9 @@ function M.new(config, store, io, matcher)
             pending.definiteZero = true
         end
         quarantine("TRANSFER_VERIFY", reason, {colonyId=pending.colonyId,
-            requestId=pending.requestId, item=pending.item.name, expected=pending.count,
+            colonyLabel=transferColonyLabel(pending), chest=pending.chest,
+            requestId=pending.requestId, item=pending.item.name, displayName=pending.item.displayName,
+            expected=pending.count,
             reported=pending.reported, actual=delta, error=err})
         local cs = state.colonies[tostring(pending.colonyId)]
         local record = cs and cs.requests[pending.requestId]
@@ -1077,18 +1105,38 @@ function M.new(config, store, io, matcher)
                 local items = stock()
                 if not items then cs.turn=nil; save(); return false, "PRS stock remains unreadable" end
                 candidate = copy(pending.candidate)
+                local matchingIdentity
                 for _, entry in pairs(items) do
                     if matcher.itemIdentity(entry) == matcher.itemIdentity(pending.item) and integer(entry.amount) > 0 then
-                        variant = copy(entry)
-                        break
+                        matchingIdentity = true
+                        if entry.fingerprint == pending.item.fingerprint then
+                            variant = copy(entry)
+                            break
+                        end
                     end
                 end
-                if not candidate or not variant then cs.turn=nil; save(); return false, "Original exact item unavailable for recovery" end
+                if not candidate or not matchingIdentity then cs.turn=nil; save(); return false, "Original exact item unavailable for recovery" end
+                if not validFingerprint(pending.item.fingerprint) or not variant then
+                    cs.turn=nil; save(); return false, "Original exact AP fingerprint unavailable for recovery; transfer remains held"
+                end
                 local filter = matcher.exportFilterForVariant(candidate, variant, 1)
                 if not filter then cs.turn=nil; save(); return false, "Original exact export filter unavailable for recovery" end
                 local chest, err = io.snapshot(pending.chest)
                 if type(chest) ~= "table" then
                     cs.turn=nil; save(); return false, "Cannot inspect original delivery chest: " .. tostring(err)
+                end
+                -- Stock reads may yield while the original export becomes
+                -- visible. Never replace its durable baseline with a changed
+                -- chest and thereby lose the original shipment's evidence.
+                local unchanged
+                if pending.physicalBefore and type(io.exportBaseline) == "function" then
+                    local fresh = io.exportBaseline(chest)
+                    unchanged = fresh and equal(fresh, pending.physicalBefore)
+                elseif not pending.physicalBefore then
+                    unchanged = integer(io.count(chest, pending.item)) == pending.before
+                end
+                if not unchanged then
+                    cs.turn=nil; save(); return false, "Original delivery chest changed during recovery checks; transfer remains held"
                 end
                 exportChest = chest
             else
@@ -1149,7 +1197,9 @@ function M.new(config, store, io, matcher)
         end
         for _, job in pairs(state.craftJobs) do if activeCraft(job) then crafts[#crafts + 1] = copy(job) end end
         table.sort(requests, function(a,b) return tostring(a.colonyId) .. ":" .. a.id < tostring(b.colonyId) .. ":" .. b.id end)
-        local status = state.quarantine and "PRS quarantined: " .. state.quarantine.message
+        local heldItem = state.quarantine and state.pendingTransfer
+            and transferItemLabel(state.pendingTransfer) .. " x" .. tostring(state.pendingTransfer.count) .. "; " or ""
+        local status = state.quarantine and "PRS quarantined: " .. heldItem .. state.quarantine.message
             or work and "Processing colony " .. tostring(work.colony.id)
             or #colonies == 0 and "Configure colony routes in Settings"
             or "Polling colonies; dedicated PRS owner"
@@ -1157,7 +1207,7 @@ function M.new(config, store, io, matcher)
             crafts=crafts, quarantine=copy(state.quarantine), pendingTransfer=copy(state.pendingTransfer),
             history=d.history or {}, errors=d.errors or {},
             health={{label="Dedicated PRS owner", ok=true, detail="Only this computer calls the player RS Bridge"},
-                {label="Transfer integrity", ok=state.quarantine == nil, detail=state.quarantine and state.quarantine.message or "No uncertain transfer"}},
+                {label="Transfer integrity", ok=state.quarantine == nil, detail=transferFaultDetail()}},
             stats={active=#requests, crafting=#crafts, colonies=#colonies}}
     end
 

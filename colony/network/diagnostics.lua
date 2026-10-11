@@ -31,8 +31,14 @@ function M.printHeldMaster(config,io,store)
     local pending=type(state)=="table" and state.pendingTransfer
     if type(pending)~="table" then print("No held master transfer.");return end
     local item=type(pending.item)=="table" and pending.item or {}
-    print("HELD PRS "..tostring(pending.kind)..": colony "..tostring(pending.colonyId))
+    local label
+    for _,colony in ipairs(config.colonies or {}) do
+        if tostring(colony.id)==tostring(pending.colonyId) then label=colony.label;break end
+    end
+    label=label or (state.colonies and state.colonies[tostring(pending.colonyId)] or {}).colonyName
+    print("HELD PRS "..tostring(pending.kind)..": colony "..tostring(pending.colonyId)..(label and " ("..label..")" or ""))
     print("Item: "..tostring(item.name).." x"..tostring(pending.count))
+    if item.displayName and item.displayName~=item.name then print("Grid name: "..tostring(item.displayName)) end
     print("Chest: "..tostring(pending.chest))
     print("Reported: "..tostring(pending.reported==nil and "UNKNOWN" or pending.reported))
     print("Active quarantine: "..tostring(state.quarantine and state.quarantine.code or "NONE"))

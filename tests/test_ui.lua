@@ -190,11 +190,12 @@ Test.case("UI exposes current version source and check time without repeating te
     assert(not f.ui.notice:find("queued",1,true),"accepted check remained queued after completion")
     local originalPrint,output=print,{}
     _G.print=function(message) output[#output+1]=tostring(message) end
-    local ok,err=pcall(function() f.terminalRenderer();f.terminalRenderer() end)
+    local firstCount
+    local ok,err=pcall(function() f.terminalRenderer();firstCount=#output;f.terminalRenderer() end)
     _G.print=originalPrint;assert(ok,err)
-    Test.equal(#output,2,"unchanged current version feedback repeated on the computer")
+    Test.equal(#output,firstCount,"unchanged current version feedback repeated on the computer")
     assert(output[1]:find("CURRENT (suite v4.0.2) @15:20:30",1,true))
-    assert(output[2]:find("github/gjheaton/Minecolonies-Command-Program@main",1,true))
+    assert(table.concat(output,"\n"):gsub("%s",""):find("github/gjheaton/Minecolonies-Command-Program@main",1,true))
 end)
 
 Test.case("UI completes repeated checks without erasing an independent settings notice",function()
@@ -268,6 +269,78 @@ Test.case("UI history shows newest records while terminal diagnostics show only 
     assert(not text:find("new fault",1,true) and not text:find("old fault",1,true),"native terminal displayed archived records")
     assert(text:find("Download unavailable",1,true),"terminal hid failed update check")
     assert(not text:find("minecraft:stone",1,true),"terminal mirrored request list")
+end)
+
+Test.case("UI wraps current transfer identity across HEALTH pages and routes HOME fault taps to the rendered page",function()
+    local registry="test:"..string.rep("i",123)
+    local chest="enderchests:"..string.rep("c",116)
+    local reason="PRS reported stock but exported zero; possible desync"
+    local detail=reason.."\nItem: Golden Iron Hammer\nID: "..registry.."\nQuantity: 7\nColony: Stardust [9]\nChest: "..chest.."\nReported / chest change: 0 / 0"
+    for _,hasMonitor in ipairs({true,false}) do
+        local f=fixture("master",hasMonitor,100,38)
+        f.state.health={{label="Dedicated PRS owner",ok=true,detail="Only this computer calls the player RS Bridge"},
+            {label="Transfer integrity",ok=false,detail=detail}}
+        f.state.colonies={{id=9,label="Stardust",state="error",detail="Current colony fault"}}
+        f.ui.view="health";f.ui.draw()
+        local bodies={}
+        for page=1,12 do
+            f.ui.pages.health=page;f.ui.draw()
+            if f.ui.pages.health~=page then break end
+            for row=5,f.screen.height-3 do bodies[#bodies+1]=f.screen.lines[row] or "" end
+        end
+        local text=table.concat(bodies,"\n");local compact=text:gsub("%s","")
+        assert(compact:find(reason:gsub("%s",""),1,true) and compact:find("Item:GoldenIronHammer",1,true))
+        assert(compact:find(registry,1,true) and compact:find(chest,1,true),"HEALTH clipped the full item or chest identifier")
+        assert(compact:find("Quantity:7",1,true) and compact:find("Reported/chestchange:0/0",1,true))
+        f.ui.view="home";f.ui.draw();f.touch(2,13)
+        Test.equal(f.ui.view,"health")
+        assert(f.screen.dump():find("Current colony fault",1,true),"HOME tap selected the check index instead of its wrapped page")
+        if not hasMonitor then assert(f.ui.pages.health>1,"wrapped transfer details did not affect HEALTH pagination") end
+        f.state.health[2]={label="Transfer integrity",ok=true,detail="No uncertain transfer"};f.state.colonies={}
+        f.ui.pages.health=1;f.ui.draw()
+        assert(not f.screen.dump():find("Golden Iron Hammer",1,true),"cleared quarantine kept attempted-item context live")
+        Test.equal(f.store.failures,0)
+        assert(next(f.w.files)==nil,"HEALTH rendering changed configuration or persisted state")
+    end
+end)
+
+Test.case("native transfer diagnostics keep attempted item and quantity visible without scrolling or mirroring old records",function()
+    local f=fixture("master",true,100,38)
+    local registry="test:"..string.rep("i",123)
+    local detail="PRS reported stock but exported zero; possible desync\nItem: Golden Iron Hammer\nID: "..registry.."\nQuantity: 7\nColony: Stardust [9]\nChest: "
+        ..string.rep("c",128).."\nReported / chest change: 0 / 0"
+    f.state.health={{label="Transfer integrity",ok=false,detail=detail}}
+    for index=1,10 do f.state.health[#f.state.health+1]={label="Other current fault "..index,ok=false,detail=string.rep("x",90)} end
+    f.store.data.errors={{code="OLD",message="Archived transfer item",context={item="minecraft:old_item"}}}
+    f.ui.draw()
+    local previousPrint,output=print,{}
+    _G.print=function(text) assert(#text<=51,"native diagnostic line wrapped implicitly");output[#output+1]=text end
+    local firstCount
+    local ok,err=pcall(function() f.terminalRenderer();firstCount=#output;f.terminalRenderer() end)
+    _G.print=previousPrint;assert(ok,err)
+    Test.equal(#output,firstCount,"unchanged current fault printed twice")
+    assert(#output<=18,"native diagnostics would scroll their first row away")
+    local text=table.concat(output,"\n");local compact=text:gsub("%s","")
+    assert(compact:find("Item:GoldenIronHammer",1,true) and compact:find("ID:"..registry,1,true))
+    assert(text:find("Quantity: 7",1,true),"attempted quantity scrolled or clipped offscreen")
+    assert(output[#output]:find("More current details: HEALTH",1,true))
+    assert(not text:find("Archived transfer item",1,true) and not text:find("minecraft:old_item",1,true))
+    f.state.health={{label="Transfer integrity",ok=true,detail="No uncertain transfer"}};f.ui.draw()
+    output={};_G.print=function(text) output[#output+1]=text end
+    ok,err=pcall(f.terminalRenderer);_G.print=previousPrint;assert(ok,err)
+    Test.equal(#output,0,"cleared transfer fault remained on the native terminal")
+end)
+
+Test.case("recorded export context displays the attempted identity destination and measured result",function()
+    local f=fixture("master",true,100,38)
+    f.store.data.errors={{time=100,code="TRANSFER_ZERO",message="PRS reported stock but exported zero; possible desync",
+        context={displayName="Golden Iron Hammer",item="test:iron_hammer",expected=7,colonyLabel="Stardust",colonyId=9,chest="delivery_chest",reported=0,actual=0}}}
+    f.ui.view="errors";f.ui.draw()
+    local text=f.monitor.dump()
+    for _,value in ipairs({"displayName: Golden Iron Hammer","item: test:iron_hammer","expected: 7","colonyLabel: Stardust","chest: delivery_chest","reported: 0","actual: 0"}) do
+        assert(text:find(value,1,true),"recorded transfer context omitted "..value)
+    end
+    assert(text:find("see HEALTH for current status",1,true))
 end)
 
 return true

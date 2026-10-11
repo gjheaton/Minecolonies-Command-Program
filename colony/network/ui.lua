@@ -549,6 +549,19 @@ function M.new(config, store, engine, io, updater, options)
         return rows
     end
 
+    local function healthLines(width)
+        local lines={}
+        for _,check in ipairs(healthRows()) do
+            local label=tostring(check.label)
+            local padding=string.rep(" ",math.max(0,math.min(22,math.floor(width/3))-#label))
+            local text=label..padding.." "..check.severity.."  "..check.detail
+            for _,line in ipairs(Util.wrapText(text,math.max(1,width-2))) do
+                lines[#lines+1]={text=line,label=check.label,ok=check.ok,severity=check.severity}
+            end
+        end
+        return lines
+    end
+
     local function drawHome()
         local healthy=true
         for _,check in ipairs(healthRows()) do if not check.ok then healthy=false; break end end
@@ -588,8 +601,8 @@ function M.new(config, store, engine, io, updater, options)
                     .. tostring(colony.status or colony.phase or colony.state or (colony.online==false and "OFFLINE" or "")),
                     (detail or colony.online==false) and C.warn or C.text,detail and function()
                         self.notice=label..": "..detail;self.view="health"
-                        local _,h=screen.size()
-                        for index,check in ipairs(healthRows()) do
+                        local w,h=screen.size()
+                        for index,check in ipairs(healthLines(w)) do
                             if check.label==label then self.pages.health=math.floor((index-1)/math.max(1,h-7))+1;break end
                         end
                         draw()
@@ -605,10 +618,10 @@ function M.new(config, store, engine, io, updater, options)
 
     local function drawHealth()
         local w,h=screen.size()
-        local rows,page,pages=pageRows(healthRows(),"health",h-7)
+        local rows,page,pages=pageRows(healthLines(w),"health",h-7)
         frame("SYSTEM HEALTH  "..page.."/"..pages,"Required peripherals / protocol / transfer safety",C.dim)
         for i,check in ipairs(rows) do
-            row(4+i,Util.padRight(check.label,math.min(22,math.floor(w/3))).." "..check.severity.."  "..check.detail,
+            row(4+i,check.text,
                 check.ok and C.good or (check.severity=="WARNING" and C.warn or C.danger))
         end
         if self.notice then row(h-2,self.notice,C.warn) end
@@ -695,7 +708,7 @@ function M.new(config, store, engine, io, updater, options)
                 shown={item=true,reported=true,beforeChest=true,actualDelta=true}
             end
             if type(e.context)=="table" then
-                for _,key in ipairs({"item","colonyId","requestId","shipmentId","reason","expected","observed","reported","actualDelta","beforeChest","afterChest"}) do
+                for _,key in ipairs({"displayName","item","expected","colonyLabel","colonyId","chest","requestId","shipmentId","reason","observed","reported","actual","actualDelta","beforeChest","afterChest"}) do
                     if e.context[key]~=nil and not shown[key] then
                         local value=e.context[key]
                         if key=="item" and type(value)=="table" then value=value.name or "UNKNOWN" end
@@ -1018,8 +1031,15 @@ function M.new(config, store, engine, io, updater, options)
         if role()=="supply" and not options.readOnly and health.ok~=false and snapshot.statusMessage then
             lines[#lines+1]={text="Supply: "..textOf(snapshot.statusMessage),color=C.good}
         end
-        for _,check in ipairs(healthRows()) do
-            if not check.ok then lines[#lines+1]={text=check.severity..": "..check.label.." - "..check.detail,color=check.severity=="WARNING" and C.warn or C.danger} end
+        local faults=healthRows()
+        -- Held-transfer identity stays ahead of other diagnostics on a small
+        -- terminal. These details are current snapshot data, never the archive.
+        for _,multiline in ipairs({true,false}) do
+            for _,check in ipairs(faults) do
+                if not check.ok and (check.detail:find("\n",1,true)~=nil)==multiline then
+                    lines[#lines+1]={text=check.severity..": "..check.label.." - "..check.detail,color=check.severity=="WARNING" and C.warn or C.danger}
+                end
+            end
         end
         local info=updateInfo()
         if info and (self.updateCheckPending or updater.checkQueued or updater.checking or updater.installing
@@ -1032,13 +1052,26 @@ function M.new(config, store, engine, io, updater, options)
             lines[#lines+1]={text=self.edit.value.."_",color=C.text}
             lines[#lines+1]={text=self.edit.error or (self.edit.kind=="peripheral" and "Type a device number; Enter selects. N/P pages; Escape cancels." or "Enter saves; Escape cancels."),color=self.edit.error and C.danger or C.dim}
         end
-        local content={}
+        local width,height=term.getSize()
+        local content={tostring(width).."x"..tostring(height)}
         for _,line in ipairs(lines) do content[#content+1]=line.text..":"..tostring(line.color) end
         local marker=table.concat(content,"\n")
         if marker==lastTerminal then return end
         lastTerminal=marker
+        local wrapped={}
+        for _,line in ipairs(lines) do
+            for _,text in ipairs(Util.wrapText(line.text,math.max(1,width))) do wrapped[#wrapped+1]={text=text,color=line.color} end
+        end
+        -- Leave the last terminal row empty: print's trailing newline would
+        -- otherwise scroll the first fault off a 51 x 19 computer screen.
+        local limit=math.max(0,height-1)
+        local truncated=#wrapped>limit
         SharedUI.resetTerminal(C.text,C.bg)
-        for _,line in ipairs(lines) do SharedUI.setTerminalColor(line.color); print(line.text) end
+        for index=1,math.min(#wrapped,truncated and math.max(0,limit-1) or limit) do
+            local line=wrapped[index]
+            SharedUI.setTerminalColor(line.color);print(line.text)
+        end
+        if truncated and limit>0 then SharedUI.setTerminalColor(C.warn);print(Util.clip("More current details: HEALTH",width)) end
         SharedUI.setTerminalColor(C.text)
     end
 

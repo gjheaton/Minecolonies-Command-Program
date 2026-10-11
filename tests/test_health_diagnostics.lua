@@ -3,6 +3,9 @@ local D=require("tests.display_support")
 
 local ACTIVE="Turn preparation was interrupted; transfers need reconciliation"
 local HISTORICAL="Colony response overdue; original chest handoff retained"
+local function contains(text,expected)
+    return text:gsub("%s",""):find(expected:gsub("%s",""),1,true)
+end
 local function fixture()
     local w=D.world();local master=S.computer(w,1,"master")
     master.config.colonies={D.route(2),D.route(9)}
@@ -50,19 +53,19 @@ Test.case("master HOME selects an active colony fault and HEALTH plus the native
         assert(clockwork and stardust and clockwork~=stardust,"active colony fault used the normal idle row color")
         f.ui.handleEvent("monitor_touch","screen",2,14)
         Test.equal(f.ui.view,"health");assert(f.ui.notice:find(ACTIVE,1,true))
-        local health=f.monitor.dump();assert(health:find("Stardust [9]",1,true) and health:find(ACTIVE,1,true))
-        local terminal=f.terminal();assert(terminal:find("ERROR: Stardust [9]",1,true) and terminal:find(ACTIVE,1,true))
+        local health=f.monitor.dump();assert(contains(health,"Stardust [9]") and contains(health,ACTIVE))
+        local terminal=f.terminal();assert(contains(terminal,"ERROR: Stardust [9]") and contains(terminal,ACTIVE))
         assert(not terminal:find("RECORDED ERROR",1,true) and not terminal:find("COLONY_TIMEOUT",1,true),"native terminal mixed archived records into live health")
     end)
 end)
 
 Test.case("clearing the live colony error removes it from health and the terminal while preserving the archive",function()
     local f=fixture()
-    f.ui.view="health";f.ui.draw();assert(f.monitor.dump():find(ACTIVE,1,true));f.terminal()
+    f.ui.view="health";f.ui.draw();assert(contains(f.monitor.dump(),ACTIVE));f.terminal()
     f.colony.error=nil
     f.guard(function()
-        f.ui.draw();assert(not f.monitor.dump():find(ACTIVE,1,true),"cleared colony error remained a current health failure")
-        local terminal=f.terminal();assert(not terminal:find(ACTIVE,1,true))
+        f.ui.draw();assert(not contains(f.monitor.dump(),ACTIVE),"cleared colony error remained a current health failure")
+        local terminal=f.terminal();assert(not contains(terminal,ACTIVE))
         assert(not terminal:find("RECORDED ERROR",1,true) and not terminal:find("COLONY_TIMEOUT",1,true))
         assert(not terminal:find(HISTORICAL,1,true));Test.equal(#f.master.store.data.errors,1)
         f.ui.view="errors";f.ui.draw()
@@ -77,11 +80,55 @@ Test.case("cached colony details do not replace active master transfer faults wi
     f.guard(function()
         f.ui.view="health";f.ui.draw()
         local text=f.monitor.dump();assert(text:find("Transfer integrity",1,true) and text:find("Export quantity",1,true))
-        assert(text:find(ACTIVE,1,true))
+        assert(contains(text,ACTIVE))
         local terminal=f.terminal()
         assert(terminal:find("ERROR: Transfer integrity",1,true) and terminal:find("ERROR: Stardust [9]",1,true))
         assert(not terminal:find("RECORDED ERROR",1,true))
     end)
+end)
+
+Test.case("an existing held master export identifies the grid item and attempted quantity on health and the native terminal without touching its journal",function()
+    local f=fixture();local state=f.master.store.data.master
+    state.quarantine={code="TRANSFER_VERIFY",message="PRS reported stock but exported zero; possible desync"}
+    state.pendingTransfer={kind="export",colonyId=9,chest="enderchests:ender_chest_tile_10",
+        item={name="minecolonies:cheddar_cheese",displayName="Cheddar Cheese",fingerprint="original-exact-selector"},
+        count=16,reported=0,lastDelta=0,physicalBefore={totals={}},uncertain=true,definiteZero=true}
+    local before=textutils.serialize(f.master.store.data)
+    f.guard(function()
+        f.ui.view="health";f.ui.draw()
+        local health=f.monitor.dump()
+        for _,detail in ipairs({"Item: Cheddar Cheese","ID: minecolonies:cheddar_cheese","Quantity: 16 (PRS export)",
+            "Colony: Stardust [9]","Chest: enderchests:ender_chest_tile_10","Reported / chest change: 0 / 0"}) do
+            assert(contains(health,detail),"active health omitted "..detail)
+        end
+        local terminal=f.terminal()
+        assert(contains(terminal,"ERROR: Transfer integrity"))
+        assert(contains(terminal,"Item: Cheddar Cheese") and contains(terminal,"ID: minecolonies:cheddar_cheese"))
+        assert(contains(terminal,"Quantity: 16 (PRS export)"))
+        Test.equal(textutils.serialize(f.master.store.data),before,"displaying the old held transfer changed its durable intent")
+    end)
+    state.pendingTransfer,state.quarantine=nil,nil;f.colony.error=nil
+    f.ui.draw();local terminal=f.terminal()
+    assert(not contains(terminal,"Cheddar Cheese") and not contains(f.monitor.dump(),"Cheddar Cheese"),"resolved hold remained a current fault")
+    Test.equal(#f.master.store.data.errors,1,"resolving the current hold erased historical errors")
+end)
+
+Test.case("held master diagnostics identify the display name and colony while inspecting the original exact selector without transferring items",function()
+    local f=fixture();local state=f.master.store.data.master
+    f.w.chest(1,"held-delivery","held-channel")
+    state.pendingTransfer={kind="export",colonyId=9,chest="held-delivery",before=0,count=8,reported=0,
+        item={name="minecolonies:rice",displayName="Rice",fingerprint="original-rice-selector"},physicalBefore={totals={}}}
+    state.quarantine={code="TRANSFER_VERIFY",message="Export returned zero"}
+    f.master.store.save()
+    local before=textutils.serialize(f.master.store.data);local files=textutils.serialize(f.w.files)
+    local originalPrint,lines=print,{};_G.print=function(value) lines[#lines+1]=tostring(value) end
+    local ok,err=pcall(f.w.at,1,require("colony.network.diagnostics").printHeldMaster,f.master.config,f.master.io,f.master.store)
+    _G.print=originalPrint;assert(ok,err)
+    local text=table.concat(lines,"\n")
+    assert(text:find("HELD PRS export: colony 9 (Stardust)",1,true))
+    assert(text:find("Item: minecolonies:rice x8",1,true) and text:find("Grid name: Rice",1,true))
+    assert(text:find("AP fingerprint: original-rice-selector",1,true) and text:find("Reported: 0",1,true))
+    Test.equal(#f.w.calls,0);Test.equal(textutils.serialize(f.master.store.data),before);Test.equal(textutils.serialize(f.w.files),files)
 end)
 
 Test.case("actual retained import details render on the native colony and cached read-only master display without storage discovery or mutation",function()

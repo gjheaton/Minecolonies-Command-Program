@@ -387,6 +387,134 @@ Test.case("explicit zero-export recovery probes honor cooldown and resume delive
     Test.equal(#w.callsFor("export",true),4)
 end)
 
+local function heldZeroShears()
+    local w,m=fixture(1,{asymmetricNBT=true})
+    local item={name="minecraft:shears",nbt={Damage=0},maxCount=1,displayName="Pristine Shears"}
+    w.computers[2].integrator.requests={S.request("R2",item.name,1,item.nbt)}
+    m.rs.add(item,2);m.rs.zeroExport=true
+    w.untilTrue(function()
+        local cs=m.store.data.master.colonies["2"]
+        return m.store.data.master.quarantine and cs and cs.turn==nil
+    end,"zero shears export was not held after the result acknowledgement")
+    local pending=m.store.data.master.pendingTransfer
+    assert(pending and pending.definiteZero and pending.reported==0 and pending.lastDelta==0)
+    assert(pending.physicalBefore and pending.item.fingerprint)
+    Test.equal(#w.callsFor("export",true),1)
+    return w,m,item,pending
+end
+
+local function journalValue(value)
+    return textutils.serialize(value,{allow_repetitions=true,compact=true})
+end
+
+Test.case("zero-export recovery retains the original intent when chest contents appear during the stock read",function()
+    local w,m,item,pending=heldZeroShears()
+    local baseline=journalValue(pending.physicalBefore)
+    local source=journalValue(pending.item)
+    local originalList=w.devices[1].prs.api.listItems;local revealed=false
+    w.devices[1].prs.api.listItems=function(...)
+        local items=originalList(...)
+        if not revealed then
+            revealed=true
+            Test.equal(w.insert(w.channels.D2,item,1),1,"late original item was not staged")
+        end
+        return items
+    end
+    m.rs.zeroExport=false
+    local started,err=w.at(1,m.engine.reconcile)
+    assert(revealed,"recovery did not read refreshed PRS stock")
+    assert(not started and tostring(err):find("changed"),"changed original chest was accepted as a new probe baseline")
+    Test.equal(#w.callsFor("export",true),1,"recovery exported again after original contents appeared")
+    Test.equal(m.store.data.master.pendingTransfer,pending,"recovery replaced the original held intent")
+    Test.equal(journalValue(pending.physicalBefore),baseline,"recovery changed the original physical baseline")
+    Test.equal(journalValue(pending.item),source,"recovery changed the original exact source selector")
+    Test.equal(pending.reported,0);Test.equal(pending.count,1)
+    assert(m.store.data.master.quarantine)
+    Test.equal(m.store.data.master.colonies["2"].turn,nil)
+    Test.equal(#m.store.data.master.colonies["2"].shipments,0,"late ambiguous contents received shipment credit")
+    Test.equal(#w.callsFor("import",false),0,"colony imported from the retained held chest")
+end)
+
+Test.case("zero-export recovery rejects a refreshed variant with a changed AP fingerprint",function()
+    local w,m,item,pending=heldZeroShears()
+    local baseline=journalValue(pending.physicalBefore)
+    local source=journalValue(pending.item)
+    local fingerprint=pending.item.fingerprint
+    local originalList=w.devices[1].prs.api.listItems;local replaced=false
+    w.devices[1].prs.api.listItems=function(...)
+        local items=originalList(...)
+        for _,entry in ipairs(items) do
+            if entry.name==item.name then
+                Test.equal(m.matcher.itemIdentity(entry),m.matcher.itemIdentity(pending.item))
+                entry.fingerprint="changed-exact-AP-fingerprint";replaced=true
+            end
+        end
+        return items
+    end
+    m.rs.zeroExport=false
+    local started,err=w.at(1,m.engine.reconcile)
+    assert(replaced,"recovery did not inspect the refreshed exact variant")
+    assert(not started and tostring(err):find("fingerprint"),"recovery accepted a different exact AP selector")
+    Test.equal(#w.callsFor("export",true),1,"recovery exported with a changed AP fingerprint")
+    Test.equal(m.store.data.master.pendingTransfer,pending,"recovery replaced the original held intent")
+    Test.equal(journalValue(pending.physicalBefore),baseline)
+    Test.equal(journalValue(pending.item),source)
+    Test.equal(pending.item.fingerprint,fingerprint)
+    Test.equal(pending.reported,0)
+    assert(m.store.data.master.quarantine)
+    Test.equal(m.store.data.master.colonies["2"].turn,nil)
+    Test.equal(#m.store.data.master.colonies["2"].shipments,0)
+    Test.equal(#w.callsFor("import",false),0)
+end)
+
+Test.case("zero-export recovery finds the original exact fingerprint among same-name NBT variants",function()
+    local w,m,item,pending=heldZeroShears()
+    local originalList=w.devices[1].prs.api.listItems
+    w.devices[1].prs.api.listItems=function(...)
+        local items=originalList(...)
+        local other=S.copy(items[1]);other.fingerprint="another-AP-fingerprint";other.displayName="Renamed Shears"
+        table.insert(items,1,other)
+        return items
+    end
+    m.rs.zeroExport=false
+    local started,err=w.at(1,m.engine.reconcile)
+    assert(started,err)
+    Test.equal(#w.callsFor("export",true),2)
+    local probe=m.store.data.master.pendingTransfer
+    assert(probe and probe.recoveryProbe)
+    Test.equal(probe.item.fingerprint,pending.item.fingerprint)
+    Test.equal(probe.variant.fingerprint,pending.item.fingerprint)
+    Test.equal(w.callsFor("export",true)[2].filter.fingerprint,pending.item.fingerprint)
+    assert(w.at(1,m.engine.verifyHeldTransfer))
+    local shipment=m.store.data.master.colonies["2"].shipments[1]
+    assert(shipment and shipment.verified)
+    Test.equal(shipment.item.fingerprint,pending.item.fingerprint)
+    Test.equal(shipment.count,1)
+end)
+
+Test.case("active zero-export snapshots identify the held item without hardware reads or journal mutation",function()
+    local w,m,item,pending=heldZeroShears()
+    local data=journalValue(m.store.data);local files=journalValue(w.files)
+    local calls=#w.calls;local revision=m.store.data.revision
+    for _=1,3 do
+        local snapshot=w.at(1,m.engine.snapshot)
+        local health
+        for _,row in ipairs(snapshot.health) do if row.label=="Transfer integrity" then health=row end end
+        assert(health and not health.ok)
+        for _,value in ipairs({item.displayName,item.name,"Colony 2","delivery-2","Reported / chest change: 0 / 0"}) do
+            assert(health.detail:find(value,1,true),"held transfer HEALTH context omitted "..value)
+        end
+        assert(snapshot.statusMessage:find(item.displayName,1,true))
+        Test.equal(snapshot.pendingTransfer.item.fingerprint,pending.item.fingerprint)
+        snapshot.pendingTransfer.item.nbt.Damage=42
+        Test.equal(pending.item.nbt.Damage,0,"read-only snapshot shared its exact item with the live intent")
+    end
+    Test.equal(#w.calls,calls,"rendering transfer context performed a hardware read")
+    Test.equal(m.store.data.revision,revision,"rendering transfer context saved the journal")
+    Test.equal(journalValue(m.store.data),data,"rendering transfer context mutated the live journal")
+    Test.equal(journalValue(w.files),files,"rendering transfer context changed durable journal slots")
+end)
+
 Test.case("failed MineColonies scan preserves independently verified import acknowledgement",function()
     local w,m=fixture(1);m.rs.add({name="minecraft:stone"},8)
     w.untilTrue(function()
