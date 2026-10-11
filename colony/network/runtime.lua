@@ -272,7 +272,11 @@ function M.run(role,...)
     local actualUpdater=SuiteUpdater.new({appId=role,appVersion=Config.VERSION,suiteVersion=Config.VERSION,
         displayName=role=="master" and "PRS MASTER" or "COLONY SUPPLY",checkSeconds=config.updateCheckSeconds})
     local updater=setmetatable({}, {__index=actualUpdater})
-    function updater.check() return queueAction("check") end
+    function updater.check()
+        local queued,reason=queueAction("check")
+        if queued then actualUpdater.checkQueued=true end
+        return queued,reason or "Update check queued"
+    end
     function updater.install() return queueAction("update") end
     local telemetry=Telemetry.new(config,store,io,engine)
     local ui=Displays.new(config,store,engine,io,updater,telemetry)
@@ -298,9 +302,11 @@ function M.run(role,...)
                         if pending.callback then pcall(pending.callback,cleared,detail) end
                         if not cleared and store.fault then error(store.fault,0) end
                     elseif pending=="check" then
+                        actualUpdater.checkQueued=false
                         actualUpdater.checking=true
                         local checked,checkError=pcall(actualUpdater.check)
                         actualUpdater.checking=false
+                        actualUpdater.checkQueued=false
                         if not checked then actualUpdater.checkError=tostring(checkError) end
                     elseif pending=="reconcile" and not store.data.chestTest then
                         local recovered,detail=engine.reconcile()
@@ -316,7 +322,10 @@ function M.run(role,...)
                     end
                 end
                 if not processorFault and not store.data.chestTest then engine.tick() end
-                if io.now()>=nextCheck then action=action or "check"; nextCheck=io.now()+config.updateCheckSeconds end
+                if io.now()>=nextCheck then
+                    if action==nil then updater.check() end
+                    nextCheck=io.now()+config.updateCheckSeconds
+                end
             end)
             if not ok then
                 processorFault="Processor stopped; restart after recovery: "..tostring(err)

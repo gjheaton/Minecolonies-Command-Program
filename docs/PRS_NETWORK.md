@@ -732,7 +732,7 @@ install_colony --update supply
 ```
 
 Run the appropriate command on each role; do not update two processes concurrently
-on one computer. Update the master and every colony supply computer to 4.0.1 before
+on one computer. Update the master and every colony supply computer to 4.0.2 before
 resuming automation, and update both roles together for protocol-changing releases.
 An older v3 installation must use the first clean v4 installation instead of an
 in-place update.
@@ -741,6 +741,30 @@ After the first clean Supply 4.0.0 installation, future **Update** and **Repair*
 operations preserve the schema 4 configuration, monitor assignments, and request
 journals. Do not use `--install` or type `CLEAN` when preserving an existing
 installation.
+
+Release 4.0.2 permits update checks during active turns. Installing an update
+still waits for safe, closed turns and the existing transfer guards. Open the
+local **SETTINGS** page to inspect **Update:** for the latest check result and
+time, and **Source:** for the configured source. The terminal reports changes
+to this status; master-side remote dashboards remain read-only.
+A check can report a newer version, no update, or a download/check failure;
+the result does not mean that new code has already been installed.
+
+If **CHECK UPDATE** on an older 4.0.0 installation appears unresponsive or cannot
+find the release, pause master automation and let current handshakes finish.
+Stop the application and startup launcher to reach the shell, then run on the
+master and every colony supply computer:
+
+```lua
+install_colony --repair https://raw.githubusercontent.com/gjheaton/Minecolonies-Command-Program/supply-master-colony/install_colony.lua
+reboot
+```
+
+The same command works for either installed role. It preserves configuration and
+request/transfer journals, and resets `suiteSourceUrl` to the moving
+`supply-master-colony` branch. This lets future **CHECK UPDATE** actions find later
+patch releases instead of remaining pinned to an old commit. Do not choose
+`CLEAN`. Resume automation only after every computer has restarted.
 
 Use `install_colony --repair` for a forced reinstall when files are damaged or
 when retrieving a same-version code fix. Repair preserves configuration and
@@ -753,7 +777,7 @@ hardware wizard; do not use `CLEAN` to obtain an update or repair.
 
 Versions follow **MAJOR.MINOR.PATCH**. The first number changes for incompatible
 behavior or migrations, the second for compatible new features, and the third
-for fixes and maintenance. This release is **4.0.1**; later fixes increase the
+for fixes and maintenance. This release is **4.0.2**; later fixes increase the
 third number. A minor release resets the patch number (`4.1.0`), and a major
 release resets both later numbers (`5.0.0`). The update control compares all three
 numbers and offers installation when the published version is greater.

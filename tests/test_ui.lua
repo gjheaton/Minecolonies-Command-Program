@@ -24,13 +24,13 @@ local function surface(width,height)
     return self
 end
 
-local function fixture(role,hasMonitor)
+local function fixture(role,hasMonitor,width,height,options)
     local w=S.world()
     _G.colors={white=1,orange=2,magenta=4,lightBlue=8,yellow=16,lime=32,pink=64,gray=128,
         lightGray=256,cyan=512,purple=1024,blue=2048,brown=4096,green=8192,red=16384,black=32768}
     _G.keys={enter=28,numPadEnter=156,escape=1,backspace=14,delete=211}
     local terminal=surface(51,19);_G.term=terminal;term.current=function() return terminal end
-    local monitor=surface(80,24)
+    local monitor=surface(width or 80,height or 24)
     local config=Config.defaults(role or "master")
     local state={role=role or "master",health={{label="PRS",ok=true,detail="Connected"}},requests={},colonies={}}
     local store={data={history={},errors={}},failures=0,error=function() end}
@@ -38,9 +38,9 @@ local function fixture(role,hasMonitor)
     local engine={snapshot=function() return state end,busy=function() return state.busy==true end}
     local io={monitor=function() if hasMonitor~=false then return monitor,"top" end end}
     local updater={checks=0,installs=0}
-    updater.check=function() updater.checks=updater.checks+1;return true end
+    updater.check=function() updater.checks=updater.checks+1;updater.checkQueued=true;return true end
     updater.install=function() updater.installs=updater.installs+1;return true end
-    local ui=require("colony.network.ui").new(config,store,engine,io,updater)
+    local ui=require("colony.network.ui").new(config,store,engine,io,updater,options)
     local f={w=w,ui=ui,config=config,state=state,engine=engine,store=store,monitor=monitor,terminal=terminal,updater=updater}
     f.screen=hasMonitor==false and terminal or monitor
     f.terminalRenderer=ui.renderTerminal
@@ -52,7 +52,7 @@ local function fixture(role,hasMonitor)
     end
     function f.selectSetting(key)
         local schemas=Config.fields(config.role)
-        local rows=f.screen.height-9
+        local rows=f.screen.height-((options and options.readOnly) and 9 or 10)
         for index,schema in ipairs(schemas) do
             if schema.key==key then
                 ui.view="settings";ui.pages.settings=math.floor((index-1)/rows)+1;ui.draw()
@@ -140,7 +140,7 @@ Test.case("UI route drafts validate unique channels and persist policy overrides
     assert(not f.monitor.dump():find("Monitor text scale",1,true),"local hardware setting exposed as remote policy override")
 end)
 
-Test.case("UI shows effective master policy and paused automation while serializing controls",function()
+Test.case("UI shows effective master policy and paused automation",function()
     local f=fixture("supply")
     f.state.effectivePolicy={autoCraftEnabled=false,maxRequestsPerTurn=2}
     f.ui.draw();assert(f.monitor.dump():find("Auto craft: OFF (MASTER)",1,true))
@@ -150,16 +150,104 @@ Test.case("UI shows effective master policy and paused automation while serializ
     assert(f.ui.notice:find("Effective policy",1,true))
     local master=fixture();master.config.automationEnabled=false;master.ui.draw()
     assert(master.monitor.dump():find("AUTOMATION PAUSED",1,true))
-    master.state.busy=true;master.ui.draw();master.touch(75,3)
-    Test.equal(master.updater.checks,0,"busy update control bypassed serialized gate")
-    master.state.busy=false;master.ui.draw();master.touch(75,3);Test.equal(master.updater.checks,1)
-    master.updater.checking=true;master.ui.draw()
-    assert(master.monitor.dump():find("CHECKING...",1,true));master.touch(75,3)
-    Test.equal(master.updater.checks,1,"a running update check was queued twice")
-    master.updater.checking=false;master.updater.installing=true;master.ui.draw()
-    assert(master.monitor.dump():find("UPDATING...",1,true));master.updater.installing=false
     local reconciles=0;master.engine.requestReconcile=function() reconciles=reconciles+1;return true end
     master.ui.view="health";master.ui.draw();master.touch(40,23);Test.equal(reconciles,1)
+end)
+
+Test.case("UI queues read-only update checks during active work and keeps installation guarded",function()
+    local f=fixture()
+    f.state.busy=true;f.state.requests={{id="R",status="in progress",requested=6,shipped=4}}
+    f.ui.view="settings";f.ui.draw();f.touch(75,3)
+    Test.equal(f.updater.checks,1,"active work blocked the read-only version check")
+    assert(f.ui.notice:find("queued",1,true) and not f.ui.notice:find("CURRENT",1,true))
+    assert(f.monitor.dump():find("CHECK QUEUED",1,true))
+    f.touch(75,3);Test.equal(f.updater.checks,1,"queued check was duplicated")
+    f.updater.checkQueued=false;f.updater.checking=true;f.ui.draw()
+    assert(f.monitor.lines[20]:find("CHECKING...",1,true),"result row did not show the running check")
+    f.touch(75,3);Test.equal(f.updater.checks,1,"running check was duplicated")
+    f.updater.checking=false;f.updater.availableVersion="4.0.2";f.updater.remoteSuiteVersion="4.0.2"
+    f.updater.lastCheckedText="12:34:56";f.ui.draw()
+    assert(f.ui.notice:find("UPDATE AVAILABLE",1,true) and not f.ui.notice:find("queued",1,true))
+    f.touch(75,3);Test.equal(f.updater.installs,0,"active turn allowed installation")
+    assert(f.ui.notice:find("safely closed",1,true))
+    f.state.busy=false;f.ui.draw();f.touch(75,3);Test.equal(f.updater.installs,1)
+    f.updater.installing=true;f.ui.draw();assert(f.monitor.dump():find("UPDATING...",1,true))
+    f.touch(75,3);Test.equal(f.updater.installs,1,"running installation was duplicated")
+    Test.equal(f.store.failures,0,"successful read-only check changed the error journal")
+    assert(next(f.w.files)==nil,"read-only update check wrote configuration or state")
+end)
+
+Test.case("UI exposes current version source and check time without repeating terminal output",function()
+    local f=fixture("master",true,100,38)
+    f.updater.sourceLabel=function() return "github/gjheaton/Minecolonies-Command-Program@main" end
+    f.updater.statusText=function(checking)
+        return checking and "CHECKING..." or f.updater.remoteSuiteVersion and "CURRENT (suite v"..f.updater.remoteSuiteVersion..")" or "NOT CHECKED"
+    end
+    f.ui.view="settings";f.ui.draw();f.touch(95,3)
+    f.updater.checkQueued=false;f.updater.remoteSuiteVersion="4.0.2";f.updater.lastCheckedText="15:20:30";f.ui.draw()
+    assert(f.monitor.lines[34]:find("Update: CURRENT (suite v4.0.2) @15:20:30",1,true))
+    assert(f.monitor.lines[35]:find("Source: github/gjheaton/Minecolonies-Command-Program@main",1,true))
+    assert(not f.ui.notice:find("queued",1,true),"accepted check remained queued after completion")
+    local originalPrint,output=print,{}
+    _G.print=function(message) output[#output+1]=tostring(message) end
+    local ok,err=pcall(function() f.terminalRenderer();f.terminalRenderer() end)
+    _G.print=originalPrint;assert(ok,err)
+    Test.equal(#output,2,"unchanged current version feedback repeated on the computer")
+    assert(output[1]:find("CURRENT (suite v4.0.2) @15:20:30",1,true))
+    assert(output[2]:find("github/gjheaton/Minecolonies-Command-Program@main",1,true))
+end)
+
+Test.case("UI completes repeated checks without erasing an independent settings notice",function()
+    local f=fixture()
+    f.updater.remoteSuiteVersion="4.0.2";f.updater.lastCheckedText="15:20:30"
+    f.ui.view="settings";f.ui.draw();f.touch(75,3)
+    f.updater.checkQueued=false;f.ui.draw()
+    assert(f.ui.notice:find("CURRENT",1,true),"unchanged check result left a stale queued notice")
+    f.touch(75,3);Test.equal(f.updater.checks,2)
+    f.ui.notice="Local default saved. Effective policy is set on the master / colony route."
+    f.updater.checkQueued=false;f.ui.draw()
+    assert(f.ui.notice:find("Local default saved",1,true),"check completion erased a settings result")
+    assert(not f.ui.updateCheckPending,"completed duplicate-time check stayed pending")
+end)
+
+Test.case("UI displays failed update results and tolerates missing updater helper methods",function()
+    local f=fixture("master",false)
+    f.ui.view="settings";f.ui.draw();f.touch(48,3)
+    f.updater.checkQueued=false;f.updater.checkError="Download unavailable";f.updater.lastCheckedText="16:20:30"
+    f.ui.draw()
+    assert(f.terminal.lines[15]:find("Update: ERROR: Download unavailable",1,true))
+    assert(f.terminal.lines[15]:find("16:20:30",1,true))
+    assert(f.terminal.lines[16]:find("Source: UNAVAILABLE",1,true))
+    assert(f.ui.notice:find("Download unavailable",1,true) and not f.ui.notice:find("queued",1,true))
+    f.updater.check=function() f.updater.checks=f.updater.checks+1;return false,"Another action is queued; try again" end
+    f.touch(48,3)
+    assert(not f.ui.updateCheckPending,"rejected check was marked queued")
+    assert(f.ui.notice:find("Another action is queued",1,true))
+end)
+
+Test.case("UI update feedback fits native settings pages and stays absent from read-only dashboards",function()
+    local f=fixture("master",false)
+    f.updater.sourceLabel=function() return "github/gjheaton/Minecolonies-Command-Program@main" end
+    f.updater.remoteSuiteVersion="4.0.2";f.updater.lastCheckedText="12:34:56"
+    f.ui.view="settings"
+    local count=f.terminal.height-10
+    for page=1,math.ceil(#Config.fields("master")/count) do
+        f.ui.pages.settings=page;f.ui.draw()
+        assert(f.terminal.lines[15]:find("CURRENT",1,true) and f.terminal.lines[15]:find("12:34:56",1,true))
+        assert(f.terminal.lines[16]:find("Source:",1,true) and f.terminal.lines[16]:find("@main",1,true))
+        assert(f.terminal.lines[17]:find("COLONY ROUTES",1,true))
+        assert(f.terminal.lines[18]:find("PREV",1,true) and f.terminal.lines[18]:find("NEXT",1,true))
+    end
+    f.touch(2,17);Test.equal(f.ui.view,"routes","source row covered the route control")
+    local remote=fixture("supply",true,100,38,{readOnly=true,displayOnly=true})
+    remote.updater.availableVersion="4.0.2"
+    remote.updater.statusText=function() error("read-only updater status accessed") end
+    remote.updater.sourceLabel=function() error("read-only updater source accessed") end
+    remote.updater.buttonLabel=function() error("read-only updater control accessed") end
+    remote.state.settings=remote.config;remote.ui.view="settings";remote.ui.draw()
+    assert(not remote.monitor.dump():find("Source:",1,true) and not remote.monitor.dump():find("Update:",1,true))
+    remote.touch(95,3);Test.equal(remote.updater.checks,0);Test.equal(remote.updater.installs,0)
+    Test.equal(remote.store.failures,0,"read-only dashboard invoked updater helpers")
 end)
 
 Test.case("UI history shows newest records while terminal diagnostics show only current issues",function()

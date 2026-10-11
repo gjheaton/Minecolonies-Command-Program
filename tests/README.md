@@ -28,6 +28,8 @@ prevent changing hardware around retained turns, crafts, or deliveries.
 CLI checks use the canonical `--` options and verify that older bare options
 remain compatibility aliases. Version checks cover `MAJOR.MINOR.PATCH`
 comparison and patch releases detected by the update control.
+Update checks also cover active turns, check failures, and visible source/result
+feedback while retaining the safety guards for installing an update.
 Display checks exercise independent 5 by 3 monitor dashboards at scale 0.5,
 read-only colony settings, monitor reassignment and disconnects, and explicit
 partial/stale/offline telemetry. The real runtime event loop is simulated with

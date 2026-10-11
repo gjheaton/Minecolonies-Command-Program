@@ -1,6 +1,6 @@
 # MineColonies Control Suite
 
-The `supply-master-colony` branch provides Supply 4.0.1: one dedicated computer owns
+The `supply-master-colony` branch provides Supply 4.0.2: one dedicated computer owns
 Player Refined Storage (PRS), and colony supply computers communicate with it over
 rednet. Each colony has a delivery and a return Ender Chest channel. Command Center
 is also available through the same installer.
@@ -58,7 +58,7 @@ install_colony --update master
 ```
 
 Use `supply` or `command` instead of `master` on those computers. The stored update
-source remains this development branch until explicitly changed. For 4.0.1, pause
+source remains this development branch until explicitly changed. For 4.0.2, pause
 master automation, let current handshakes finish, then use **CHECK UPDATE → UPDATE**
 on the master and every colony supply computer. Settings and request/transfer
 journals are preserved. Resume automation after all computers have restarted with
@@ -67,6 +67,25 @@ the new release. Update both roles together when a release changes the protocol.
 After the first clean installation, use **Update** or **Repair** for future
 releases. Both preserve settings and request journals. Pause master automation
 and let current handshakes finish before updating.
+
+In 4.0.2, update checks can run while a supply turn is active. Installing an update
+still requires the current turn to finish safely. The local **SETTINGS** page
+shows **Update:** with the latest check result and time, plus **Source:**. The
+terminal also reports changes to update status. Remote dashboards stay read-only.
+
+If **CHECK UPDATE** on an older 4.0.0 installation does nothing, pause master
+automation and let current handshakes finish. Stop the application and startup
+launcher to reach the shell, then run this same command on the master and every
+colony supply computer:
+
+```lua
+install_colony --repair https://raw.githubusercontent.com/gjheaton/Minecolonies-Command-Program/supply-master-colony/install_colony.lua
+reboot
+```
+
+This preserves the installed role, settings, and journals, and sets the update
+source to the moving `supply-master-colony` branch so future releases can be found.
+Do not choose `CLEAN`. Resume automation after all computers have restarted.
 
 Use `install_colony --repair` for a forced reinstall of the installed role, including
 damaged files or a code fix that still has the same version number. Restart the
@@ -81,7 +100,7 @@ Versions use **MAJOR.MINOR.PATCH**:
 - **Minor**, the second number, changes for compatible new features.
 - **Patch**, the third number, changes for fixes and maintenance updates.
 
-This update is **4.0.1**. Future fixes increase the patch number so **CHECK UPDATE**
+This update is **4.0.2**. Future fixes increase the patch number so **CHECK UPDATE**
 can detect them. A minor release resets the patch number, such as `4.1.0`; a major
 release resets both later numbers, such as `5.0.0`.
 

@@ -17,8 +17,11 @@ _major, _minor, _patch = map(int, CURRENT_VERSION.split("."))
 NEXT_VERSION = f"{_major}.{_minor}.{_patch + 1}"
 LATER_VERSION = f"{_major}.{_minor}.{_patch + 2}"
 PREVIOUS_INSTALLER = (ROOT / "tests/fixtures/installer_4_0_metadata.lua").read_text()
+RELEASE_4_0_1_INSTALLER = (ROOT / "tests/fixtures/installer_4_0_1_metadata.lua").read_text()
+RELEASE_4_0_1_COMMIT = "4c4e408b3e77ce06c6bc5a073acc4c2e336d77fa"
 SOURCE = "https://raw.githubusercontent.com/gjheaton/Minecolonies-Command-Program/supply-master-colony/install_colony.lua"
 PINNED = "https://raw.githubusercontent.com/gjheaton/Minecolonies-Command-Program/" + "a" * 40 + "/install_colony.lua"
+RELEASE_4_0_1_SOURCE = SOURCE.replace("supply-master-colony", RELEASE_4_0_1_COMMIT)
 
 MOCK = r'''
 FILES, DIRS, OUTPUT, HTTP_LOG = {}, { ["/"] = true }, {}, {}
@@ -127,9 +130,10 @@ http = {
             if API_FAILURE then return nil, "API blocked" end
             return { readAll = function() return "commit response" end, close = function() end }
         end
-        local remote = url:match("^https://raw%.githubusercontent%.com/[^/]+/[^/]+/[^/]+/(.+)$")
+        local reference,remote = url:match("^https://raw%.githubusercontent%.com/[^/]+/[^/]+/([^/]+)/(.+)$")
         if FAIL_DOWNLOAD == remote then return nil, "injected download failure" end
-        local body = remote and REMOTE_FILES[remote]
+        local files=(REMOTE_REVISIONS and REMOTE_REVISIONS[reference]) or REMOTE_FILES
+        local body = remote and files[remote]
         if not body then return nil, "unknown remote " .. tostring(remote) end
         return { readAll = function() return body end, close = function() end }
     end,
@@ -231,6 +235,42 @@ class InstallerTests(unittest.TestCase):
         ''')
         self.assertIsNone(self.g.FILES["/colony/network/telemetry.lua"])
         self.assertIsNone(self.g.FILES["/colony/network/displays.lua"])
+
+    def seed_release_4_0_1(self, role="master"):
+        """Seed the authentic deployed 4.0.1 package metadata and schema-4 data."""
+        loader = self.lua.eval('function(body) local c,e=load(body,"4.0.1 installer","t",{}); assert(c,e); return c("--metadata") end')
+        previous = loader(RELEASE_4_0_1_INSTALLER)
+        self.assertEqual(previous.suiteVersion, "4.0.1")
+        self.g.RELEASE_INFO = previous
+        self.g.RELEASE_INSTALLER = RELEASE_4_0_1_INSTALLER
+        self.g.RELEASE_SOURCE = RELEASE_4_0_1_SOURCE
+        self.g.SEED_ROLE = role
+        self.lua.execute('''
+            for _,entry in ipairs(RELEASE_INFO.files) do
+                if entry.app=="common" or entry.app==SEED_ROLE or entry.app=="network" then
+                    put(entry.path,"-- MineColonies Control Suite 4.0.1 managed file\\nreturn {}\\n")
+                end
+            end
+            put("/install_colony.lua",RELEASE_INSTALLER)
+            local app=RELEASE_INFO.apps[SEED_ROLE]
+            put("/colony/app.cfg",textutils.serialize({schema=4,installationSchema=4,role=SEED_ROLE,
+                app=SEED_ROLE,program=app.program,displayName=app.displayName,appVersion=app.version,
+                suiteVersion=RELEASE_INFO.suiteVersion,suiteSourceUrl=SOURCE_URL,
+                installedSourceUrl=RELEASE_SOURCE,customExtension="keep this"}))
+            put("/colony/network.cfg",textutils.serialize({schema=4,role=SEED_ROLE,
+                automationEnabled=false,masterId=1,monitorName="monitor_stardust",monitorTextScale=.5,
+                deliveryChestName="delivery_4",returnChestName="returns_4",colonyBridgeName="crs_4",
+                colonyIntegratorName="integrator_4",deliveryChannel="red-pink-white",
+                returnChannel="red-pink-black",autoCraftEnabled=false,
+                colonies={{id=4,label="Stardust",deliveryChest="delivery_4",returnChest="returns_4",
+                    deliveryChannel="red-pink-white",returnChannel="red-pink-black",
+                    overrides={onHandTimeoutSeconds=180}}}}))
+            for index,suffix in ipairs({".a",".b"}) do
+                put("/colony/"..SEED_ROLE.."_v4_state"..suffix,
+                    textutils.serialize({schema=4,revision=7+index,history={},errors={}}))
+            end
+            put("/my_other_program.lua","unrelated")
+        ''')
 
     def seed_held_transfers(self, role):
         """Add transfer safety state whose bytes must survive a package update."""
@@ -508,6 +548,27 @@ class InstallerTests(unittest.TestCase):
                 self.assertIsNotNone(self.g.FILES["/colony/network/devices.lua"])
                 self.assertEqual(self.g.FILES["/my_other_program.lua"], "unrelated")
 
+    def test_4_0_1_patch_update_preserves_held_journals_and_moving_source(self):
+        for role in ("master", "supply"):
+            with self.subTest(role=role):
+                self.setUp()
+                self.seed_release_4_0_1(role)
+                self.seed_held_transfers(role)
+                before = self.snapshot()
+                self.g.CONFIRM = "do not clean"
+                self.assertTrue(self.g.runInstaller("--update", role))
+                for path in ("/colony/network.cfg", f"/colony/{role}_v4_state.a", f"/colony/{role}_v4_state.b"):
+                    self.assertEqual(self.g.FILES[path], before[path], path)
+                cfg = self.g.textutils.unserialize(self.g.FILES["/colony/app.cfg"])
+                self.assertEqual(cfg.appVersion, CURRENT_VERSION)
+                self.assertEqual(cfg.suiteVersion, CURRENT_VERSION)
+                self.assertEqual(cfg.suiteSourceUrl, SOURCE)
+                self.assertEqual(cfg.installedSourceUrl, PINNED)
+                self.assertNotEqual(cfg.installedSourceUrl, RELEASE_4_0_1_SOURCE)
+                self.assertEqual(cfg.customExtension, "keep this")
+                self.assertEqual(cfg.role, role)
+                self.assertEqual(cfg.installationSchema, 4)
+
     def test_failed_prior_v4_update_restores_old_package_and_journal(self):
         self.seed_previous_v4()
         before = self.snapshot()
@@ -538,6 +599,9 @@ class InstallerTests(unittest.TestCase):
             self.install()
         self.assertEqual(self.snapshot(), before)
         self.assertTrue(self.install(source=PINNED))
+        cfg = self.g.textutils.unserialize(self.g.FILES["/colony/app.cfg"])
+        self.assertEqual(cfg.suiteSourceUrl, PINNED)
+        self.assertEqual(cfg.installedSourceUrl, PINNED)
 
     def test_low_disk_space_and_unrelated_startup_are_preserved(self):
         self.g.seedLegacy()

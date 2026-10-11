@@ -15,6 +15,7 @@ class UpdaterTests(unittest.TestCase):
     install = installer_fixture.InstallerTests.install
     seed_v4 = installer_fixture.InstallerTests.seed_v4
     seed_previous_v4 = installer_fixture.InstallerTests.seed_previous_v4
+    seed_release_4_0_1 = installer_fixture.InstallerTests.seed_release_4_0_1
     seed_held_transfers = installer_fixture.InstallerTests.seed_held_transfers
 
     def setUp(self):
@@ -220,10 +221,70 @@ class UpdaterTests(unittest.TestCase):
                 self.assertEqual(cfg.installationSchema, 4)
                 self.assertEqual(cfg.customExtension, "keep this")
                 self.assertEqual(cfg.role, role)
+                self.assertEqual(cfg.suiteSourceUrl, SOURCE)
+                self.assertEqual(cfg.installedSourceUrl, PINNED)
                 self.assertEqual(self.g.FILES["/install_colony.lua"], INSTALLER)
                 self.assertTrue(self.g.REBOOTED)
                 self.assertFalse(self.g.fs.exists("/install_colony.lua.update_tmp"))
                 self.assertFalse(self.g.fs.exists("/.colony_install_transaction"))
+
+    def test_authentic_4_0_1_update_button_installs_current_patch_and_preserves_held_transfers(self):
+        for role in ("master", "supply"):
+            with self.subTest(role=role):
+                self.setUp()
+                self.seed_release_4_0_1(role)
+                self.seed_held_transfers(role)
+                before = self.snapshot()
+                self.g.CONFIRM = "do not clean"
+                updater = self.g.makeUpdater("4.0.1", role)
+                newer, version = updater.check()
+                self.assertTrue(newer)
+                self.assertEqual(version, CURRENT_VERSION)
+                self.assertEqual(updater.buttonLabel(), f"UPDATE v{CURRENT_VERSION}")
+                self.assertEqual(updater.sourceLabel(), "github/gjheaton/Minecolonies-Command-Program@supply-master-colony")
+                self.assertTrue(updater.install())
+                for path in ("/colony/network.cfg", f"/colony/{role}_v4_state.a", f"/colony/{role}_v4_state.b"):
+                    self.assertEqual(self.g.FILES[path], before[path], path)
+                cfg = self.g.textutils.unserialize(self.g.FILES["/colony/app.cfg"])
+                self.assertEqual(cfg.appVersion, CURRENT_VERSION)
+                self.assertEqual(cfg.suiteVersion, CURRENT_VERSION)
+                self.assertEqual(cfg.role, role)
+                self.assertEqual(cfg.suiteSourceUrl, SOURCE)
+                self.assertEqual(cfg.installedSourceUrl, PINNED)
+                self.assertEqual(cfg.customExtension, "keep this")
+                self.assertEqual(self.g.FILES["/install_colony.lua"], INSTALLER)
+                self.assertTrue(self.g.REBOOTED)
+                self.assertFalse(self.g.fs.exists("/.colony_install_transaction"))
+
+    def test_explicitly_pinned_old_release_stays_pinned_and_never_falls_back_to_moving_branch(self):
+        for role in ("master", "supply"):
+            with self.subTest(role=role):
+                self.setUp()
+                self.seed_release_4_0_1(role)
+                self.seed_held_transfers(role)
+                self.g.PINNED_SOURCE = installer_fixture.RELEASE_4_0_1_SOURCE
+                self.g.OLD_REFERENCE = installer_fixture.RELEASE_4_0_1_COMMIT
+                self.g.OLD_INSTALLER = installer_fixture.RELEASE_4_0_1_INSTALLER
+                self.lua.execute('''
+                    local cfg=textutils.unserialize(FILES["/colony/app.cfg"])
+                    cfg.suiteSourceUrl=PINNED_SOURCE
+                    put("/colony/app.cfg",textutils.serialize(cfg))
+                    REMOTE_REVISIONS={[OLD_REFERENCE]={["install_colony.lua"]=OLD_INSTALLER}}
+                    HTTP_LOG={}
+                ''')
+                before = self.snapshot()
+                updater = self.g.makeUpdater("4.0.1", role)
+                newer, version = updater.check()
+                self.assertFalse(newer)
+                self.assertEqual(version, "4.0.1")
+                self.assertIsNone(updater.buttonLabel())
+                self.assertIn(installer_fixture.RELEASE_4_0_1_COMMIT, updater.sourceLabel())
+                self.assertFalse(updater.install())
+                self.assertEqual(self.snapshot(), before)
+                self.assertIsNone(self.g.SHELL_PATH)
+                self.assertFalse(bool(self.g.REBOOTED))
+                for url in self.g.HTTP_LOG.values():
+                    self.assertEqual(url, installer_fixture.RELEASE_4_0_1_SOURCE)
 
     def test_current_patch_reports_current_without_writing_or_rebooting(self):
         for role in ("master", "supply"):

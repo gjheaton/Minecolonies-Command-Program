@@ -370,12 +370,68 @@ function M.new(config, store, engine, io, updater, options)
         end)
     end
 
+    local function updateInfo()
+        if options.readOnly or not updater then return nil end
+        local checking=self.checkingUpdate or updater.checking
+        local status
+        if updater.installing then status="INSTALLING..."
+        elseif checking then status="CHECKING..."
+        elseif updater.checkQueued or self.updateCheckPending then status="CHECK QUEUED"
+        elseif type(updater.statusText)=="function" then
+            local ok,value=pcall(updater.statusText,checking)
+            if ok and type(value)=="string" and value~="" then status=value end
+        end
+        if not status then
+            if checking then status="CHECKING..."
+            elseif updater.checkError then status="ERROR: "..tostring(updater.checkError)
+            elseif updater.availableVersion then status="UPDATE AVAILABLE: v"..tostring(updater.availableVersion)
+            elseif updater.remoteSuiteVersion then status="CURRENT (suite v"..tostring(updater.remoteSuiteVersion)..")"
+            elseif updater.remoteVersion then status="CURRENT (app v"..tostring(updater.remoteVersion)..")"
+            else status="NOT CHECKED" end
+        end
+        local source="UNAVAILABLE"
+        if type(updater.sourceLabel)=="function" then
+            local ok,value=pcall(updater.sourceLabel)
+            if ok and type(value)=="string" and value~="" then source=value end
+        elseif type(updater.sourceLabel)=="string" then source=updater.sourceLabel end
+        local checked=updater.lastCheckedText or updater.lastChecked
+        if type(checked)=="number" then checked=timeOf(checked) end
+        return {status=status,source=source,checked=checked and tostring(checked) or nil,
+            color=updater.checkError and C.warn or (checking or updater.checkQueued or self.updateCheckPending) and C.accent
+                or updater.availableVersion and C.title or (updater.remoteSuiteVersion or updater.remoteVersion) and C.good or C.dim}
+    end
+
+    local function finishUpdateNotice()
+        local pending=self.updateCheckPending
+        if not pending or not updater then return end
+        if updater.checkQueued or updater.checking then pending.sawWorking=true;return end
+        if self.checkingUpdate then return end
+        local changed=updater.lastCheckedText~=pending.checked or updater.remoteSuiteVersion~=pending.suite
+            or updater.remoteVersion~=pending.version or updater.checkError~=pending.error
+        if pending.sawWorking or changed then
+            self.updateCheckPending=nil
+            if self.notice==pending.notice then
+                local info=updateInfo()
+                self.notice="Update: "..(info and info.status or "Check finished; see SETTINGS.")
+            end
+        end
+    end
+
+    local function compactSource(source,width)
+        if #source<=width then return source end
+        local prefix,branch=source:match("^(.-)@(.+)$")
+        if branch and #branch<width-4 then return Util.clip(prefix,width-#branch-1).."@"..branch end
+        return Util.clip(source,width)
+    end
+
     local function update()
         if options.readOnly then return end
-        if not updater or self.checkingUpdate or updater.checking or updater.installing then return end
-        if isBusy() then self.notice="Update waits until the active turn is safely closed."; draw(); return end
-        local method = updater.availableVersion and updater.install or updater.check
+        if not updater or self.checkingUpdate or updater.checkQueued or updater.checking or updater.installing or self.updateCheckPending then return end
+        local installing=updater.availableVersion~=nil
+        if installing and isBusy() then self.notice="Update installation waits until the active turn is safely closed."; draw(); return end
+        local method = installing and updater.install or updater.check
         if type(method) ~= "function" then return end
+        local pending={checked=updater.lastCheckedText,suite=updater.remoteSuiteVersion,version=updater.remoteVersion,error=updater.checkError}
         self.checkingUpdate = true
         draw()
         local ok, result, reason = pcall(method)
@@ -383,6 +439,10 @@ function M.new(config, store, engine, io, updater, options)
         if not ok or result == false then
             self.notice = "Update: " .. tostring(reason or result)
             logError("UPDATE", self.notice)
+        elseif not installing then
+            pending.notice="Update check queued; result appears in SETTINGS."
+            pending.sawWorking=updater.checkQueued==true or updater.checking==true
+            self.updateCheckPending=pending;self.notice=pending.notice
         end
         draw()
     end
@@ -391,8 +451,10 @@ function M.new(config, store, engine, io, updater, options)
         screen.clear()
         screen.resetButtons()
         local label = "CHECK UPDATE"
-        if updater and updater.installing then label="UPDATING..."
+        if options.readOnly then label="READ ONLY"
+        elseif updater and updater.installing then label="UPDATING..."
         elseif self.checkingUpdate or (updater and updater.checking) then label="CHECKING..."
+        elseif updater and (updater.checkQueued or self.updateCheckPending) then label="CHECK QUEUED"
         elseif updater and updater.availableVersion then
             label = (type(updater.buttonLabel)=="function" and updater.buttonLabel()) or ("UPDATE v"..tostring(updater.availableVersion))
         elseif updater and updater.checkError then label="RETRY UPDATE"
@@ -650,9 +712,10 @@ function M.new(config, store, engine, io, updater, options)
     end
 
     local function drawSettings()
-        local _,h=screen.size()
+        local w,h=screen.size()
         local schemas=fields()
-        local rows,page,pages=pageRows(schemas,"settings",h-9)
+        local info=updateInfo()
+        local rows,page,pages=pageRows(schemas,"settings",h-(info and 10 or 9))
         frame("SETTINGS  "..page.."/"..pages,options.readOnly and "Reported colony configuration; edit on its computer or the master." or "Touch a setting. Devices use numbered lists of available peripherals.",C.dim)
         for i,field in ipairs(rows) do
             local value=config[field.key]
@@ -683,7 +746,12 @@ function M.new(config, store, engine, io, updater, options)
                 end
             end or nil)
         end
-        row(h-3,self.notice or (options.readOnly and "Read-only telemetry. Master policy overrides are marked MASTER." or "Changes are saved. Optional device lists include NONE / AUTO."),C.dim)
+        row(h-(info and 5 or 3),self.notice or (options.readOnly and "Read-only telemetry. Master policy overrides are marked MASTER." or "Changes are saved. Optional device lists include NONE / AUTO."),C.dim)
+        if info then
+            local checked=info.checked and (" @"..info.checked) or ""
+            row(h-4,"Update: "..Util.clip(info.status,math.max(1,w-10-#checked))..checked,info.color)
+            row(h-3,"Source: "..compactSource(info.source,math.max(1,w-10)),C.dim)
+        end
         if role()=="master" then row(h-2,"COLONY ROUTES / OVERRIDES  >",C.accent,function() self.view="routes"; draw() end) end
         footer("settings",page,pages)
     end
@@ -907,6 +975,7 @@ function M.new(config, store, engine, io, updater, options)
     end
 
     draw=function()
+        finishUpdateNotice()
         resolveMonitor()
         snap()
         if options.displayOnly and (not mon or monitorSizeError) then screen.resetButtons();return end
@@ -952,7 +1021,12 @@ function M.new(config, store, engine, io, updater, options)
         for _,check in ipairs(healthRows()) do
             if not check.ok then lines[#lines+1]={text=check.severity..": "..check.label.." - "..check.detail,color=check.severity=="WARNING" and C.warn or C.danger} end
         end
-        if updater and updater.checkError then lines[#lines+1]={text="WARNING: Update check failed - "..tostring(updater.checkError),color=C.warn} end
+        local info=updateInfo()
+        if info and (self.updateCheckPending or updater.checkQueued or updater.checking or updater.installing
+            or info.checked or updater.remoteSuiteVersion or updater.remoteVersion or updater.availableVersion or updater.checkError) then
+            lines[#lines+1]={text="Update: "..info.status..(info.checked and (" @"..info.checked) or ""),color=info.color}
+            lines[#lines+1]={text="Source: "..info.source,color=C.dim}
+        end
         if self.edit then
             lines[#lines+1]={text="EDIT: "..tostring(self.edit.field.label or self.edit.field.key),color=C.title}
             lines[#lines+1]={text=self.edit.value.."_",color=C.text}
