@@ -2,7 +2,7 @@
 -- A turn is a durable chest handoff, not a timed lease: an overdue client may
 -- finish its drain, but the master will not export until that exact batch arrives.
 local Config = require("colony.network.config")
-local M = { MODULE_VERSION = "4.0.34" }
+local M = { MODULE_VERSION = "4.0.35" }
 
 local function integer(value)
     return math.max(0, math.floor(tonumber(value) or 0))
