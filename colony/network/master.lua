@@ -478,29 +478,41 @@ function M.new(config, store, io, matcher)
         if mode=="fingerprint" then
             local fingerprint=pending.item and pending.item.fingerprint
                 or pending.variant and pending.variant.fingerprint
-            if type(fingerprint)~="string" or fingerprint=="" then
-                return false,"failed fingerprint selector is unavailable"
-            end
+            local failedNBT=matcher.canonicalNBT(
+                pending.variant and pending.variant.nbt
+                    or pending.item and pending.item.nbt
+            )
 
             local exactVisible=0
+            local identityVisible=0
             local sameNameVisible=0
             for _,entry in pairs(items) do
                 if type(entry)=="table"
                     and entry.name==wanted
                     and integer(entry.amount or entry.count)>0 then
-                    sameNameVisible=sameNameVisible+integer(entry.amount or entry.count)
-                    if entry.fingerprint==fingerprint then
-                        exactVisible=exactVisible+integer(entry.amount or entry.count)
+                    local amount=integer(entry.amount or entry.count)
+                    sameNameVisible=sameNameVisible+amount
+                    if type(fingerprint)=="string" and fingerprint~=""
+                        and entry.fingerprint==fingerprint then
+                        exactVisible=exactVisible+amount
+                    end
+                    if matcher.canonicalNBT(entry.nbt)==failedNBT then
+                        identityVisible=identityVisible+amount
                     end
                 end
             end
 
-            if exactVisible<=0 then
-                return false,"failed fingerprint variant is no longer visible in PRS"
+            -- The AP/RS ghost-item bug can mutate the fingerprint itself.
+            -- Registry ID + canonical NBT is the stable variant identity used
+            -- here only to decide whether a reset is warranted; no item is
+            -- moved until recovery rebinds to a currently observed fingerprint.
+            if exactVisible<=0 and identityVisible<=0 then
+                return false,"failed fingerprint/NBT variant is no longer visible in PRS"
             end
             return true,
-                "selective variant desync: exact fingerprint still visible x"..
-                tostring(exactVisible).." (same-name total "..tostring(sameNameVisible)..")"
+                "selective variant desync: failed variant still visible x"..
+                tostring(math.max(exactVisible,identityVisible))..
+                " (same-name total "..tostring(sameNameVisible)..")"
         end
 
         if mode~="registry-name"
@@ -1428,6 +1440,11 @@ function M.new(config, store, io, matcher)
                 local registrySafeVariant
                 local registrySafeMode
                 local fingerprintVariant
+                local nbtIdentityVariant
+                local failedNBT=matcher.canonicalNBT(
+                    pending.variant and pending.variant.nbt
+                        or pending.item and pending.item.nbt
+                )
 
                 for _, entry in pairs(items) do
                     if entry.name==pending.item.name and integer(entry.amount)>0 then
@@ -1451,6 +1468,13 @@ function M.new(config, store, io, matcher)
                             fingerprintVariant=copy(entry)
                         end
 
+                        if not nbtIdentityVariant
+                            and matcher.canonicalNBT(entry.nbt)==failedNBT
+                            and type(entry.fingerprint)=="string"
+                            and entry.fingerprint~="" then
+                            nbtIdentityVariant=copy(entry)
+                        end
+
                         if registryRelaxed and not variant then
                             variant = copy(entry)
                         end
@@ -1464,6 +1488,20 @@ function M.new(config, store, io, matcher)
                     variant=registrySafeVariant
                 elseif fingerprintVariant then
                     variant=fingerprintVariant
+                elseif tostring(pending.selectionMode or "")=="fingerprint"
+                    and nbtIdentityVariant then
+                    -- Rebind a selective ghost variant to its CURRENT AP
+                    -- fingerprint after reset. Registry ID + canonical NBT
+                    -- keeps a no-NBT pot distinct from NBT-bearing pots.
+                    variant=nbtIdentityVariant
+                    pending.item.fingerprint=variant.fingerprint
+                    pending.variant=copy(variant)
+                    store.event("PRS_VARIANT_REBOUND",
+                        "Selective desync recovery rebound to current fingerprint",{
+                            colonyId=pending.colonyId,
+                            item=pending.item.name,
+                            nbt=failedNBT
+                        })
                 end
 
                 if not candidate then
