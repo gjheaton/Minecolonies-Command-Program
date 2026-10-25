@@ -11,7 +11,7 @@ local mode, arg2, arg3 = ...
 local SUITE_INFO = {
     suiteVersion = "4.0.21", installerVersion = "4.0.21", installationSchema = 4,
     apps = {
-        master = { version = "4.0.21", program = "/colony_master.lua", displayName = "MineColonies Supply Master" },
+        master = { version = "4.0.22", program = "/colony_master.lua", displayName = "MineColonies Supply Master" },
         supply = { version = "4.0.21", program = "/colony_supply.lua", displayName = "MineColonies Colony Supply" },
         command = { version = "4.0.1", program = "/colony_command.lua", displayName = "MineColonies Command Center" },
     },
