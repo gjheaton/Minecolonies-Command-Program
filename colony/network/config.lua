@@ -1,5 +1,5 @@
 -- Persisted settings for the dedicated PRS master and colony clients.
-local M = { VERSION = "4.0.28", PATH = "/colony/network.cfg",
+local M = { VERSION = "4.0.29", PATH = "/colony/network.cfg",
     DISPLAY = {blocksWide=5,blocksHigh=3,textScale=.5,columns=100,rows=38} }
 local fields = {
     {key="automationEnabled",label="Run supply automation",type="boolean",default=true,roles={master=true}},
