@@ -1329,27 +1329,64 @@ function M.new(config, store, io, matcher)
                 local registryRelaxed =
                     type(matcher.isRegistryNBTRelaxed)=="function"
                     and matcher.isRegistryNBTRelaxed(pending.item.name)
+                local registrySafeVariant
+                local registrySafeMode
+
                 for _, entry in pairs(items) do
-                    if matcher.itemIdentity(entry) == matcher.itemIdentity(pending.item)
-                        and integer(entry.amount) > 0 then
-                        matchingIdentity = true
+                    if entry.name==pending.item.name and integer(entry.amount)>0 then
+                        if matcher.itemIdentity(entry) == matcher.itemIdentity(pending.item) then
+                            matchingIdentity = true
+                        end
+
                         if entry.fingerprint == pending.item.fingerprint then
                             variant = copy(entry)
                             break
-                        elseif registryRelaxed and not variant then
-                            -- The Ancient Tome export is intentionally bound to
-                            -- the exact MineColonies registry ID, not the AP
-                            -- fingerprint that can change when AP creates/touches
-                            -- its transient tag during the failed export.
+                        end
+
+                        -- v4.0.20+ can export ordinary plain items by exact
+                        -- namespaced registry ID. A retained transfer created by
+                        -- an older fingerprint build may therefore be recovered
+                        -- even when AP no longer reports the original
+                        -- fingerprint, provided the CURRENT complete stock
+                        -- snapshot proves registry-name export is safe.
+                        if not registrySafeVariant and type(io.exportSelection)=="function" then
+                            local _,mode=io.exportSelection(candidate,entry,items)
+                            if mode=="registry-name" or mode=="transient-name" then
+                                registrySafeVariant=copy(entry)
+                                registrySafeMode=mode
+                            end
+                        end
+
+                        if registryRelaxed and not variant then
                             variant = copy(entry)
                         end
                     end
                 end
-                if not candidate or not matchingIdentity then
+
+                if not candidate then
+                    cs.turn=nil; save()
+                    return false, "Original request candidate unavailable for recovery"
+                end
+
+                if not variant and registrySafeVariant then
+                    variant=registrySafeVariant
+                    pending.item.fingerprint=variant.fingerprint
+                    pending.selectionMode=registrySafeMode
+                    matchingIdentity=true
+                    store.event("PRS_RECOVERY_REBOUND",
+                        "Retained export rebound to safe registry-ID selector",{
+                            colonyId=pending.colonyId,
+                            item=pending.item.name,
+                            selectionMode=registrySafeMode
+                        })
+                end
+
+                if not matchingIdentity and not registryRelaxed then
                     cs.turn=nil; save()
                     return false, "Original exact item unavailable for recovery"
                 end
                 if not variant or (not registryRelaxed
+                    and not registrySafeVariant
                     and not validFingerprint(pending.item.fingerprint)) then
                     cs.turn=nil; save()
                     return false, "Original exact AP fingerprint unavailable for recovery; transfer remains held"
