@@ -34,9 +34,88 @@ end
 function M.new(config,store,matcher)
     local self={}
     local stackLimits={}
+
+    local function isResetIntegrator(name)
+        return peripheral.hasType(name,"redstoneIntegrator")
+            or peripheral.hasType(name,"redstone_integrator")
+    end
+
+    local function resetIntegrator()
+        local configured=tostring(config.prsResetIntegratorName or "")
+        if configured~="" then
+            if not peripheral.isPresent(configured) then
+                return nil,nil,"Peripheral missing: "..configured
+            end
+            if not isResetIntegrator(configured) then
+                return nil,nil,configured.." is not an Advanced Peripherals Redstone Integrator"
+            end
+            return peripheral.wrap(configured),configured
+        end
+
+        local found={}
+        for _,name in ipairs(peripheral.getNames()) do
+            if isResetIntegrator(name) then found[#found+1]=name end
+        end
+        table.sort(found)
+        if #found~=1 then
+            return nil,nil,"Configure one PRS Reset Integrator; found "..#found
+        end
+        return peripheral.wrap(found[1]),found[1]
+    end
     function self.now() return os.epoch and os.epoch("utc")/1000 or os.clock() end
     function self.wait(seconds) sleep(seconds) end
     self.send=Protocol.send
+
+    function self.resetIntegratorStatus()
+        local integrator,name,err=resetIntegrator()
+        if not integrator then return {ok=false,name=name,error=err} end
+        local method =
+            type(integrator.setAnalogOutput)=="function" and "setAnalogOutput"
+            or type(integrator.setAnalogueOutput)=="function" and "setAnalogueOutput"
+            or type(integrator.setOutput)=="function" and "setOutput"
+            or nil
+        if not method then
+            return {ok=false,name=name,error="Redstone Integrator has no supported output method"}
+        end
+        return {ok=true,name=name,method=method}
+    end
+
+    function self.pulsePRSReset(reason)
+        if config.role~="master" then return nil,"Only the PRS master may reset PRS" end
+        if config.prsAutoResetEnabled~=true then return nil,"Automatic PRS reset disabled" end
+
+        local status=self.resetIntegratorStatus()
+        if not status.ok then return nil,status.error end
+        local integrator=peripheral.wrap(status.name)
+        if not integrator then return nil,"PRS Reset Integrator disappeared: "..tostring(status.name) end
+
+        local side="bottom"
+        local pulse=tonumber(config.prsResetPulseSeconds) or 2
+        local function level(value)
+            if status.method=="setAnalogOutput" or status.method=="setAnalogueOutput" then
+                local ok,err=call(integrator,status.method,side,value)
+                if ok==nil then return nil,err end
+                return true
+            end
+            local ok,err=call(integrator,status.method,side,value>0)
+            if ok==nil then return nil,err end
+            return true
+        end
+
+        local ok,err=level(0)
+        if not ok then return nil,"Cannot clear PRS reset output: "..tostring(err) end
+        ok,err=level(15)
+        if not ok then pcall(level,0); return nil,"Cannot assert PRS reset output: "..tostring(err) end
+        local slept,sleepErr=pcall(sleep,pulse)
+        local cleared,clearErr=level(0)
+        if not slept then return nil,"PRS reset pulse interrupted: "..tostring(sleepErr) end
+        if not cleared then return nil,"Cannot clear PRS reset output after pulse: "..tostring(clearErr) end
+
+        store.event("PRS_RESET","Automatic RS15 reset pulse sent",{
+            integrator=status.name,side=side,strength=15,seconds=pulse,reason=tostring(reason or "confirmed PRS desync")
+        })
+        return true,"RS15 bottom pulse for "..tostring(pulse).."s via "..tostring(status.name)
+    end
     function self.monitor(nameOverride)
         local mon,name=resolve(nameOverride or config.monitorName,"monitor")
         if not mon then return nil,nil end
@@ -507,6 +586,13 @@ function M.new(config,store,matcher)
             for _,route in ipairs(config.colonies) do for _,key in ipairs({"deliveryChest","returnChest"}) do
                 local chest,chestErr=self.describe(route[key]); out.checks[tostring(route.id).." "..key]={ok=chest~=nil,detail=chest and chest.name or chestErr}
             end end
+            local reset=self.resetIntegratorStatus()
+            out.checks.prsReset={
+                ok=reset.ok==true,
+                detail=reset.ok
+                    and (tostring(reset.name).." | bottom RS15 x "..tostring(config.prsResetPulseSeconds or 2).."s")
+                    or tostring(reset.error or "PRS reset integrator unavailable")
+            }
         end
         return out
     end
