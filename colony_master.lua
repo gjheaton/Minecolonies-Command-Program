@@ -1,3 +1,3 @@
--- MineColonies dedicated Player Refined Storage master v4.0.33
+-- MineColonies dedicated Player Refined Storage master v4.0.34
 -- Only this supply computer may connect to the player RS Bridge.
-dofile("/colony/network/runtime.lua").run("master",...)
+require("colony.network.runtime").run("master",...)
