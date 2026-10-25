@@ -1177,6 +1177,15 @@ function M.new(config, store, io, matcher)
                 else
                     cs.routeError = nil
                 end
+                if confirmed and type(message.imports)=="table" then
+                    local imported,importError=acknowledgeImports(cs,message.imports)
+                    if not imported then
+                        cs.error="Heartbeat import receipt rejected: "..tostring(importError)
+                        cs.errorSource="master"
+                        errorEvent("IMPORT_ACK",cs.error,{colonyId=colony.id})
+                    end
+                end
+
                 if confirmed and (message.clientError == nil or type(message.clientError) == "string") then
                     -- Connection messages report the current colony fault even
                     -- while paused. Never release a master-detected hold here.
