@@ -1,10 +1,11 @@
 -- Persisted settings for the dedicated PRS master and colony clients.
-local M = { VERSION = "4.0.19", PATH = "/colony/network.cfg",
+local M = { VERSION = "4.0.20", PATH = "/colony/network.cfg",
     DISPLAY = {blocksWide=5,blocksHigh=3,textScale=.5,columns=100,rows=38} }
 local fields = {
     {key="automationEnabled",label="Run supply automation",type="boolean",default=true,roles={master=true}},
     {key="masterId",label="Master computer ID",type="number",default=-1,min=-1,max=2147483647,integer=true,roles={supply=true}},
     {key="playerBridgeName",label="PRS Bridge",type="string",default="",roles={master=true}},
+    {key="prsResetIntegratorName",label="PRS Reset Integrator",type="string",default="",roles={master=true}},
     {key="colonyBridgeName",label="Colony RS Bridge",type="string",default="",roles={supply=true}},
     {key="colonyIntegratorName",label="Colony Integrator",type="string",default="",roles={supply=true}},
     {key="monitorName",label="Monitor",type="string",default=""},
@@ -39,6 +40,10 @@ local fields = {
     {key="craftStableReadsRequired",label="Stable craft output observations",type="number",default=2,min=2,max=20,integer=true},
     {key="retryCooldownSeconds",label="Failure retry cooldown (s)",type="number",default=30,min=1,max=86400},
     {key="desyncProbeSeconds",label="Recovery probe interval (s)",type="number",default=30,min=1,max=86400},
+    {key="prsAutoResetEnabled",label="Auto reset PRS on confirmed desync",type="boolean",default=true,roles={master=true}},
+    {key="prsResetPulseSeconds",label="PRS reset pulse (s)",type="number",default=2,min=.1,max=30,roles={master=true}},
+    {key="prsResetCooldownSeconds",label="PRS reset cooldown (s)",type="number",default=120,min=10,max=3600,roles={master=true}},
+    {key="prsResetRecoveryDelaySeconds",label="PRS reset settle delay (s)",type="number",default=10,min=1,max=300,roles={master=true}},
     {key="updateCheckSeconds",label="Update check interval (s)",type="number",default=1800,min=60,max=604800},
     {key="maxRequestsPerTurn",label="Requests per turn",type="number",default=8,min=1,max=64,integer=true},
     {key="maxItemsPerTurn",label="Items per master turn",type="number",default=256,min=1,max=65536,integer=true},
