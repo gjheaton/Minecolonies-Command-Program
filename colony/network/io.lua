@@ -92,13 +92,17 @@ function M.new(config,store,matcher)
         local side="bottom"
         local pulse=tonumber(config.prsResetPulseSeconds) or 2
         local function level(value)
-            if status.method=="setAnalogOutput" or status.method=="setAnalogueOutput" then
-                local ok,err=call(integrator,status.method,side,value)
-                if ok==nil then return nil,err end
-                return true
+            local fn=integrator[status.method]
+            if type(fn)~="function" then
+                return nil,"Redstone Integrator output method disappeared"
             end
-            local ok,err=call(integrator,status.method,side,value>0)
-            if ok==nil then return nil,err end
+            local ok,err
+            if status.method=="setAnalogOutput" or status.method=="setAnalogueOutput" then
+                ok,err=pcall(fn,side,value)
+            else
+                ok,err=pcall(fn,side,value>0)
+            end
+            if not ok then return nil,tostring(err) end
             return true
         end
 
