@@ -9,7 +9,7 @@ return {
         version = "1.0.0", updater = "1.2.0", network = "4.0.21",
     },
     apps = {
-        master = { version = "4.0.21", program = "/colony_master.lua" },
+        master = { version = "4.0.22", program = "/colony_master.lua" },
         supply = { version = "4.0.21", program = "/colony_supply.lua" },
         command = { version = "4.0.1", program = "/colony_command.lua" },
     },
