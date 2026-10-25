@@ -949,11 +949,13 @@ function M.new(config, store, io, matcher)
         if tonumber(sender) ~= tonumber(config.masterId) or type(message) ~= "table" or message.version ~= 1 then return false end
         if message.kind == "hello_ack" then
             if type(message.routeConfirmed) ~= "boolean" or type(message.automationEnabled) ~= "boolean"
+                or (message.deliveryDrainLocked ~= nil and type(message.deliveryDrainLocked) ~= "boolean")
                 or message.error ~= nil and (type(message.error) ~= "string" or #message.error > 512) then return false end
             lastContact = io.now()
             masterConnection = {
                 routeConfirmed = message.routeConfirmed,
                 automationEnabled = message.automationEnabled,
+                deliveryDrainLocked = message.deliveryDrainLocked == true,
                 error = message.error,
                 receivedAt = lastContact,
             }
@@ -1072,7 +1074,8 @@ function M.new(config, store, io, matcher)
         -- the master is quarantined on an unrelated PRS export. Never do this
         -- during a live turn or while any client fault/intent is held.
         if data.turn and data.turn.phase=="finished"
-            and not clientError() and not data.intent then
+            and not clientError() and not data.intent
+            and not (masterConnection and masterConnection.deliveryDrainLocked==true) then
             drainDeliveries()
         end
 
@@ -1082,7 +1085,8 @@ function M.new(config, store, io, matcher)
                 deliveryChannel = config.deliveryChannel, returnChannel = config.returnChannel,
                 clientError = clientError(), session = data.turn and data.turn.session,
                 turn = data.turn and data.turn.turn,
-                imports = imports() })
+                imports = imports(),
+                deliveryDrainLocked = masterConnection and masterConnection.deliveryDrainLocked == true })
             nextHello = now + math.max(0.1, tonumber(setting("helloSeconds", 5)) or 5)
         end
         local turn = data.turn
@@ -1238,6 +1242,8 @@ function M.new(config, store, io, matcher)
             if not connected then detail = "Waiting for master connection"
             elseif routeConfirmed == false then detail = masterConnection.error or "Master connected; colony route mismatch"
             elseif automationEnabled == false then detail = "Master connected; automation paused"
+            elseif masterConnection and masterConnection.deliveryDrainLocked==true then
+                detail = "Master connected; delivery drain locked for PRS transfer verification"
             else detail = "Master connected; waiting for turns" end
         end
         return {
