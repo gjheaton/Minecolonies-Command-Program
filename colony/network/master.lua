@@ -446,7 +446,7 @@ function M.new(config, store, io, matcher)
                 and integer(entry.amount or entry.count)>0
                 and type(io.exportSelection)=="function" then
                 local _,mode=io.exportSelection(pending.candidate,entry,items)
-                if mode=="registry-name" or mode=="transient-name" then
+                if mode=="registry-name" or mode=="transient-name" or mode=="single-variant-name" then
                     return true,mode
                 end
             end
@@ -465,6 +465,7 @@ function M.new(config, store, io, matcher)
         local mode=tostring(pending.selectionMode or "")
         if mode~="registry-name"
             and mode~="transient-name"
+            and mode~="single-variant-name"
             and mode~="plain-name" then
             return false,"selector is "..(mode~="" and mode or "unknown")..", not registry-safe"
         end
