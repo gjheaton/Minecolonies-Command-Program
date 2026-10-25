@@ -67,7 +67,7 @@ local fields = {
 local byKey = {}
 local directions={north=true,south=true,east=true,west=true,up=true,down=true,top=true,bottom=true,left=true,right=true,front=true,back=true}
 for _, field in ipairs(fields) do byKey[field.key] = field end
-local localOnly={automationEnabled=true,usePeripheralTransfer=true,monitorTextScale=true,telemetryIntervalSeconds=true,telemetryStaleSeconds=true,telemetryOfflineSeconds=true,telemetryMaxRequests=true,telemetryHistoryEntries=true,telemetryErrorEntries=true,maxHistoryEntries=true,maxErrorEntries=true,maxCompletedRequests=true,requestRetentionSeconds=true,updateCheckSeconds=true,chestTestTimeoutSeconds=true,masterId=true}
+local localOnly={automationEnabled=true,usePeripheralTransfer=true,monitorTextScale=true,telemetryIntervalSeconds=true,telemetryStaleSeconds=true,telemetryOfflineSeconds=true,telemetryMaxRequests=true,telemetryHistoryEntries=true,telemetryErrorEntries=true,maxHistoryEntries=true,maxErrorEntries=true,maxCompletedRequests=true,requestRetentionSeconds=true,updateCheckSeconds=true,chestTestTimeoutSeconds=true,masterId=true,prsAutoResetEnabled=true,prsResetPulseSeconds=true,prsResetCooldownSeconds=true,prsResetRecoveryDelaySeconds=true}
 function M.isPolicyKey(key)
     return byKey[key]~=nil and byKey[key].type~="string" and not localOnly[key]
 end
