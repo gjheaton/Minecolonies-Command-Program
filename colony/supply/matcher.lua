@@ -101,8 +101,21 @@ local TRANSIENT_TRANSPORT_NAMES = {
     ["minecraft:compass"] = true,
     ["minecolonies:ancienttome"] = true,
 }
+
+-- MineColonies Ancient Tomes are crafted without NBT, then MineColonies writes
+-- raid forecast data when the stack enters a player inventory. That metadata
+-- is transport-derived, not request identity. Keep this exception registry-ID
+-- exact so similarly named items from Quark or other mods can never match.
+local REGISTRY_NBT_RELAXED_NAMES = {
+    ["minecolonies:ancienttome"] = true,
+}
+
 local function isTransientTransportName(name)
     return TRANSIENT_TRANSPORT_NAMES[tostring(name or "")] == true
+end
+
+local function isRegistryNBTRelaxed(name)
+    return REGISTRY_NBT_RELAXED_NAMES[tostring(name or "")] == true
 end
 local function isTransientComputedVariant(item)
     if type(item) ~= "table" or type(item.nbt) ~= "table" then return false end
@@ -132,6 +145,7 @@ end
 
 local function hasMeaningfulNBT(item)
     if type(item) ~= "table" then return false end
+    if isRegistryNBTRelaxed(item.name) then return false end
     if isTransientComputedVariant(item) then return false end
     local nbt = item.nbt
     if nbt == nil then return false end
@@ -141,8 +155,16 @@ local function hasMeaningfulNBT(item)
     return s ~= "" and s ~= "{}" and s ~= "nil"
 end
 
-local function identityFrom(item)
+local function legacyIdentityFrom(item)
     return tostring(item.name or "") .. "|NBT|" .. canonicalNBT(item.nbt)
+end
+
+local function identityFrom(item)
+    local name = tostring(item.name or "")
+    if isRegistryNBTRelaxed(name) then
+        return name .. "|NBT|<transport-relaxed>"
+    end
+    return legacyIdentityFrom(item)
 end
 
 local function textHasToolToken(text, token)
@@ -235,6 +257,10 @@ function M.new(config, store)
         return isTransientTransportName(name)
     end
 
+    function self.isRegistryNBTRelaxed(name)
+        return isRegistryNBTRelaxed(name)
+    end
+
     function self.isTransientComputedVariant(item)
         return isTransientComputedVariant(item)
     end
@@ -252,16 +278,34 @@ function M.new(config, store)
     -- Read older physical evidence without rewriting its original key/tag.
     function self.itemIdentityKeyMatches(item, key)
         if type(item) ~= "table" or type(key) ~= "string" then return false end
-        return key == identityFrom(item)
-            or (item.nbt == EMPTY_CC_NBT
-                and key == tostring(item.name or "") .. "|NBT|" .. EMPTY_CC_NBT)
+        if key == identityFrom(item) then return true end
+
+        -- Preserve retained v4.0.18 Ancient Tome state across the normalized
+        -- transport-identity migration.
+        if isRegistryNBTRelaxed(item.name)
+            and key == legacyIdentityFrom(item) then
+            return true
+        end
+
+        return item.nbt == EMPTY_CC_NBT
+            and key == tostring(item.name or "") .. "|NBT|" .. EMPTY_CC_NBT
     end
 
     function self.itemIdentityKeys(item)
         if type(item) ~= "table" then return {} end
         local key = identityFrom(item)
-        if canonicalNBT(item.nbt) == "" then return {key, key .. EMPTY_CC_NBT} end
-        return {key}
+        local out = {key}
+
+        if isRegistryNBTRelaxed(item.name) then
+            local legacy = legacyIdentityFrom(item)
+            if legacy ~= key then out[#out + 1] = legacy end
+            return out
+        end
+
+        if canonicalNBT(item.nbt) == "" then
+            out[#out + 1] = key .. EMPTY_CC_NBT
+        end
+        return out
     end
 
     function self.exactlyMatches(requestItem, storedItem)
@@ -269,6 +313,10 @@ function M.new(config, store)
             return false
         end
         if requestItem.name ~= storedItem.name then return false end
+
+        if isRegistryNBTRelaxed(requestItem.name) then
+            return true
+        end
 
         local requestSpecific = hasMeaningfulNBT(requestItem)
         local storedSpecific = hasMeaningfulNBT(storedItem)
