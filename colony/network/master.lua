@@ -2070,7 +2070,7 @@ function M.zeroExportRecovery(config, store, io, matcher)
         local saved,saveError=pcall(function()
             data.history=data.history or {}
             data.history[#data.history+1]={
-                time=io.now(),kind="OPERATOR_ZERO_EXPORT",
+                time=tonumber(pending.startedAt) or 0,kind="OPERATOR_ZERO_EXPORT",
                 message="Operator confirmed held PRS export moved zero items; stale chest baseline discarded",
                 context={
                     colonyId=pending.colonyId,requestId=pending.requestId,
