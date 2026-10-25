@@ -259,7 +259,7 @@ function M.run(role,...)
     local originalSnapshot=engine.snapshot
     function engine.snapshot()
         local view=originalSnapshot()
-        view.programVersion=Config.VERSION
+        view.programVersion=config.programVersion or Config.VERSION
         local hardware=io.health()
         if telemetryFault then hardware.checks["Dashboard telemetry"]={ok=false,detail=telemetryFault} end
         if type(view.health)=="table" and view.health[1]~=nil then
