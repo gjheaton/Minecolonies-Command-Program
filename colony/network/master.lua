@@ -1688,6 +1688,10 @@ function M.new(config, store, io, matcher)
     for _, cs in pairs(state.colonies) do
         cs.routeConfirmed = false
         if cs.turn and cs.turn.phase == "PROCESS" then cs.turn.phase = "READY" end
+        -- RECOVERY is a Master-internal reservation only; the client never
+        -- receives it. If the Master restarts while a held transfer still
+        -- exists, retaining this marker can deadlock explicit reconciliation.
+        if cs.turn and cs.turn.phase == "RECOVERY" then cs.turn = nil end
     end
     if state.pendingTransfer and state.pendingTransfer.intent then
         state.pendingTransfer.reported = nil
@@ -1973,7 +1977,15 @@ function M.zeroExportRecovery(config, store, io, matcher)
         end
         local cs=state.colonies and state.colonies[tostring(pending.colonyId)]
         if type(cs)~="table" then return nil,"The held colony ledger is missing" end
-        if cs.turn then return nil,"Wait for the colony's outstanding turn to finish before clearing the stale export" end
+        if cs.turn then
+            local internalRecovery =
+                cs.turn.phase=="RECOVERY"
+                and tostring(cs.turn.session)==tostring(pending.session)
+                and tostring(cs.turn.id)==tostring(pending.turn)
+            if not internalRecovery then
+                return nil,"Wait for the colony's outstanding turn to finish before clearing the stale export"
+            end
+        end
         local record=cs.requests and cs.requests[pending.requestId]
         if type(record)~="table" or record.generation~=pending.generation
             or record.status=="delivered" then
@@ -2071,6 +2083,7 @@ function M.zeroExportRecovery(config, store, io, matcher)
             end
 
             local heldReason=state.quarantine and state.quarantine.message
+            if cs.turn and cs.turn.phase=="RECOVERY" then cs.turn=nil end
             for _,other in pairs(state.colonies or {}) do
                 for _,blocked in pairs(other.requests or {}) do
                     if blocked.errorCode=="PRS_QUARANTINE" then
