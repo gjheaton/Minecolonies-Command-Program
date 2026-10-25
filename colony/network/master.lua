@@ -424,6 +424,36 @@ function M.new(config, store, io, matcher)
         return count
     end
 
+    local function retainedRegistryRecoveryEligible(pending)
+        if type(pending)~="table"
+            or pending.kind~="export"
+            or pending.reported~=0
+            or pending.lastDelta~=0
+            or type(pending.item)~="table"
+            or type(pending.item.name)~="string"
+            or type(pending.candidate)~="table" then
+            return false,"not a retained plain export"
+        end
+
+        local items,err=io.stock()
+        if type(items)~="table" then
+            return false,"PRS inventory unreadable: "..tostring(err)
+        end
+
+        for _,entry in pairs(items) do
+            if type(entry)=="table"
+                and entry.name==pending.item.name
+                and integer(entry.amount or entry.count)>0
+                and type(io.exportSelection)=="function" then
+                local _,mode=io.exportSelection(pending.candidate,entry,items)
+                if mode=="registry-name" or mode=="transient-name" then
+                    return true,mode
+                end
+            end
+        end
+        return false,"current stock does not prove registry-ID export safe"
+    end
+
     local function registryZeroResetEligible(pending)
         if type(pending)~="table"
             or pending.kind~="export"
@@ -1167,6 +1197,36 @@ function M.new(config, store, io, matcher)
                 end
 
                 local pending=state.pendingTransfer
+
+                -- Legacy v4 fingerprint holds for ordinary items are safe to
+                -- migrate automatically. We only do this after the original
+                -- call returned zero, the chest stayed unchanged, the current
+                -- PRS snapshot still contains the item, and exportSelection()
+                -- proves the exact namespaced registry ID is safe.
+                if pending and pending.definiteZero and pending.reported==0
+                    and pending.lastDelta==0 and pending.resetPulseOK~=true
+                    and now>=(pending.nextRegistryRecoveryAt or 0) then
+                    local eligible,mode=retainedRegistryRecoveryEligible(pending)
+                    if eligible then
+                        pending.nextRegistryRecoveryAt=now+2
+                        save()
+                        local ok,msg=self.reconcile()
+                        if ok then
+                            store.event("PRS_AUTO_RECOVERY",
+                                "Automatic registry-ID recovery started for retained plain export",{
+                                    colonyId=pending.colonyId,
+                                    item=pending.item and pending.item.name,
+                                    selectionMode=mode,
+                                    detail=msg
+                                })
+                        end
+                    else
+                        pending.nextRegistryRecoveryAt=now+5
+                        save()
+                    end
+                end
+
+                pending=state.pendingTransfer
                 if pending and pending.resetPulseOK==true
                     and pending.autoRecoveryAt
                     and now>=pending.autoRecoveryAt
