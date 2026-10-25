@@ -3,6 +3,7 @@
 local M={}
 local globalFields={
     playerBridgeName={kind="rsBridge",allowNone=true,noneLabel="Automatic bridge discovery"},
+    prsResetIntegratorName={kind="redstoneIntegrator",allowNone=true,noneLabel="Automatic integrator discovery"},
     colonyBridgeName={kind="rsBridge",allowNone=true,noneLabel="Automatic bridge discovery"},
     colonyIntegratorName={kind="colonyIntegrator",allowNone=true,noneLabel="Automatic integrator discovery"},
     monitorName={kind="monitor",allowNone=true,noneLabel="Automatic / computer screen"},
@@ -37,6 +38,10 @@ local function reserved(config,key,options)
     return assigned
 end
 local function compatible(name,kind)
+    if kind=="redstoneIntegrator" then
+        return peripheral.hasType(name,"redstoneIntegrator")
+            or peripheral.hasType(name,"redstone_integrator")
+    end
     if kind=="inventory" then
         local device=peripheral.wrap(name)
         return device and type(device.list)=="function" and type(device.size)=="function"
