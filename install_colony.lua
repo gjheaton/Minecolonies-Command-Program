@@ -11,7 +11,7 @@ local mode, arg2, arg3 = ...
 local SUITE_INFO = {
     suiteVersion = "4.0.21", installerVersion = "4.0.21", installationSchema = 4,
     apps = {
-        master = { version = "4.0.34", program = "/colony_master.lua", displayName = "MineColonies Supply Master" },
+        master = { version = "4.0.35", program = "/colony_master.lua", displayName = "MineColonies Supply Master" },
         supply = { version = "4.0.29", program = "/colony_supply.lua", displayName = "MineColonies Colony Supply" },
         command = { version = "4.0.1", program = "/colony_command.lua", displayName = "MineColonies Command Center" },
     },
@@ -42,6 +42,7 @@ local SUITE_INFO = {
         { path = "/colony/supply/matcher.lua", app = "network", remote = "colony/supply/matcher.lua" },
         { path = "/colony_master.lua", app = "master", remote = "colony_master.lua" },
         { path = "/colony/network/master.lua", app = "master", remote = "colony/network/master.lua" },
+        { path = "/colony/recover_zero_export.lua", app = "master", remote = "colony/recover_zero_export.lua" },
         { path = "/colony_supply.lua", app = "supply", remote = "colony_supply.lua" },
         { path = "/colony/network/client.lua", app = "supply", remote = "colony/network/client.lua" },
         { path = "/colony_command.lua", app = "command", remote = "colony_command.lua" },
