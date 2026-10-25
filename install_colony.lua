@@ -11,13 +11,13 @@ local mode, arg2, arg3 = ...
 local SUITE_INFO = {
     suiteVersion = "4.0.21", installerVersion = "4.0.21", installationSchema = 4,
     apps = {
-        master = { version = "4.0.25", program = "/colony_master.lua", displayName = "MineColonies Supply Master" },
+        master = { version = "4.0.26", program = "/colony_master.lua", displayName = "MineColonies Supply Master" },
         supply = { version = "4.0.22", program = "/colony_supply.lua", displayName = "MineColonies Colony Supply" },
         command = { version = "4.0.1", program = "/colony_command.lua", displayName = "MineColonies Command Center" },
     },
     components = {
         startup = "1.1.0", installer = "4.0.21", util = "1.1.0", ui = "1.1.1",
-        version = "1.0.0", updater = "1.2.0", network = "4.0.25",
+        version = "1.0.0", updater = "1.2.0", network = "4.0.26",
     },
     files = {
         { path = "/install_colony.lua", app = "common", remote = "install_colony.lua" },
