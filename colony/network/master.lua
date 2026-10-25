@@ -1924,4 +1924,175 @@ function M.legacyExportRecovery(config, store, io, matcher)
     return self
 end
 
+-- Explicit operator recovery for a held PRS export that definitely returned
+-- zero but whose original full-chest baseline became unusable because unrelated
+-- verified deliveries were drained before the delivery-lock protocol existed.
+-- This path moves no items and credits no shipment.
+function M.zeroExportRecovery(config, store, io, matcher)
+    local self, reviewed = {}, nil
+
+    local function quantity(value, minimum)
+        return type(value)=="number" and value==value and value~=math.huge
+            and value~=-math.huge and value%1==0 and value>=(minimum or 0)
+    end
+
+    local function findColony(id)
+        local found
+        for _,colony in ipairs(config.colonies or {}) do
+            if tostring(colony.id)==tostring(id) then
+                if found then return nil,"Colony route ID is ambiguous" end
+                found=colony
+            end
+        end
+        return found,found and nil or "Held colony route is no longer configured"
+    end
+
+    local function inspect()
+        if config.role~="master" then return nil,"Zero-export acknowledgment is only available on the PRS Master" end
+        local data=store.data
+        local state=type(data)=="table" and data.master
+        local pending=type(state)=="table" and state.pendingTransfer
+        local quarantine=type(state)=="table" and state.quarantine
+        if type(pending)~="table" or pending.kind~="export" then
+            return nil,"No held PRS export exists"
+        end
+        if pending.reported~=0 or pending.intent then
+            return nil,"Only a completed bridge call that explicitly returned 0 can use zero-export acknowledgment"
+        end
+        if pending.uncertain~=true or type(quarantine)~="table" or quarantine.code~="TRANSFER_VERIFY" then
+            return nil,"The held export is not the active transfer-verification quarantine"
+        end
+        if type(pending.requestId)~="string" or pending.requestId=="" then
+            return nil,"The held export has no stable request ID"
+        end
+        local colony,routeError=findColony(pending.colonyId)
+        if not colony then return nil,routeError end
+        if type(colony.deliveryChest)~="string" or colony.deliveryChest==""
+            or colony.deliveryChest~=pending.chest then
+            return nil,"The configured delivery route no longer matches the held export"
+        end
+        local cs=state.colonies and state.colonies[tostring(pending.colonyId)]
+        if type(cs)~="table" then return nil,"The held colony ledger is missing" end
+        if cs.turn then return nil,"Wait for the colony's outstanding turn to finish before clearing the stale export" end
+        local record=cs.requests and cs.requests[pending.requestId]
+        if type(record)~="table" or record.generation~=pending.generation
+            or record.status=="delivered" then
+            return nil,"The held export no longer matches its blocked request generation"
+        end
+
+        local items,chestError=io.snapshot(pending.chest)
+        if type(items)~="table" then return nil,"Delivery chest is unreadable: "..tostring(chestError) end
+        local total=0
+        for slot,entry in pairs(items) do
+            if type(slot)~="number" or not quantity(slot,1)
+                or type(entry)~="table" or type(entry.count)~="number"
+                or not quantity(entry.count,1) then
+                return nil,"Delivery chest returned invalid inventory data"
+            end
+            total=total+entry.count
+        end
+        if total~=0 then
+            return nil,"Delivery chest is not empty; zero-export acknowledgment would be unsafe"
+        end
+
+        if type(io.bridgeStatus)~="function" then return nil,"PRS connection verification is unavailable" end
+        local bridge=io.bridgeStatus()
+        if type(bridge)~="table" or bridge.connected~=true then
+            return nil,"PRS connection is not confirmed: "..tostring(type(bridge)=="table" and bridge.error or "unknown")
+        end
+        local stock,stockError=io.stock()
+        if type(stock)~="table" then return nil,"PRS stock is unreadable: "..tostring(stockError) end
+
+        local review={
+            colonyId=pending.colonyId,
+            requestId=pending.requestId,
+            item={name=pending.item and pending.item.name,nbt=copy(pending.item and pending.item.nbt)},
+            count=pending.count,
+            chest=pending.chest,
+            reported=0,
+            chestItems=0,
+            confirmation="ZERO EXPORT",
+        }
+        local guard={
+            master=copy(state),
+            chestTest=copy(data.chestTest),
+            config=copy(config),
+            bridge={name=bridge.name,connected=true},
+            chestEmpty=true,
+        }
+        return {review=review,guard=guard}
+    end
+
+    function self.previewZeroExport()
+        reviewed=nil
+        local ok,result,err=pcall(inspect)
+        if not ok then return nil,"Cannot review held export: "..tostring(result) end
+        if not result then return nil,err end
+        reviewed=result
+        return copy(result.review)
+    end
+
+    function self.reconcileZeroExport(confirmation)
+        if not reviewed or confirmation~=reviewed.review.confirmation then
+            return false,"Review the held export and type the exact ZERO EXPORT confirmation"
+        end
+        local ok,fresh,err=pcall(inspect)
+        if not ok then return false,"Cannot recheck held export: "..tostring(fresh) end
+        if not fresh then reviewed=nil;return false,err end
+        if not equal(fresh.guard,reviewed.guard) then
+            reviewed=nil
+            return false,"The master journal, route, bridge or chest changed after review; review again"
+        end
+        reviewed=nil
+
+        local data,state=store.data,store.data.master
+        local pending=state.pendingTransfer
+        local held=copy(state)
+        local oldHistory=copy(data.history or {})
+        local oldRevision=data.revision
+        local function persist()
+            local saved,saveError=store.save()
+            if saved~=true then error("Zero-export acknowledgment could not be saved: "..tostring(saveError),0) end
+        end
+
+        local saved,saveError=pcall(function()
+            data.history=data.history or {}
+            data.history[#data.history+1]={
+                time=io.now(),kind="OPERATOR_ZERO_EXPORT",
+                message="Operator confirmed held PRS export moved zero items; stale chest baseline discarded",
+                context={
+                    colonyId=pending.colonyId,requestId=pending.requestId,
+                    item=pending.item and pending.item.name,count=pending.count,
+                    chest=pending.chest,reported=0,confirmation=confirmation
+                }
+            }
+            while #data.history>math.max(1,integer(config.maxHistoryEntries or 400)) do
+                table.remove(data.history,1)
+            end
+
+            local heldReason=state.quarantine and state.quarantine.message
+            for _,other in pairs(state.colonies or {}) do
+                for _,blocked in pairs(other.requests or {}) do
+                    if blocked.errorCode=="PRS_QUARANTINE" then
+                        blocked.status,blocked.detail,blocked.errorCode=
+                            "requested","Zero-movement export acknowledged; retrying from a clean chest",nil
+                    end
+                end
+                if other.error==heldReason then other.error=nil;other.errorSource=nil end
+            end
+            state.pendingTransfer,state.quarantine=nil,nil
+            persist()
+        end)
+
+        if not saved then
+            restore(state,held)
+            data.history,data.revision=oldHistory,oldRevision
+            return false,"Zero-export acknowledgment was not saved; hold retained: "..tostring(saveError)
+        end
+        return true,"Zero export acknowledged; no shipment credited. Restart the Master to retry from the empty chest."
+    end
+
+    return self
+end
+
 return M
