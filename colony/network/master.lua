@@ -454,7 +454,7 @@ function M.new(config, store, io, matcher)
         return false,"current stock does not prove registry-ID export safe"
     end
 
-    local function registryZeroResetEligible(pending)
+    local function zeroResetEligible(pending)
         if type(pending)~="table"
             or pending.kind~="export"
             or pending.reported~=0
@@ -462,12 +462,9 @@ function M.new(config, store, io, matcher)
             return false,"not a confirmed zero export"
         end
 
-        local mode=tostring(pending.selectionMode or "")
-        if mode~="registry-name"
-            and mode~="transient-name"
-            and mode~="single-variant-name"
-            and mode~="plain-name" then
-            return false,"selector is "..(mode~="" and mode or "unknown")..", not registry-safe"
+        local bridge=type(io.bridgeStatus)=="function" and io.bridgeStatus() or nil
+        if type(bridge)=="table" and bridge.connected==false then
+            return false,"PRS bridge is not connected"
         end
 
         local items,err=io.stock()
@@ -475,8 +472,46 @@ function M.new(config, store, io, matcher)
             return false,"PRS inventory unreadable after zero export: "..tostring(err)
         end
 
-        local visible=0
+        local mode=tostring(pending.selectionMode or "")
         local wanted=tostring(pending.item and pending.item.name or "")
+
+        if mode=="fingerprint" then
+            local fingerprint=pending.item and pending.item.fingerprint
+                or pending.variant and pending.variant.fingerprint
+            if type(fingerprint)~="string" or fingerprint=="" then
+                return false,"failed fingerprint selector is unavailable"
+            end
+
+            local exactVisible=0
+            local sameNameVisible=0
+            for _,entry in pairs(items) do
+                if type(entry)=="table"
+                    and entry.name==wanted
+                    and integer(entry.amount or entry.count)>0 then
+                    sameNameVisible=sameNameVisible+integer(entry.amount or entry.count)
+                    if entry.fingerprint==fingerprint then
+                        exactVisible=exactVisible+integer(entry.amount or entry.count)
+                    end
+                end
+            end
+
+            if exactVisible<=0 then
+                return false,"failed fingerprint variant is no longer visible in PRS"
+            end
+            return true,
+                "selective variant desync: exact fingerprint still visible x"..
+                tostring(exactVisible).." (same-name total "..tostring(sameNameVisible)..")"
+        end
+
+        if mode~="registry-name"
+            and mode~="transient-name"
+            and mode~="single-variant-name"
+            and mode~="plain-name" then
+            return false,"selector is "..(mode~="" and mode or "unknown")..
+                ", not a confirmed reset-safe selector"
+        end
+
+        local visible=0
         for _,entry in pairs(items) do
             if type(entry)=="table"
                 and entry.name==wanted
@@ -499,7 +534,7 @@ function M.new(config, store, io, matcher)
             return pending.resetPulseOK==true,tostring(pending.resetPulseDetail or "reset already attempted")
         end
 
-        local eligible,why=registryZeroResetEligible(pending)
+        local eligible,why=zeroResetEligible(pending)
         if not eligible then return false,why end
 
         local cooldown=tonumber(config.prsResetCooldownSeconds) or 120
