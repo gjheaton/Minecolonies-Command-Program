@@ -1349,7 +1349,7 @@ function M.new(config, store, io, matcher)
                         -- even when AP no longer reports the original
                         -- fingerprint, provided the CURRENT complete stock
                         -- snapshot proves registry-name export is safe.
-                        if not registrySafeVariant and type(io.exportSelection)=="function" then
+                        if candidate and not registrySafeVariant and type(io.exportSelection)=="function" then
                             local _,mode=io.exportSelection(candidate,entry,items)
                             if mode=="registry-name" or mode=="transient-name" then
                                 registrySafeVariant=copy(entry)
