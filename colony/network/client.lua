@@ -339,7 +339,7 @@ function M.new(config, store, io, matcher)
     data.retiredSessions = type(data.retiredSessions) == "table" and data.retiredSessions or {}
     data.seenTurns = type(data.seenTurns) == "table" and data.seenTurns or {}
     data.cursor = amount(data.cursor)
-    local nextHello, nextRetry = 0, 0
+    local nextHello, nextRetry, nextAutoReconcile = 0, 0, 0
     local lastContact
     local masterConnection
     local persistenceError
@@ -1039,6 +1039,33 @@ function M.new(config, store, io, matcher)
 
     function self.tick()
         local now = io.now()
+
+        -- A forced update/reboot can interrupt the program after the bridge
+        -- returned but before the normal accounting path cleared its durable
+        -- intent. When that numeric bridge result is still present, the normal
+        -- reconcile() routine can prove the physical chest delta and repair the
+        -- ledger without repeating the mutation. Do this automatically once
+        -- the master has closed the turn. Unknown bridge results remain held
+        -- for explicit operator zero-movement confirmation.
+        if data.intent and data.fault and data.turn
+            and data.turn.phase=="finished"
+            and now>=nextAutoReconcile then
+            nextAutoReconcile=now+5
+            local reported=data.intent.reported
+            if type(reported)=="number"
+                and reported==amount(reported)
+                and reported<=amount(data.intent.count) then
+                local ok,detail=self.reconcile()
+                if ok then
+                    store.event("AUTO_RECONCILED",
+                        "Interrupted colony chest transfer reconciled automatically",{
+                            kind=data.intent and data.intent.kind or nil,
+                            detail=detail
+                        })
+                end
+            end
+        end
+
         if now >= nextHello then
             send({ kind = "hello", role = "supply", colonyName = data.colonyName,
                 deliveryChestName = config.deliveryChestName, returnChestName = config.returnChestName,
