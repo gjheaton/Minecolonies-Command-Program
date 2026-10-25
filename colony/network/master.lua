@@ -181,6 +181,14 @@ function M.new(config, store, io, matcher)
         return tostring(item.displayName or item.name or "UNKNOWN")
     end
 
+    local function deliveryDrainLockedFor(colony)
+        local pending=state.pendingTransfer
+        return type(pending)=="table"
+            and pending.kind=="export"
+            and tostring(pending.colonyId)==tostring(colony.id)
+            and tostring(pending.chest or "")==tostring(colony.deliveryChest or "")
+    end
+
     local function zeroTransferReason(pending)
         local operation = pending.kind == "export" and "export" or "import"
         local reason = "PRS " .. operation .. " returned 0; chest unchanged. Transfer held."
@@ -1177,6 +1185,11 @@ function M.new(config, store, io, matcher)
                 else
                     cs.routeError = nil
                 end
+                if confirmed and type(message.deliveryDrainLocked)=="boolean" then
+                    cs.deliveryDrainLockedAck = message.deliveryDrainLocked
+                    cs.deliveryDrainLockAckAt = io.now()
+                end
+
                 if confirmed and type(message.imports)=="table" then
                     local imported,importError=acknowledgeImports(cs,message.imports)
                     if not imported then
@@ -1205,8 +1218,14 @@ function M.new(config, store, io, matcher)
             if kind == "hello" then
                 -- A paused master still confirms connectivity. This receipt
                 -- cannot grant permission to touch either Ender Chest.
+                local drainLocked=deliveryDrainLockedFor(colony)
+                if not drainLocked then
+                    cs.deliveryDrainLockedAck=false
+                    cs.deliveryDrainLockAckAt=nil
+                end
                 io.send(colony.id, {kind="hello_ack", routeConfirmed=cs.routeConfirmed == true,
-                    automationEnabled=config.automationEnabled ~= false, error=cs.routeError})
+                    automationEnabled=config.automationEnabled ~= false,
+                    deliveryDrainLocked=drainLocked, error=cs.routeError})
                 if not cs.routeConfirmed then return true end
             end
             if cs.turn and (cs.turn.phase == "RESULT" or (cs.turn.phase == "WAIT_BATCH" and checkRoutes(colony, cs))) then sendTurn(colony, cs) end
@@ -1426,6 +1445,10 @@ function M.new(config, store, io, matcher)
                 return false, "Wait for the colony to acknowledge the paused result before a recovery probe"
             end
             if not checkRoutes(colony, cs) then return false, cs.routeError end
+            if pending.kind=="export" and deliveryDrainLockedFor(colony)
+                and cs.deliveryDrainLockedAck~=true then
+                return false, "Wait for the colony to acknowledge the delivery-chest verification lock"
+            end
             local p = policy(colony)
             if state.lastRecoveryProbeAt and io.now()-state.lastRecoveryProbeAt < p.desyncProbeSeconds then
                 return false, "Wait for configured recovery probe interval before trying again"
