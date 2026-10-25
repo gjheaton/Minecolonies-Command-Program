@@ -424,6 +424,87 @@ function M.new(config, store, io, matcher)
         return count
     end
 
+    local function registryZeroResetEligible(pending)
+        if type(pending)~="table"
+            or pending.kind~="export"
+            or pending.reported~=0
+            or pending.lastDelta~=0 then
+            return false,"not a confirmed zero export"
+        end
+
+        local mode=tostring(pending.selectionMode or "")
+        if mode~="registry-name"
+            and mode~="transient-name"
+            and mode~="plain-name" then
+            return false,"selector is "..(mode~="" and mode or "unknown")..", not registry-safe"
+        end
+
+        local items,err=io.stock()
+        if type(items)~="table" then
+            return false,"PRS inventory unreadable after zero export: "..tostring(err)
+        end
+
+        local visible=0
+        local wanted=tostring(pending.item and pending.item.name or "")
+        for _,entry in pairs(items) do
+            if type(entry)=="table"
+                and entry.name==wanted
+                and integer(entry.amount or entry.count)>0 then
+                visible=visible+integer(entry.amount or entry.count)
+            end
+        end
+
+        if visible<=0 then
+            return false,"source item is no longer visible in PRS"
+        end
+        return true,"registry item still visible in PRS x"..tostring(visible)
+    end
+
+    local function maybeAutoResetPRS(pending)
+        if config.prsAutoResetEnabled~=true then
+            return false,"automatic PRS reset disabled"
+        end
+        if pending.resetPulseAt then
+            return pending.resetPulseOK==true,tostring(pending.resetPulseDetail or "reset already attempted")
+        end
+
+        local eligible,why=registryZeroResetEligible(pending)
+        if not eligible then return false,why end
+
+        local cooldown=tonumber(config.prsResetCooldownSeconds) or 120
+        local now=io.now()
+        if state.lastPrsResetAt and now-state.lastPrsResetAt<cooldown then
+            return false,"PRS reset cooldown "..tostring(math.ceil(cooldown-(now-state.lastPrsResetAt))).."s"
+        end
+
+        pending.resetPulseAt=now
+        pending.resetReason=why
+        save()
+
+        local ok,detail=io.pulsePRSReset(
+            "confirmed ghost item: "..tostring(pending.item and pending.item.name or "?")..
+            " | "..tostring(why)
+        )
+        pending.resetPulseOK=ok==true
+        pending.resetPulseDetail=tostring(detail or "")
+        if ok then
+            state.lastPrsResetAt=io.now()
+            pending.autoRecoveryAt=io.now()+(tonumber(config.prsResetRecoveryDelaySeconds) or 10)
+            pending.nextAutoRecoveryAt=pending.autoRecoveryAt
+            store.event("PRS_DESYNC_RESET","Confirmed registry-name ghost item reset triggered",{
+                colonyId=pending.colonyId,item=pending.item and pending.item.name,
+                selectionMode=pending.selectionMode,detail=detail
+            })
+        else
+            errorEvent("PRS_RESET_FAILED","Automatic PRS reset failed",{
+                colonyId=pending.colonyId,item=pending.item and pending.item.name,
+                selectionMode=pending.selectionMode,detail=detail
+            })
+        end
+        save()
+        return ok==true,detail
+    end
+
     local function observeCrafts(items, p)
         for _, job in pairs(state.craftJobs) do
             if activeCraft(job) and io.now() >= (job.nextPollAt or 0) then
@@ -580,6 +661,18 @@ function M.new(config, store, io, matcher)
         local cs = state.colonies[tostring(pending.colonyId)]
         local record = cs and cs.requests[pending.requestId]
         if record then record.status, record.detail, record.errorCode = "error", reason, "PRS_QUARANTINE" end
+
+        if pending.definiteZero then
+            local resetOK,resetDetail=maybeAutoResetPRS(pending)
+            if resetOK then
+                reason=reason.." Automatic PRS reset sent; guarded recovery will retry after settle."
+                if record then record.detail=reason end
+            elseif pending.resetPulseAt then
+                reason=reason.." PRS reset attempt failed: "..tostring(resetDetail)
+                if record then record.detail=reason end
+            end
+        end
+
         save()
         return false
     end
@@ -1069,7 +1162,24 @@ function M.new(config, store, io, matcher)
             verifyPending(false)
             if state.pendingTransfer and not state.pendingTransfer.uncertain then return end
             if state.pendingTransfer and state.pendingTransfer.uncertain then
-                if work and tostring(work.colony.id) == tostring(state.pendingTransfer.colonyId) then finishTurn(work.colony, work.cs) end
+                if work and tostring(work.colony.id) == tostring(state.pendingTransfer.colonyId) then
+                    finishTurn(work.colony, work.cs)
+                end
+
+                local pending=state.pendingTransfer
+                if pending and pending.resetPulseOK==true
+                    and pending.autoRecoveryAt
+                    and now>=pending.autoRecoveryAt
+                    and now>=(pending.nextAutoRecoveryAt or 0) then
+                    pending.nextAutoRecoveryAt=now+2
+                    save()
+                    local ok,msg=self.reconcile()
+                    if ok then
+                        store.event("PRS_AUTO_RECOVERY","Automatic guarded recovery started after reset",{
+                            colonyId=pending.colonyId,item=pending.item and pending.item.name,detail=msg
+                        })
+                    end
+                end
             end
         end
         if work then
