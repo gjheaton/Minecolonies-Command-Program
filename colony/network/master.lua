@@ -1216,18 +1216,39 @@ function M.new(config, store, io, matcher)
                 if not items then cs.turn=nil; save(); return false, "PRS stock remains unreadable" end
                 candidate = copy(pending.candidate)
                 local matchingIdentity
+                local registryRelaxed =
+                    type(matcher.isRegistryNBTRelaxed)=="function"
+                    and matcher.isRegistryNBTRelaxed(pending.item.name)
                 for _, entry in pairs(items) do
-                    if matcher.itemIdentity(entry) == matcher.itemIdentity(pending.item) and integer(entry.amount) > 0 then
+                    if matcher.itemIdentity(entry) == matcher.itemIdentity(pending.item)
+                        and integer(entry.amount) > 0 then
                         matchingIdentity = true
                         if entry.fingerprint == pending.item.fingerprint then
                             variant = copy(entry)
                             break
+                        elseif registryRelaxed and not variant then
+                            -- The Ancient Tome export is intentionally bound to
+                            -- the exact MineColonies registry ID, not the AP
+                            -- fingerprint that can change when AP creates/touches
+                            -- its transient tag during the failed export.
+                            variant = copy(entry)
                         end
                     end
                 end
-                if not candidate or not matchingIdentity then cs.turn=nil; save(); return false, "Original exact item unavailable for recovery" end
-                if not validFingerprint(pending.item.fingerprint) or not variant then
-                    cs.turn=nil; save(); return false, "Original exact AP fingerprint unavailable for recovery; transfer remains held"
+                if not candidate or not matchingIdentity then
+                    cs.turn=nil; save()
+                    return false, "Original exact item unavailable for recovery"
+                end
+                if not variant or (not registryRelaxed
+                    and not validFingerprint(pending.item.fingerprint)) then
+                    cs.turn=nil; save()
+                    return false, "Original exact AP fingerprint unavailable for recovery; transfer remains held"
+                end
+                if registryRelaxed then
+                    -- beginTransfer still journals a concrete observed source
+                    -- fingerprint for diagnostics, while io.exportSelection()
+                    -- uses the exact namespaced registry selector.
+                    pending.item.fingerprint = variant.fingerprint
                 end
                 local filter = matcher.exportFilterForVariant(candidate, variant, 1)
                 if not filter then cs.turn=nil; save(); return false, "Original exact export filter unavailable for recovery" end
