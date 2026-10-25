@@ -1331,6 +1331,7 @@ function M.new(config, store, io, matcher)
                     and matcher.isRegistryNBTRelaxed(pending.item.name)
                 local registrySafeVariant
                 local registrySafeMode
+                local fingerprintVariant
 
                 for _, entry in pairs(items) do
                     if entry.name==pending.item.name and integer(entry.amount)>0 then
@@ -1338,17 +1339,10 @@ function M.new(config, store, io, matcher)
                             matchingIdentity = true
                         end
 
-                        if entry.fingerprint == pending.item.fingerprint then
-                            variant = copy(entry)
-                            break
-                        end
-
-                        -- v4.0.20+ can export ordinary plain items by exact
-                        -- namespaced registry ID. A retained transfer created by
-                        -- an older fingerprint build may therefore be recovered
-                        -- even when AP no longer reports the original
-                        -- fingerprint, provided the CURRENT complete stock
-                        -- snapshot proves registry-name export is safe.
+                        -- Prefer the current safe registry-ID path for every
+                        -- plain/non-NBT item. Do this even when the old AP
+                        -- fingerprint still exists: that fingerprint selector
+                        -- is exactly what may have produced the zero export.
                         if candidate and not registrySafeVariant and type(io.exportSelection)=="function" then
                             local _,mode=io.exportSelection(candidate,entry,items)
                             if mode=="registry-name" or mode=="transient-name" then
@@ -1357,10 +1351,23 @@ function M.new(config, store, io, matcher)
                             end
                         end
 
+                        if entry.fingerprint == pending.item.fingerprint then
+                            fingerprintVariant=copy(entry)
+                        end
+
                         if registryRelaxed and not variant then
                             variant = copy(entry)
                         end
                     end
+                end
+
+                -- Safe registry-ID export always wins for a retained plain
+                -- transfer. Fingerprint recovery is the fallback only when
+                -- current stock proves registry-name export is unsafe.
+                if registrySafeVariant then
+                    variant=registrySafeVariant
+                elseif fingerprintVariant then
+                    variant=fingerprintVariant
                 end
 
                 if not candidate then
@@ -1368,17 +1375,19 @@ function M.new(config, store, io, matcher)
                     return false, "Original request candidate unavailable for recovery"
                 end
 
-                if not variant and registrySafeVariant then
-                    variant=registrySafeVariant
+                if registrySafeVariant then
                     pending.item.fingerprint=variant.fingerprint
                     pending.selectionMode=registrySafeMode
                     matchingIdentity=true
-                    store.event("PRS_RECOVERY_REBOUND",
-                        "Retained export rebound to safe registry-ID selector",{
-                            colonyId=pending.colonyId,
-                            item=pending.item.name,
-                            selectionMode=registrySafeMode
-                        })
+                    if pending.reboundSelectionMode~=registrySafeMode then
+                        pending.reboundSelectionMode=registrySafeMode
+                        store.event("PRS_RECOVERY_REBOUND",
+                            "Retained export rebound to safe registry-ID selector",{
+                                colonyId=pending.colonyId,
+                                item=pending.item.name,
+                                selectionMode=registrySafeMode
+                            })
+                    end
                 end
 
                 if not matchingIdentity and not registryRelaxed then
