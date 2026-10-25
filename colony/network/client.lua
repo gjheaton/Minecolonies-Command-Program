@@ -1066,12 +1066,23 @@ function M.new(config, store, io, matcher)
             end
         end
 
+        -- Verified deliveries no longer depend on a fresh master turn. Once
+        -- PRS has already placed an item in this colony's delivery chest, the
+        -- colony may safely import that retained shipment into CRS even while
+        -- the master is quarantined on an unrelated PRS export. Never do this
+        -- during a live turn or while any client fault/intent is held.
+        if data.turn and data.turn.phase=="finished"
+            and not clientError() and not data.intent then
+            drainDeliveries()
+        end
+
         if now >= nextHello then
             send({ kind = "hello", role = "supply", colonyName = data.colonyName,
                 deliveryChestName = config.deliveryChestName, returnChestName = config.returnChestName,
                 deliveryChannel = config.deliveryChannel, returnChannel = config.returnChannel,
                 clientError = clientError(), session = data.turn and data.turn.session,
-                turn = data.turn and data.turn.turn })
+                turn = data.turn and data.turn.turn,
+                imports = imports() })
             nextHello = now + math.max(0.1, tonumber(setting("helloSeconds", 5)) or 5)
         end
         local turn = data.turn
