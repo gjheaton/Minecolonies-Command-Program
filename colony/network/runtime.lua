@@ -297,8 +297,20 @@ function M.run(role,...)
         local queued,reason=queueAction({kind="clear_errors",callback=callback})
         return queued,reason or "Clearing recorded errors queued"
     end
-    local actualUpdater=SuiteUpdater.new({appId=role,appVersion=Config.VERSION,suiteVersion=Config.VERSION,
-        displayName=role=="master" and "PRS MASTER" or "COLONY SUPPLY",checkSeconds=config.updateCheckSeconds})
+    local Util=require("colony.lib.util")
+    local installed=Util.readSerializedTable("/colony/app.cfg") or {}
+    local installedAppVersion=tostring(installed.appVersion or Config.VERSION)
+    local installedSuiteVersion=tostring(installed.suiteVersion or Config.VERSION)
+    config.programVersion=installedAppVersion
+    config.suiteVersion=installedSuiteVersion
+
+    local actualUpdater=SuiteUpdater.new({
+        appId=role,
+        appVersion=installedAppVersion,
+        suiteVersion=installedSuiteVersion,
+        displayName=role=="master" and "PRS MASTER" or "COLONY SUPPLY",
+        checkSeconds=config.updateCheckSeconds,
+    })
     local updater=setmetatable({}, {__index=actualUpdater})
     function updater.check()
         local queued,reason=queueAction("check")
