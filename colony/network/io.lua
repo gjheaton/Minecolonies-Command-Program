@@ -520,16 +520,16 @@ function M.new(config,store,matcher)
             return {name=variant.name},"registry-name"
         end
 
-        -- A generic request can also safely use the exact namespaced registry
-        -- ID when PRS exposes exactly one positive-count variant with that
-        -- name. This covers items such as an undecorated/only Decorated Pot
-        -- whose inventory representation carries NBT, while still refusing a
-        -- name-only export as soon as two distinct same-name variants coexist.
+        -- Registry-ID export is also safe when the complete PRS snapshot has
+        -- exactly one positive-count variant for this item name AND that sole
+        -- variant still exactly satisfies the MineColonies request. This works
+        -- for NBT-specific items such as Decorated Pots without weakening NBT
+        -- safety: as soon as another same-name variant exists, the name-only
+        -- selector is refused and we fall back to the exact fingerprint.
         local singleVariant=type(items)=="table"
             and type(candidate)=="table"
             and type(variant)=="table"
             and not candidate.toolClass
-            and not candidate.hasNBT
             and candidate.name==variant.name
         local sameNameCount=0
         local sole
@@ -552,7 +552,9 @@ function M.new(config,store,matcher)
             end
         end
         if singleVariant and sameNameCount==1 and sole
-            and sole.fingerprint==variant.fingerprint then
+            and sole.fingerprint==variant.fingerprint
+            and type(matcher.exactlyMatches)=="function"
+            and matcher.exactlyMatches(candidate.raw,sole) then
             return {name=variant.name},"single-variant-name"
         end
 
