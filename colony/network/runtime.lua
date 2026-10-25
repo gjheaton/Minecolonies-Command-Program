@@ -141,9 +141,9 @@ function M.run(role,...)
         if role~="master" or arg2~=nil or arg3~=nil then
             error("Usage: colony_master --reconcile-zero-export",0)
         end
-        local MasterModule=dofile("/colony/network/master.lua")
+        local MasterModule=require("colony.network.master")
         if type(MasterModule)~="table" or type(MasterModule.zeroExportRecovery)~="function" then
-            error("Cannot load /colony/network/master.lua directly for recovery",0)
+            error("Cannot load colony.network.master recovery module",0)
         end
         print("Recovery module: v"..tostring(MasterModule.MODULE_VERSION or "UNKNOWN"))
         local recovery=MasterModule.zeroExportRecovery(config,store,io,matcher)
