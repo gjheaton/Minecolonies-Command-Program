@@ -2,7 +2,7 @@
 -- The receiver queues messages even while a bridge call yields.
 local M={}
 local commonModes={help=true,setup=true,diag=true,diagnostics=true,monitors=true,reconcile=true,["clear-errors"]=true,set=true}
-local masterModes={monitor=true,chesttest=true,transferdiag=true,["reconcile-bind"]=true}
+local masterModes={monitor=true,chesttest=true,transferdiag=true,["reconcile-bind"]=true,["reconcile-zero-export"]=true}
 local supplyModes={deliverydiag=true,["reconcile-zero"]=true,["reconcile-zero-return"]=true}
 local function usage(role)
     local program=role=="master" and "colony_master" or "colony_supply"
@@ -20,6 +20,7 @@ local function usage(role)
         lines[#lines+1]="  --chesttest --abandon <ID>"
         lines[#lines+1]="  --transferdiag          Inspect a held export"
         lines[#lines+1]="  --reconcile-bind <ID>   Bind an existing export"
+        lines[#lines+1]="  --reconcile-zero-export Acknowledge a held zero export into an empty chest"
     else
         lines[#lines+1]="  --deliverydiag <shipment ID> Inspect a retained delivery"
         lines[#lines+1]="  --reconcile-zero <shipment ID>"
@@ -135,6 +136,26 @@ function M.run(role,...)
         if confirmation~=preview.confirmation then print("CANCELLED: Held transfer unchanged");return end
         local bound,detail=recovery.reconcileBindExport(arg2,confirmation)
         print((bound and "OK: " or "BLOCKED: ")..tostring(detail));return
+    end
+    if mode=="reconcile-zero-export" then
+        if role~="master" or arg2~=nil or arg3~=nil then
+            error("Usage: colony_master --reconcile-zero-export",0)
+        end
+        local recovery=require("colony.network.master").zeroExportRecovery(config,store,io,matcher)
+        local preview,reason=recovery.previewZeroExport()
+        if not preview then print("BLOCKED: "..tostring(reason));return end
+        print("HELD PRS ZERO EXPORT")
+        print("Colony: "..tostring(preview.colonyId))
+        print("Item: "..tostring(preview.item and preview.item.name or "UNKNOWN").." x"..tostring(preview.count))
+        print("Chest: "..tostring(preview.chest))
+        print("Bridge reported: 0; current chest items: 0")
+        print("This moves no items and credits no shipment.")
+        print("Confirm only if nobody manually moved/replaced the held item after the failure.")
+        print("Type "..preview.confirmation.." to clear the stale baseline, or anything else to cancel:")
+        local confirmation=read()
+        if confirmation~=preview.confirmation then print("CANCELLED: Held export unchanged");return end
+        local ok,detail=recovery.reconcileZeroExport(confirmation)
+        print((ok and "OK: " or "BLOCKED: ")..tostring(detail));return
     end
     if mode=="reconcile-zero-return" then
         local recovery=require("colony.network.client").zeroReturnRecovery(config,store,io,matcher)
