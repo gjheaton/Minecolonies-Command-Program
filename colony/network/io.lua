@@ -89,9 +89,10 @@ function M.new(config,store,matcher)
         local integrator=peripheral.wrap(status.name)
         if not integrator then return nil,"PRS Reset Integrator disappeared: "..tostring(status.name) end
 
-        local side="bottom"
+        local sides={"top","bottom","left","right","front","back"}
         local pulse=tonumber(config.prsResetPulseSeconds) or 2
-        local function level(value)
+
+        local function sideLevel(side,value)
             local fn=integrator[status.method]
             if type(fn)~="function" then
                 return nil,"Redstone Integrator output method disappeared"
@@ -106,19 +107,40 @@ function M.new(config,store,matcher)
             return true
         end
 
-        local ok,err=level(0)
-        if not ok then return nil,"Cannot clear PRS reset output: "..tostring(err) end
-        ok,err=level(15)
-        if not ok then pcall(level,0); return nil,"Cannot assert PRS reset output: "..tostring(err) end
-        local slept,sleepErr=pcall(sleep,pulse)
-        local cleared,clearErr=level(0)
-        if not slept then return nil,"PRS reset pulse interrupted: "..tostring(sleepErr) end
-        if not cleared then return nil,"Cannot clear PRS reset output after pulse: "..tostring(clearErr) end
+        local function allLevel(value)
+            local failures={}
+            for _,side in ipairs(sides) do
+                local ok,err=sideLevel(side,value)
+                if not ok then failures[#failures+1]=side..": "..tostring(err) end
+            end
+            if #failures>0 then return nil,table.concat(failures,"; ") end
+            return true
+        end
 
-        store.event("PRS_RESET","Automatic RS15 reset pulse sent",{
-            integrator=status.name,side=side,strength=15,seconds=pulse,reason=tostring(reason or "confirmed PRS desync")
+        local ok,err=allLevel(0)
+        if not ok then return nil,"Cannot clear all PRS reset outputs: "..tostring(err) end
+
+        ok,err=allLevel(15)
+        if not ok then
+            pcall(allLevel,0)
+            return nil,"Cannot assert all PRS reset outputs: "..tostring(err)
+        end
+
+        local slept,sleepErr=pcall(sleep,pulse)
+        local cleared,clearErr=allLevel(0)
+        if not slept then
+            pcall(allLevel,0)
+            return nil,"PRS reset pulse interrupted: "..tostring(sleepErr)
+        end
+        if not cleared then
+            return nil,"Cannot clear all PRS reset outputs after pulse: "..tostring(clearErr)
+        end
+
+        store.event("PRS_RESET","Automatic RS15 reset pulse sent on all six sides",{
+            integrator=status.name,sides=table.concat(sides,","),
+            strength=15,seconds=pulse,reason=tostring(reason or "confirmed PRS desync")
         })
-        return true,"RS15 bottom pulse for "..tostring(pulse).."s via "..tostring(status.name)
+        return true,"RS15 all-side pulse for "..tostring(pulse).."s via "..tostring(status.name)
     end
     function self.monitor(nameOverride)
         local mon,name=resolve(nameOverride or config.monitorName,"monitor")
@@ -594,7 +616,7 @@ function M.new(config,store,matcher)
             out.checks.prsReset={
                 ok=reset.ok==true,
                 detail=reset.ok
-                    and (tostring(reset.name).." | bottom RS15 x "..tostring(config.prsResetPulseSeconds or 2).."s")
+                    and (tostring(reset.name).." | all sides RS15 x "..tostring(config.prsResetPulseSeconds or 2).."s")
                     or tostring(reset.error or "PRS reset integrator unavailable")
             }
         end
