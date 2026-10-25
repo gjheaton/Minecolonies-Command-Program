@@ -2,6 +2,20 @@
 local M = {}
 -- CC:Tweaked charges at least 500 bytes for each file and directory.
 local MINIMUM_FILE_SIZE = 500
+local function timestamp()
+    local api=os
+    if type(api)=="table" then
+        if type(api.epoch)=="function" then
+            local ok,value=pcall(api.epoch,"utc")
+            if ok and type(value)=="number" then return value/1000 end
+        end
+        if type(api.clock)=="function" then
+            local ok,value=pcall(api.clock)
+            if ok and type(value)=="number" then return value end
+        end
+    end
+    return 0
+end
 local function checkSpace(target,source,directory)
     local free=fs.getFreeSpace(target)
     if free=="unlimited" then return end
@@ -62,14 +76,14 @@ function M.new(path,config)
     end
     function self.event(kind,message,context)
         local entries=self.data.history
-        entries[#entries+1]={time=os.epoch and os.epoch("utc")/1000 or os.clock(),kind=kind,message=message,context=context}
+        entries[#entries+1]={time=timestamp(),kind=kind,message=message,context=context}
         while #entries>(config and config.maxHistoryEntries or 400) do table.remove(entries,1) end
         self.save()
     end
     function self.log(message) self.event("INFO",message) end
     function self.error(code,message,context)
         local entries=self.data.errors
-        entries[#entries+1]={time=os.epoch and os.epoch("utc")/1000 or os.clock(),code=code,message=message,context=context,severity="ERROR"}
+        entries[#entries+1]={time=timestamp(),code=code,message=message,context=context,severity="ERROR"}
         while #entries>(config and config.maxErrorEntries or 100) do table.remove(entries,1) end
         self.save()
     end
@@ -84,7 +98,7 @@ function M.new(path,config)
         if count==0 then return true,"No recorded errors to clear; active faults are unchanged" end
         local previousRevision=self.data.revision
         local history={};for index,entry in ipairs(previousHistory) do history[index]=entry end
-        history[#history+1]={time=os.epoch and os.epoch("utc")/1000 or os.clock(),kind="ERROR_HISTORY_CLEARED",
+        history[#history+1]={time=timestamp(),kind="ERROR_HISTORY_CLEARED",
             message="Recorded error history cleared; active faults and transfer records retained",context={count=count}}
         while #history>(config and config.maxHistoryEntries or 400) do table.remove(history,1) end
         self.data.errors,self.data.history={},history
