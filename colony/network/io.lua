@@ -381,27 +381,39 @@ function M.new(config,store,matcher)
         if type(variant)~="table" or type(variant.fingerprint)~="string" or variant.fingerprint=="" or #variant.fingerprint>256 then
             return nil,"The selected export variant needs an exact AP fingerprint"
         end
-        -- AP 0.7.48r fingerprint predicates mutate actual RS cache tags.
-        -- Candidate.variants omits tagged alternatives; only the complete
-        -- stock snapshot can prove one plain same-name fingerprint.
-        local plain=type(items)=="table" and not candidate.toolClass and not candidate.hasNBT
-            and candidate.name==variant.name and matcher.canonicalNBT(candidate.nbt)==""
+        -- AP 0.7.48r fingerprint predicates can mutate the live RS cache tag
+        -- for an item. Avoid them entirely for ordinary non-NBT items. The
+        -- exact namespaced registry ID is already a safe selector as long as
+        -- every visible positive-count stack with that same registry ID is
+        -- also plain. Different AP fingerprints caused only by empty-tag cache
+        -- state do NOT make these different Minecraft items.
+        local plain=type(items)=="table"
+            and not candidate.toolClass
+            and not candidate.hasNBT
+            and candidate.name==variant.name
+            and matcher.canonicalNBT(candidate.nbt)==""
             and matcher.canonicalNBT(variant.nbt)==""
         local found=false
         if plain then
             for _,entry in pairs(items) do
-                if type(entry)~="table" or type(entry.name)~="string" or not whole(entry.amount,0) then
-                    plain=false;break
+                if type(entry)~="table"
+                    or type(entry.name)~="string"
+                    or not whole(entry.amount,0) then
+                    plain=false
+                    break
                 end
                 if entry.name==variant.name and entry.amount>0 then
-                    if matcher.canonicalNBT(entry.nbt)~="" or entry.fingerprint~=variant.fingerprint then
-                        plain=false;break
+                    if matcher.canonicalNBT(entry.nbt)~="" then
+                        plain=false
+                        break
                     end
                     found=true
                 end
             end
         end
-        if plain and found then return {name=variant.name},"plain-name" end
+        if plain and found then
+            return {name=variant.name},"registry-name"
+        end
 
         -- AP 0.7.48r computes fingerprints by calling getOrCreateTag() on the
         -- live RS cache stack. A freshly crafted untagged clock/compass or
