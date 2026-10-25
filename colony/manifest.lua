@@ -6,10 +6,10 @@ return {
     repositoryLayout = "cc-mirror",
     components = {
         startup = "1.1.0", installer = "4.0.21", util = "1.1.0", ui = "1.1.1",
-        version = "1.0.0", updater = "1.2.0", network = "4.0.25",
+        version = "1.0.0", updater = "1.2.0", network = "4.0.26",
     },
     apps = {
-        master = { version = "4.0.25", program = "/colony_master.lua" },
+        master = { version = "4.0.26", program = "/colony_master.lua" },
         supply = { version = "4.0.22", program = "/colony_supply.lua" },
         command = { version = "4.0.1", program = "/colony_command.lua" },
     },
