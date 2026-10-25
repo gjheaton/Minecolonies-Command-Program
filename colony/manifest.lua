@@ -9,7 +9,7 @@ return {
         version = "1.0.0", updater = "1.2.0", network = "4.0.34",
     },
     apps = {
-        master = { version = "4.0.34", program = "/colony_master.lua" },
+        master = { version = "4.0.35", program = "/colony_master.lua" },
         supply = { version = "4.0.29", program = "/colony_supply.lua" },
         command = { version = "4.0.1", program = "/colony_command.lua" },
     },
@@ -36,6 +36,7 @@ return {
         { path = "/colony/supply/matcher.lua", app = "network" },
         { path = "/colony_master.lua", app = "master" },
         { path = "/colony/network/master.lua", app = "master" },
+        { path = "/colony/recover_zero_export.lua", app = "master" },
         { path = "/colony_supply.lua", app = "supply" },
         { path = "/colony/network/client.lua", app = "supply" },
         { path = "/colony_command.lua", app = "command" },
