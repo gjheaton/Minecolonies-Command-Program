@@ -364,6 +364,20 @@ function M.new(config,store,matcher)
     function self.exportSelection(candidate,variant,items)
         local filter,err=matcher.exportFilterForVariant(candidate,variant,1)
         if not filter then return nil,err end
+
+        -- Ancient Tomes are a registry-ID exact transport exception. A freshly
+        -- crafted minecolonies:ancienttome has no NBT, while MineColonies may
+        -- add raidWillHappen after a player-inventory tick. AP fingerprint
+        -- comparison can mutate/cache the fresh empty tag and then return zero.
+        -- Use the exact namespaced registry ID instead; this can never select
+        -- Quark's distinct Ancient Tome registry entry.
+        if type(candidate)=="table" and type(variant)=="table"
+            and candidate.name==variant.name
+            and type(matcher.isRegistryNBTRelaxed)=="function"
+            and matcher.isRegistryNBTRelaxed(candidate.name) then
+            return {name=variant.name},"transient-name"
+        end
+
         if type(variant)~="table" or type(variant.fingerprint)~="string" or variant.fingerprint=="" or #variant.fingerprint>256 then
             return nil,"The selected export variant needs an exact AP fingerprint"
         end
