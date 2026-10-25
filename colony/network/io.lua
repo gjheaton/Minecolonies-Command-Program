@@ -520,6 +520,42 @@ function M.new(config,store,matcher)
             return {name=variant.name},"registry-name"
         end
 
+        -- A generic request can also safely use the exact namespaced registry
+        -- ID when PRS exposes exactly one positive-count variant with that
+        -- name. This covers items such as an undecorated/only Decorated Pot
+        -- whose inventory representation carries NBT, while still refusing a
+        -- name-only export as soon as two distinct same-name variants coexist.
+        local singleVariant=type(items)=="table"
+            and type(candidate)=="table"
+            and type(variant)=="table"
+            and not candidate.toolClass
+            and not candidate.hasNBT
+            and candidate.name==variant.name
+        local sameNameCount=0
+        local sole
+        if singleVariant then
+            for _,entry in pairs(items) do
+                if type(entry)~="table"
+                    or type(entry.name)~="string"
+                    or not whole(entry.amount,0) then
+                    singleVariant=false
+                    break
+                end
+                if entry.name==variant.name and entry.amount>0 then
+                    sameNameCount=sameNameCount+1
+                    sole=entry
+                    if sameNameCount>1 then
+                        singleVariant=false
+                        break
+                    end
+                end
+            end
+        end
+        if singleVariant and sameNameCount==1 and sole
+            and sole.fingerprint==variant.fingerprint then
+            return {name=variant.name},"single-variant-name"
+        end
+
         -- AP 0.7.48r computes fingerprints by calling getOrCreateTag() on the
         -- live RS cache stack. A freshly crafted untagged clock/compass or
         -- Ancient Tome can
