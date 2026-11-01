@@ -345,6 +345,9 @@ function M.new(config, store, io, matcher)
     local persistenceError
     local startupPreparationPending =
         type(data.turn) == "table" and data.turn.phase == "preparing"
+    local startupInterruptedPending =
+        type(data.fault) == "table"
+        and data.fault.code == "TURN_INTERRUPTED"
 
     local function setting(key, default)
         local policy = data.turn and data.turn.policy
@@ -382,11 +385,11 @@ function M.new(config, store, io, matcher)
 
     -- An interrupted call cannot safely be replayed: a courier may already
     -- have consumed warehouse stock, hiding its destination inventory delta.
-    -- If the reboot happened while a turn was still PREPARING, defer the
-    -- decision until tick() can first reconcile the local journal and rebuild
-    -- the batch.  This keeps a recoverable local restart from advertising a
-    -- false TURN_INTERRUPTED fault to the master.
-    if type(data.intent) == "table" and not startupPreparationPending then
+    -- Startup recovery owns PREPARING/TURN_INTERRUPTED states until tick()
+    -- has reconciled the local journal before the first hello.
+    if type(data.intent) == "table"
+        and not startupPreparationPending
+        and not startupInterruptedPending then
         fault("IMPORT_UNCERTAIN", "An interrupted chest transfer needs reconciliation; automatic transfers are paused", data.intent)
     end
 
@@ -1112,10 +1115,65 @@ function M.new(config, store, io, matcher)
         local now = io.now()
 
         -- Local startup reconciliation always runs before the first hello.
-        -- If it cannot prove a safe recovery, the resulting fault is what the
-        -- master will see; a recoverable restart never advertises an error.
+        -- Older clients persisted an interrupted preparation as WAITING plus
+        -- TURN_INTERRUPTED, so key recovery off the durable fault as well as
+        -- the newer PREPARING marker.
         if startupPreparationPending then
             recoverInterruptedPreparation()
+        elseif startupInterruptedPending then
+            local turn = data.turn
+            local phase = type(turn) == "table" and tostring(turn.phase or "") or ""
+            local allowActive =
+                phase == "waiting" or phase == "finished"
+
+            if type(data.intent) == "table" then
+                local reported = data.intent.reported
+                if type(reported) == "number"
+                    and reported == amount(reported)
+                    and reported <= amount(data.intent.count) then
+                    local ok, detail = self.reconcile({
+                        allowPreparing = phase == "preparing",
+                        allowInterruptedActive = allowActive,
+                    })
+                    if ok then
+                        startupInterruptedPending = false
+                    else
+                        fault(
+                            "TURN_INTERRUPTED",
+                            "Startup reconciliation failed: " .. tostring(detail)
+                        )
+                        startupInterruptedPending = false
+                    end
+                else
+                    -- Unknown bridge outcomes still require operator evidence.
+                    startupInterruptedPending = false
+                end
+            else
+                local ok, detail = self.reconcile({
+                    allowPreparing = phase == "preparing",
+                    allowInterruptedActive = allowActive,
+                })
+                if ok then
+                    -- Rebuild the active waiting batch so a legacy
+                    -- clientError is not retransmitted after the fault clears.
+                    if type(data.turn) == "table" and data.turn.phase == "waiting" then
+                        data.turn.batch = batchForTurn()
+                        save()
+                    end
+                    startupInterruptedPending = false
+                    store.event(
+                        "STARTUP_RECONCILED",
+                        "Stale interrupted turn was reconciled locally before master contact",
+                        { session = data.turn and data.turn.session, turn = data.turn and data.turn.turn }
+                    )
+                else
+                    fault(
+                        "TURN_INTERRUPTED",
+                        "Startup reconciliation failed: " .. tostring(detail)
+                    )
+                    startupInterruptedPending = false
+                end
+            end
         end
 
         -- A forced update/reboot can interrupt the program after the bridge
@@ -1238,8 +1296,16 @@ function M.new(config, store, io, matcher)
     function self.reconcile(options)
         local allowPreparing =
             type(options) == "table" and options.allowPreparing == true
+        local allowInterruptedActive =
+            type(options) == "table" and options.allowInterruptedActive == true
         if data.turn and data.turn.phase ~= "finished"
-            and not (allowPreparing and data.turn.phase == "preparing") then
+            and not (allowPreparing and data.turn.phase == "preparing")
+            and not (
+                allowInterruptedActive
+                and type(data.fault) == "table"
+                and data.fault.code == "TURN_INTERRUPTED"
+                and (data.turn.phase == "waiting" or data.turn.phase == "preparing")
+            ) then
             return false, "Wait for the master result to close the reserved turn before repairing"
         end
         local intent = data.intent
