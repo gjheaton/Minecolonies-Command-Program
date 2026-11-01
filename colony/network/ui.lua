@@ -1185,6 +1185,9 @@ function M.new(config, store, engine, io, updater, options)
             lines[#lines+1]={text="Update: "..info.status..(info.checked and (" @"..info.checked) or ""),color=info.color}
             lines[#lines+1]={text="Source: "..info.source,color=C.dim}
         end
+        if role()=="master" and not options.readOnly and snapshot.action then
+            lines[#lines+1]={text="Action: "..tostring(snapshot.action),color=C.accent,sticky=true}
+        end
         if self.edit then
             lines[#lines+1]={text="EDIT: "..tostring(self.edit.field.label or self.edit.field.key),color=C.title}
             lines[#lines+1]={text=self.edit.value.."_",color=C.text}
@@ -1196,20 +1199,32 @@ function M.new(config, store, engine, io, updater, options)
         local marker=table.concat(content,"\n")
         if marker==lastTerminal then return end
         lastTerminal=marker
-        local wrapped={}
+        local wrapped,sticky={},nil
         for _,line in ipairs(lines) do
-            for _,text in ipairs(Util.wrapText(line.text,math.max(1,width))) do wrapped[#wrapped+1]={text=text,color=line.color} end
+            local target=line.sticky and {} or wrapped
+            for _,text in ipairs(Util.wrapText(line.text,math.max(1,width))) do
+                target[#target+1]={text=text,color=line.color}
+            end
+            if line.sticky then sticky=target end
         end
-        -- Leave the last terminal row empty: print's trailing newline would
-        -- otherwise scroll the first fault off a 51 x 19 computer screen.
+        -- Leave the last terminal row empty for print's trailing newline.
+        -- When a live Action line exists, reserve the final visible row for it.
         local limit=math.max(0,height-1)
-        local truncated=#wrapped>limit
+        local stickyLine=sticky and sticky[#sticky] or nil
+        local bodyLimit=math.max(0,limit-(stickyLine and 1 or 0))
+        local truncated=#wrapped>bodyLimit
         SharedUI.resetTerminal(C.text,C.bg)
-        for index=1,math.min(#wrapped,truncated and math.max(0,limit-1) or limit) do
+        local shown=math.min(#wrapped,truncated and math.max(0,bodyLimit-1) or bodyLimit)
+        for index=1,shown do
             local line=wrapped[index]
             SharedUI.setTerminalColor(line.color);print(line.text)
         end
-        if truncated and limit>0 then SharedUI.setTerminalColor(C.warn);print(Util.clip("More current details: HEALTH",width)) end
+        if truncated and bodyLimit>0 then
+            SharedUI.setTerminalColor(C.warn);print(Util.clip("More current details: HEALTH",width))
+        end
+        if stickyLine and limit>0 then
+            SharedUI.setTerminalColor(stickyLine.color);print(Util.clip(stickyLine.text,width))
+        end
         SharedUI.setTerminalColor(C.text)
     end
 
