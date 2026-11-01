@@ -1353,6 +1353,26 @@ function M.new(config, store, io, matcher)
         cs.error = message.clientError and tostring(message.clientError) or nil
         cs.errorSource = cs.error and "client" or nil
         if message.authoritative ~= false then
+            -- Repair legacy collateral PRS_QUARANTINE errors. Older builds
+            -- marked every request in a colony as ERROR whenever any global
+            -- transfer quarantine existed. Active clipboard requests that do
+            -- not own the actual held transfer are safe to restore.
+            for id, record in pairs(cs.requests) do
+                local pending=state.pendingTransfer
+                local ownsHeld=pending
+                    and tostring(pending.colonyId)==tostring(colony.id)
+                    and tostring(pending.requestId)==tostring(id)
+                if active[id]
+                    and record.status=="error"
+                    and record.errorCode=="PRS_QUARANTINE"
+                    and not ownsHeld then
+                    record.status="requested"
+                    record.detail="Restored after unrelated transfer quarantine"
+                    record.errorCode=nil
+                    record.retryAt=nil
+                end
+            end
+
             for id, record in pairs(cs.requests) do
                 if not active[id] and record.status ~= "delivered" then
                     record.status, record.detail = "delivered", "Request no longer appears in MineColonies"
