@@ -4,6 +4,9 @@ local M = {}
 local function amount(value)
     return math.max(0, math.floor(tonumber(value) or 0))
 end
+local function yieldNow(io)
+    if io and type(io.wait)=="function" then io.wait(0) end
+end
 
 local MAX_RETURN_SELECTORS = 1024
 local function validFingerprint(value)
@@ -467,7 +470,10 @@ function M.new(config, store, io, matcher)
         local requests, err = io.requests()
         if type(requests) ~= "table" then return nil, err or "getRequests returned no authoritative snapshot" end
         local active, now = {}, io.now()
+        local scanned=0
         for _, request in pairs(requests) do
+            scanned=scanned+1
+            if scanned%16==0 then yieldNow(io) end
             if type(request) ~= "table" or request.id == nil then
                 return nil, "getRequests contains a request without a stable ID"
             end
@@ -475,7 +481,10 @@ function M.new(config, store, io, matcher)
             if id == "" or active[id] then return nil, "getRequests contains an invalid or duplicate request ID" end
             active[id] = request
         end
+        local updated=0
         for id, request in pairs(active) do
+            updated=updated+1
+            if updated%16==0 then yieldNow(io) end
             local record = data.requests[id]
             if not record or record.active == false then
                 -- IDs are expected to identify one MineColonies request. If an
@@ -766,6 +775,7 @@ function M.new(config, store, io, matcher)
         end)
         for _, shipment in ipairs(shipments) do
             if left <= 0 then break end
+            yieldNow(io)
             local items, err = chestSnapshot(config.deliveryChestName)
             if not items then
                 fault("DELIVERY_CHEST", "Cannot read the delivery chest", { error = err })
@@ -834,9 +844,18 @@ function M.new(config, store, io, matcher)
         end
         local left = amount(setting("maxReturnItemsPerTurn", 128))
         local entries = {}
-        for _, item in pairs(stock) do if type(item) == "table" and item.name then entries[#entries + 1] = item end end
+        local collected=0
+        for _, item in pairs(stock) do
+            collected=collected+1
+            if collected%64==0 then yieldNow(io) end
+            if type(item) == "table" and item.name then entries[#entries + 1] = item end
+        end
+        yieldNow(io)
         table.sort(entries, function(a, b) return matcher.itemIdentity(a) < matcher.itemIdentity(b) end)
+        local examined=0
         for _, item in ipairs(entries) do
+            examined=examined+1
+            if examined%32==0 then yieldNow(io) end
             if left <= 0 then break end
             local surplus = math.max(0, amount(item.amount or item.count) - keepCount(item))
             if surplus > 0 and not protects(item, active) then
@@ -864,7 +883,9 @@ function M.new(config, store, io, matcher)
 
     local function batchForTurn()
         if not clientError() and not data.intent then pruneReturnSelectors() end
+        yieldNow(io)
         drainDeliveries()
+        yieldNow(io)
         local active, err = readRequests()
         if not active then
             -- No activeIds is intentional: an unsuccessful scan must never
@@ -876,7 +897,9 @@ function M.new(config, store, io, matcher)
                 authoritative = false, returnSelectors = selectors,
             }
         end
+        yieldNow(io)
         stageOverflow(active)
+        yieldNow(io)
         local name = io.colonyName()
         data.colonyName = type(name) == "string" and name or data.colonyName
         local selectors = selectorsForBatch()
@@ -1057,7 +1080,9 @@ function M.new(config, store, io, matcher)
         -- Persist the reservation and the complete preparation input before
         -- touching either Ender Chest.
         if not save() then return false end
+        yieldNow(io)
         shipmentList(data.turn.deliveries)
+        yieldNow(io)
         data.turn.batch = batchForTurn()
         data.turn.phase = "waiting"
         data.turn.deliveries = nil
