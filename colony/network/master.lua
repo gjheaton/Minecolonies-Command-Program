@@ -2,7 +2,7 @@
 -- A turn is a durable chest handoff, not a timed lease: an overdue client may
 -- finish its drain, but the master will not export until that exact batch arrives.
 local Config = require("colony.network.config")
-local M = { MODULE_VERSION = "4.0.60" }
+local M = { MODULE_VERSION = "4.0.61" }
 
 local function integer(value)
     return math.max(0, math.floor(tonumber(value) or 0))
@@ -286,6 +286,12 @@ function M.new(config, store, io, matcher)
         end
         cs.requests = cs.requests or {}
         cs.shipments = cs.shipments or {}
+        -- Raw MineColonies request payloads are transient turn input, not
+        -- durable recovery state. Older builds duplicated them into every
+        -- request record and could grow the journal into megabytes.
+        for _, record in pairs(cs.requests) do
+            if type(record)=="table" then record.request=nil end
+        end
         return cs
     end
 
@@ -1429,7 +1435,7 @@ function M.new(config, store, io, matcher)
                 record.name = request.name or request.displayName or id
                 record.displayName = record.name
                 record.lastSeenAt = io.now()
-                record.request = copy(request)
+                record.request = nil
             end
         end
         if message.authoritative ~= false and cs.bootImported then
