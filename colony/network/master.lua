@@ -238,6 +238,45 @@ function M.new(config, store, io, matcher)
             .. "\nReported / chest change: " .. value(pending.reported) .. " / " .. value(pending.lastDelta)
     end
 
+    -- Migrate legacy confirmed-zero holds created by older builds.
+    -- A persisted bridge result of 0 together with a physical delta of 0
+    -- proves that no item moved, so it is safe to remove the global quarantine.
+    do
+        local pending=state.pendingTransfer
+        local fault=state.quarantine
+        local context=type(fault)=="table" and type(fault.context)=="table" and fault.context or nil
+        local reported=type(pending)=="table" and tonumber(pending.reported) or nil
+        local actual=type(pending)=="table" and tonumber(pending.lastDelta) or nil
+        if actual==nil and context then actual=tonumber(context.actual) end
+        local legacyZero=type(pending)=="table"
+            and type(fault)=="table"
+            and fault.code=="TRANSFER_VERIFY"
+            and reported==0
+            and (actual==0 or pending.definiteZero==true)
+        if legacyZero then
+            local cs=state.colonies[tostring(pending.colonyId)]
+            local record=cs and cs.requests and cs.requests[pending.requestId]
+            local retryDelay=math.max(10, tonumber(config.prsResetCooldownSeconds) or 120)
+            if record and record.status~="delivered" then
+                record.status="error"
+                record.detail=zeroTransferReason(pending).." Legacy global hold cleared on startup; request will retry after cooldown."
+                record.errorCode="PRS_ZERO"
+                record.retryAt=io.now()+retryDelay
+            end
+            store.event("LEGACY_ZERO_HOLD_CLEARED",
+                "Cleared persisted zero-move transfer quarantine during startup",{
+                    colonyId=pending.colonyId,
+                    requestId=pending.requestId,
+                    item=pending.item and pending.item.name,
+                    chest=pending.chest,
+                    retryDelay=retryDelay
+                })
+            state.pendingTransfer=nil
+            state.quarantine=nil
+            save()
+        end
+    end
+
     local function colonyState(colony)
         local key = tostring(colony.id)
         local cs = state.colonies[key]
