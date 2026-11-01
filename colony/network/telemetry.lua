@@ -295,35 +295,17 @@ function M.new(config, store, io, engine)
             or message.snapshot.role ~= "supply" then return reject("invalid telemetry", sender) end
         local id = tostring(tonumber(sender))
         local previous = caches[id]
-        retired[id] = retired[id] or { ids = {}, order = {} }
-        if retired[id].ids[message.bootId] then return reject("retired boot replay", sender) end
-        if previous then
-            if previous.bootId == message.bootId and message.sequence <= previous.sequence then
-                return reject("stale sequence", sender)
-            end
-            if previous.bootId ~= message.bootId then
-                -- Our boot IDs include epoch and persistent counter. The
-                -- epoch allows deliberate clean reinstalls to reset counters.
-                local _, incomingEpoch, incomingCounter = message.bootId:match("^(%d+):(%d+):(%d+)$")
-                local _, previousEpoch, previousCounter = previous.bootId:match("^(%d+):(%d+):(%d+)$")
-                if incomingEpoch and previousEpoch then
-                    incomingEpoch, previousEpoch = tonumber(incomingEpoch), tonumber(previousEpoch)
-                    incomingCounter, previousCounter = tonumber(incomingCounter), tonumber(previousCounter)
-                    if incomingEpoch < previousEpoch or incomingEpoch == previousEpoch and incomingCounter <= previousCounter then
-                        return reject("older boot replay", sender)
-                    end
-                elseif message.generatedAt <= previous.generatedAt then
-                    return reject("older boot replay", sender)
-                end
-            end
+
+        -- Telemetry is read-only and already restricted to configured computer
+        -- IDs. Keep replay handling simple: only reject duplicate/out-of-order
+        -- sequence numbers within the same boot. Any new boot identity is
+        -- accepted immediately, even after repeated updates/reboots.
+        if previous and previous.bootId == message.bootId
+            and message.sequence <= previous.sequence then
+            return reject("stale sequence", sender)
         end
+
         local view = compact(message.snapshot, config)
-        if previous and previous.bootId ~= message.bootId then
-            local history = retired[id]
-            history.ids[previous.bootId] = true
-            history.order[#history.order + 1] = previous.bootId
-            if #history.order > 32 then history.ids[table.remove(history.order, 1)] = nil end
-        end
         caches[id] = {
             snapshot = view, receivedAt = io.now(), generatedAt = message.generatedAt,
             bootId = message.bootId, sequence = message.sequence,
@@ -374,7 +356,6 @@ function M.new(config, store, io, engine)
         out.cachedColonies = 0
         for id in pairs(caches) do if route(id) then out.cachedColonies = out.cachedColonies + 1 end end
         out.retiredBoots = 0
-        for _, history in pairs(retired) do out.retiredBoots = out.retiredBoots + #history.order end
         return out
     end
 
