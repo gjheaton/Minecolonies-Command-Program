@@ -1,5 +1,5 @@
 -- MineColonies Control Suite Installer
--- Suite package version 4.1.2
+-- Suite package version 4.1.3
 -- Download this one file to install, update, or repair any suite role.
 -- A clean installation removes previous SUITE data after the entire package
 -- has been downloaded and validated. Updates and repairs preserve configuration; runtime state is volatile.
@@ -9,19 +9,20 @@ local mode, arg2, arg3 = ...
 -- Keep this literal before any access to globals: the shared updater evaluates
 -- --metadata in an empty environment without executing installation code.
 local SUITE_INFO = {
-    suiteVersion = "4.1.2", installerVersion = "4.1.2", installationSchema = 4,
+    suiteVersion = "4.1.3", installerVersion = "4.1.3", installationSchema = 4,
     apps = {
         master = { version = "4.1.2", program = "/colony_master.lua", displayName = "MineColonies Supply Master" },
         supply = { version = "4.1.0", program = "/colony_supply.lua", displayName = "MineColonies Colony Supply" },
         command = { version = "4.0.1", program = "/colony_command.lua", displayName = "MineColonies Command Center" },
     },
     components = {
-        startup = "1.1.0", installer = "4.1.2", util = "1.1.0", ui = "1.1.1",
-        version = "1.0.0", updater = "1.2.0", network = "4.1.2",
+        startup = "1.1.0", installer = "4.1.3", util = "1.1.0", ui = "1.1.1",
+        version = "1.0.0", updater = "1.2.0", network = "4.1.3",
     },
     files = {
         { path = "/install_colony.lua", app = "common", remote = "install_colony.lua" },
         { path = "/startup.lua", app = "common", remote = "startup.lua" },
+        { path = "/update.lua", app = "common", remote = "update.lua" },
         { path = "/colony/manifest.lua", app = "common", remote = "colony/manifest.lua" },
         { path = "/colony/lib/util.lua", app = "common", remote = "colony/lib/util.lua" },
         { path = "/colony/lib/ui.lua", app = "common", remote = "colony/lib/ui.lua" },
@@ -271,7 +272,7 @@ local function safeLivePath(path)
     if path == "/colony" or path:match("^/colony/") then return true end
     local root = path:gsub("%.bak$", ""):gsub("%.old$", ""):gsub("%.tmp$", ""):
         gsub("%.install_tmp$", ""):gsub("%.update_tmp$", "")
-    return root == INSTALLER_PATH or root == "/startup.lua" or root == "/colony_master.lua" or
+    return root == INSTALLER_PATH or root == "/startup.lua" or root == "/update.lua" or root == "/colony_master.lua" or
         root == "/colony_supply.lua" or root == "/colony_command.lua" or root == "/colony_supply_state.txt" or
         root == "/colony_supply.log" or root == "/colony_requests_debug.txt"
 end
