@@ -268,21 +268,25 @@ function M.new(config, store, io, matcher)
             return false, cs.error
         end
 
-        local retained = {}
+        -- Preserve only confirmed imported quantities.  Everything else in
+        -- the old request/turn state is transient and is rebuilt from the next
+        -- authoritative MineColonies snapshot.
+        local importedByRequest = {}
         for _, shipment in ipairs(cs.shipments or {}) do
             local imported = math.min(integer(shipment.count), integer(shipment.imported))
-            if imported > 0 then
-                local kept = copy(shipment)
-                kept.count = imported
-                kept.imported = imported
-                kept.remaining = 0
-                retained[#retained + 1] = kept
+            if imported > 0 and shipment.requestId ~= nil then
+                local id = tostring(shipment.requestId)
+                importedByRequest[id] = (importedByRequest[id] or 0) + imported
             end
         end
-        cs.shipments = retained
+
+        cs.shipments = {}
+        cs.requests = {}
+        cs.bootImported = importedByRequest
         cs.turn = nil
         cs.error = nil
         cs.errorSource = nil
+        cs.returnSelectors = {}
         cs.deliveryDrainLockedAck = false
         cs.deliveryDrainLockAckAt = nil
         cs.routeConfirmed = false
@@ -291,17 +295,6 @@ function M.new(config, store, io, matcher)
             and tostring(state.pendingTransfer.colonyId) == tostring(colony.id) then
             state.pendingTransfer = nil
             state.quarantine = nil
-        end
-
-        for _, record in pairs(cs.requests or {}) do
-            if record.status ~= "delivered"
-                and record.errorCode ~= "REQUEST_CHANGED"
-                and record.errorCode ~= "CRAFT_UNCERTAIN" then
-                record.status = "requested"
-                record.detail = "Startup staging reset; request will be reevaluated"
-                record.errorCode = nil
-                record.retryAt = nil
-            end
         end
 
         save()
@@ -1219,10 +1212,26 @@ function M.new(config, store, io, matcher)
                 local id, sig = tostring(request.id), signature(request, matcher)
                 local record = cs.requests[id]
                 if not record or record.status == "delivered" then
-                    record = {id=id, requestId=id, generation=record and integer(record.generation) + 1 or 1,
-                        createdAt=io.now(), requested=requestCount(request), shipped=0, imported=0,
-                        status="requested", detail="Received from colony", signature=sig}
+                    local bootImported = integer(cs.bootImported and cs.bootImported[id])
+                    record = {id=id, requestId=id, generation=1,
+                        createdAt=io.now(), requested=requestCount(request),
+                        shipped=bootImported, imported=bootImported,
+                        status=bootImported > 0 and "in progress" or "requested",
+                        detail=bootImported > 0
+                            and "Confirmed imported quantity retained across startup reset"
+                            or "Received from colony",
+                        signature=sig}
                     cs.requests[id] = record
+                    if bootImported > 0 then
+                        cs.shipments[#cs.shipments + 1] = {
+                            id="boot-"..tostring(state.shipmentCounter + 1),
+                            requestId=id,generation=1,item=copy(request.items[1] or {}),
+                            count=bootImported,imported=bootImported,verified=true,
+                            createdAt=io.now(),startupRetained=true,
+                        }
+                        state.shipmentCounter = state.shipmentCounter + 1
+                    end
+                    if cs.bootImported then cs.bootImported[id]=nil end
                 elseif record.signature ~= sig then
                     record.status, record.detail, record.errorCode = "error", "Active request identity changed; prior deliveries need reconciliation", "REQUEST_CHANGED"
                     errorEvent("REQUEST_CHANGED", record.detail, {colonyId=colony.id, requestId=id})
@@ -1240,6 +1249,12 @@ function M.new(config, store, io, matcher)
                 record.lastSeenAt = io.now()
                 record.request = copy(request)
             end
+        end
+        if message.authoritative ~= false and cs.bootImported then
+            for id in pairs(cs.bootImported) do
+                if not active[id] then cs.bootImported[id] = nil end
+            end
+            if next(cs.bootImported) == nil then cs.bootImported = nil end
         end
         turn.phase = "READY"
         save()
