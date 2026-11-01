@@ -2,7 +2,7 @@
 -- A turn is a durable chest handoff, not a timed lease: an overdue client may
 -- finish its drain, but the master will not export until that exact batch arrives.
 local Config = require("colony.network.config")
-local M = { MODULE_VERSION = "4.0.35" }
+local M = { MODULE_VERSION = "4.0.36" }
 
 local function integer(value)
     return math.max(0, math.floor(tonumber(value) or 0))
@@ -550,6 +550,9 @@ function M.new(config, store, io, matcher)
         if config.prsAutoResetEnabled~=true then
             return false,"automatic PRS reset disabled"
         end
+        if pending.resetRecoveryAttempted==true then
+            return false,"automatic PRS reset already had one guarded recovery attempt"
+        end
         if pending.resetPulseAt then
             return pending.resetPulseOK==true,tostring(pending.resetPulseDetail or "reset already attempted")
         end
@@ -563,6 +566,7 @@ function M.new(config, store, io, matcher)
             return false,"PRS reset cooldown "..tostring(math.ceil(cooldown-(now-state.lastPrsResetAt))).."s"
         end
 
+        pending.resetAttempts=integer(pending.resetAttempts)+1
         pending.resetPulseAt=now
         pending.resetReason=why
         save()
@@ -577,7 +581,7 @@ function M.new(config, store, io, matcher)
             state.lastPrsResetAt=io.now()
             pending.autoRecoveryAt=io.now()+(tonumber(config.prsResetRecoveryDelaySeconds) or 10)
             pending.nextAutoRecoveryAt=pending.autoRecoveryAt
-            store.event("PRS_DESYNC_RESET","Confirmed registry-name ghost item reset triggered",{
+            store.event("PRS_DESYNC_RESET","Confirmed PRS ghost item reset triggered",{
                 colonyId=pending.colonyId,item=pending.item and pending.item.name,
                 selectionMode=pending.selectionMode,detail=detail
             })
@@ -749,13 +753,29 @@ function M.new(config, store, io, matcher)
         if record then record.status, record.detail, record.errorCode = "error", reason, "PRS_QUARANTINE" end
 
         if pending.definiteZero then
-            local resetOK,resetDetail=maybeAutoResetPRS(pending)
-            if resetOK then
-                reason=reason.." Automatic PRS reset sent; guarded recovery will retry after settle."
+            if pending.recoveryProbe==true and pending.resetRecoveryAttempted==true then
+                local exhausted=" Automatic PRS reset completed, but the guarded retry also returned 0; automatic reset/retry stopped."
+                reason=reason..exhausted
                 if record then record.detail=reason end
-            elseif pending.resetPulseAt then
-                reason=reason.." PRS reset attempt failed: "..tostring(resetDetail)
-                if record then record.detail=reason end
+                if pending.resetExhaustedLogged~=true then
+                    pending.resetExhaustedLogged=true
+                    store.event("PRS_RESET_EXHAUSTED",
+                        "Guarded export remained unextractable after automatic PRS reset; no further automatic retries",{
+                            colonyId=pending.colonyId,
+                            item=pending.item and pending.item.name,
+                            selectionMode=pending.selectionMode,
+                            resetAttempts=integer(pending.resetAttempts)
+                        })
+                end
+            else
+                local resetOK,resetDetail=maybeAutoResetPRS(pending)
+                if resetOK then
+                    reason=reason.." Automatic PRS reset sent; guarded recovery will retry after settle."
+                    if record then record.detail=reason end
+                elseif pending.resetPulseAt then
+                    reason=reason.." PRS reset attempt failed: "..tostring(resetDetail)
+                    if record then record.detail=reason end
+                end
             end
         end
 
@@ -1601,9 +1621,28 @@ function M.new(config, store, io, matcher)
                 end
             end
             local item = copy(pending.item)
+            local resetContext={
+                resetPulseAt=pending.resetPulseAt,
+                resetPulseOK=pending.resetPulseOK,
+                resetPulseDetail=pending.resetPulseDetail,
+                resetReason=pending.resetReason,
+                resetAttempts=integer(pending.resetAttempts)
+            }
             state.lastRecoveryProbeAt = io.now()
             if not beginTransfer(pending.kind, colony, cs, item, candidate, variant, 1, pending.before, record, true, exportChest,exportStock) then
                 cs.turn=nil; save(); return false, "Recovery transfer could not establish its physical baseline"
+            end
+            -- A guarded retry belongs to the same reset episode. Preserve that
+            -- evidence on the replacement pending record so another zero result
+            -- cannot start an endless reset/retry cycle.
+            if state.pendingTransfer and resetContext.resetPulseAt then
+                state.pendingTransfer.resetPulseAt=resetContext.resetPulseAt
+                state.pendingTransfer.resetPulseOK=resetContext.resetPulseOK
+                state.pendingTransfer.resetPulseDetail=resetContext.resetPulseDetail
+                state.pendingTransfer.resetReason=resetContext.resetReason
+                state.pendingTransfer.resetAttempts=math.max(1,resetContext.resetAttempts)
+                state.pendingTransfer.resetRecoveryAttempted=true
+                save()
             end
             store.event("PRS_PROBE", "Explicit guarded recovery transfer started", {colonyId=colony.id, item=item.name, direction=pending.kind})
             return true, "Guarded recovery probe started; chest verification must succeed"
