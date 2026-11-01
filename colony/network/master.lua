@@ -1611,14 +1611,23 @@ function M.new(config, store, io, matcher)
         end
         if work then
             local colony, cs = work.colony, work.cs
-            if state.quarantine or cs.error or (cs.turn.batch and cs.turn.batch.clientError) then
+
+            -- A transfer quarantine is global flow-control only. It must never
+            -- paint every request in this colony as ERROR. The request that
+            -- caused the transfer fault is updated at the fault site itself.
+            if state.quarantine then
+                finishTurn(colony, cs)
+                return
+            end
+
+            if cs.error or (cs.turn.batch and cs.turn.batch.clientError) then
                 for _, request in ipairs(work.requests) do
                     local record = cs.requests[tostring(request.id)]
                     if record and record.status ~= "delivered" then
                         record.status, record.detail = "error", cs.error or cs.routeError
                             or (cs.turn.batch and cs.turn.batch.clientError)
-                            or (state.quarantine and currentTransferReason()) or "Colony transfer paused"
-                        record.errorCode = state.quarantine and "PRS_QUARANTINE" or "CLIENT"
+                            or "Colony transfer paused"
+                        record.errorCode = "CLIENT"
                     end
                 end
                 finishTurn(colony, cs)
