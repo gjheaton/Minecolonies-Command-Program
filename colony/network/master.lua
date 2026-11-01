@@ -337,7 +337,7 @@ function M.new(config, store, io, matcher)
     end
 
     local function totals(cs, record)
-        local shipped, imported = 0, 0
+        local shipped, imported = integer(record.bootImported), integer(record.bootImported)
         for _, shipment in ipairs(cs.shipments) do
             if shipment.requestId == record.id and shipment.generation == record.generation and shipment.verified then
                 shipped = shipped + integer(shipment.count)
@@ -1216,21 +1216,13 @@ function M.new(config, store, io, matcher)
                     record = {id=id, requestId=id, generation=1,
                         createdAt=io.now(), requested=requestCount(request),
                         shipped=bootImported, imported=bootImported,
+                        bootImported=bootImported,
                         status=bootImported > 0 and "in progress" or "requested",
                         detail=bootImported > 0
                             and "Confirmed imported quantity retained across startup reset"
                             or "Received from colony",
                         signature=sig}
                     cs.requests[id] = record
-                    if bootImported > 0 then
-                        cs.shipments[#cs.shipments + 1] = {
-                            id="boot-"..tostring(state.shipmentCounter + 1),
-                            requestId=id,generation=1,item=copy(request.items[1] or {}),
-                            count=bootImported,imported=bootImported,verified=true,
-                            createdAt=io.now(),startupRetained=true,
-                        }
-                        state.shipmentCounter = state.shipmentCounter + 1
-                    end
                     if cs.bootImported then cs.bootImported[id]=nil end
                 elseif record.signature ~= sig then
                     record.status, record.detail, record.errorCode = "error", "Active request identity changed; prior deliveries need reconciliation", "REQUEST_CHANGED"
