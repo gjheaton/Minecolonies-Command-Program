@@ -982,6 +982,12 @@ function M.new(config, store, io, matcher)
                 save()
                 return
             end
+            if next(chest) ~= nil then
+                record.status, record.detail = "requested",
+                    "Waiting for delivery chest to drain before staging the next shipment"
+                save()
+                return
+            end
             local capacity, capacityErr = io.capacity(colony.deliveryChest, chest, item, p.chestReserveSlots)
             if capacity == nil then
                 record.status, record.detail = "error", "Cannot establish chest capacity: " .. tostring(capacityErr)
