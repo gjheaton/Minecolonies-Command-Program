@@ -85,7 +85,7 @@ local function compact(source, config)
     end
     local function fields(target, raw, names)
         for _, name in ipairs(names) do
-            put(target, name, raw[name], (name == "detail" or name == "message" or name == "error") and 512 or 256)
+            put(target, name, raw[name], (name == "detail" or name == "message" or name == "error") and 192 or 128)
         end
     end
     local function attach(target, key, child)
@@ -153,7 +153,7 @@ local function compact(source, config)
         local list, raw = map(), entries(source[listName])
         local key = listName == "history" and "telemetryHistoryEntries" or "telemetryErrorEntries"
         local fallback = listName == "history" and 40 or 20
-        local maximum = listName == "history" and 200 or 100
+        local maximum = listName == "history" and 12 or 8
         local limit = math.max(1, math.min(maximum, integer(config[key], fallback)))
         for index = math.max(1, #raw - limit + 1), #raw do
             if remaining < 100 then break end
@@ -187,7 +187,7 @@ local function compact(source, config)
         if remaining < 50 then break end
         local raw = rawRequests[index]
         local row = map()
-        put(row, "id", text(raw.value.id or raw.value.requestId or raw.key, 128), 128)
+        put(row, "id", text(raw.value.id or raw.value.requestId or raw.key, 96), 96)
         fields(row, raw.value, REQUEST_FIELDS)
         if type(raw.value.item) == "table" then put(row, "item", raw.value.item.name)
         else put(row, "item", raw.value.item) end
@@ -258,6 +258,9 @@ function M.new(config, store, io, engine)
             counters.published = counters.published + 1
             counters.lastPublished = now
             counters.lastSendOk, counters.lastSendError = ok ~= false, err
+            if ok == false then
+                error("Telemetry send failed: " .. tostring(err or "unknown send failure"), 0)
+            end
             return
         end
         if config.role == "master" then
