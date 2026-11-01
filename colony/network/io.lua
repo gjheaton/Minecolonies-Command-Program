@@ -587,6 +587,23 @@ function M.new(config,store,matcher)
             end
         end
         if transient and found then return {name=variant.name},"transient-name" end
+
+        -- Legacy AP/RS on 1.20.1 accepts the CC:Tweaked NBT hash directly in
+        -- a name+nbt filter. This is especially important for an ordinary
+        -- no-NBT item when another same-registry stack DOES carry NBT:
+        -- name-only would be unsafe, while AP fingerprint matching can mutate
+        -- or lock the live RS stack. 418835... is CC:Tweaked's hash for an
+        -- empty CompoundTag and is already normalized by the matcher as no NBT.
+        local emptyNBTHash="41883520c3071f5f4a4a4613fb005e0c"
+        if type(candidate)=="table" and type(variant)=="table"
+            and not candidate.toolClass
+            and candidate.hasNBT~=true
+            and candidate.name==variant.name
+            and type(variant.nbt)=="string"
+            and variant.nbt:lower()==emptyNBTHash then
+            return {name=variant.name,nbt=variant.nbt},"empty-nbt-hash"
+        end
+
         return {fingerprint=variant.fingerprint},"fingerprint"
     end
     function self.exportPRS(candidate,variant,count,chest,route,items)
