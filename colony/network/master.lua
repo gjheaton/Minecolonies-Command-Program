@@ -2,7 +2,7 @@
 -- A turn is a durable chest handoff, not a timed lease: an overdue client may
 -- finish its drain, but the master will not export until that exact batch arrives.
 local Config = require("colony.network.config")
-local M = { MODULE_VERSION = "4.0.37" }
+local M = { MODULE_VERSION = "4.0.38" }
 
 local function integer(value)
     return math.max(0, math.floor(tonumber(value) or 0))
@@ -1512,6 +1512,7 @@ function M.new(config, store, io, matcher)
                         if candidate and not registrySafeVariant and type(io.exportSelection)=="function" then
                             local _,mode=io.exportSelection(candidate,entry,items)
                             if mode=="registry-name" or mode=="transient-name"
+                                or mode=="single-variant-name"
                                 or mode=="empty-nbt-hash" then
                                 registrySafeVariant=copy(entry)
                                 registrySafeMode=mode
