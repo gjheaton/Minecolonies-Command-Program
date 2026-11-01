@@ -970,7 +970,7 @@ function M.new(config, store, io, matcher)
                 error = message.error,
                 receivedAt = lastContact,
             }
-            if data.bootResetPending == true and message.startupResetAccepted == true then
+            if message.startupResetAccepted == true then
                 data.intent = nil
                 data.fault = nil
                 data.turn = nil
