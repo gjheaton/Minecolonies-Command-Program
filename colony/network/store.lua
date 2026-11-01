@@ -53,6 +53,21 @@ function M.new(path,config)
     end
     function self.save()
         if self.fault then error(self.fault,0) end
+
+        -- Persistence is for recovery state, not an unlimited log archive.
+        -- Keep these deliberately small so textutils.serialize cannot spend
+        -- long enough in one non-yielding call to trip CC:Tweaked's watchdog.
+        local history=self.data.history
+        if type(history)=="table" then
+            local limit=math.min(100, math.max(10, tonumber(config and config.maxHistoryEntries) or 100))
+            while #history>limit do table.remove(history,1) end
+        end
+        local errors=self.data.errors
+        if type(errors)=="table" then
+            local limit=math.min(25, math.max(5, tonumber(config and config.maxErrorEntries) or 25))
+            while #errors>limit do table.remove(errors,1) end
+        end
+
         local revision=(self.data.revision or 0)+1
         local pending={}; for key,value in pairs(self.data) do pending[key]=value end
         pending.schema=4; pending.revision=revision
