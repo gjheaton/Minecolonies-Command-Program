@@ -28,6 +28,28 @@ Test.case("colony drains only on next grant and completes only when MineColonies
     Test.equal(#c.engine.snapshot().requests,0)
 end)
 
+Test.case("legacy WAITING TURN_INTERRUPTED reconciles before first hello",function()
+    local w,c=S.clientFixture()
+    c.store.data.client.turn={
+        session="S",turn=1,phase="waiting",policy={},
+        batch={kind="batch",session="S",turn=1,requests={},imports={},
+            authoritative=false,clientError="Turn preparation was interrupted; transfers need reconciliation"}
+    }
+    c.store.data.client.fault={
+        code="TURN_INTERRUPTED",
+        message="Turn preparation was interrupted; transfers need reconciliation",
+        time=w.now
+    }
+    c.store.save();c.restart();w.sent={}
+    w.tick(2)
+    assert(c.store.data.client.fault==nil,"legacy waiting fault survived startup")
+    Test.equal(c.store.data.client.turn.phase,"waiting")
+    local hello=w.packet("hello",1);assert(hello,"startup did not contact master")
+    assert(hello.message.clientError==nil,"first hello retransmitted stale interrupted fault")
+    local batch=w.packet("batch",1);assert(batch,"waiting batch was not rebuilt/retransmitted")
+    assert(batch.message.clientError==nil,"rebuilt batch retained stale interrupted fault")
+end)
+
 Test.case("stale TURN_INTERRUPTED fault clears automatically after master closes the turn",function()
     local w,c=S.clientFixture()
     c.store.data.client.turn={session="S",turn=1,phase="finished",policy={}}
