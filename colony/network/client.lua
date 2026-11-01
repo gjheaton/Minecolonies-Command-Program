@@ -1125,19 +1125,33 @@ function M.new(config, store, io, matcher)
         -- ledger without repeating the mutation. Do this automatically once
         -- the master has closed the turn. Unknown bridge results remain held
         -- for explicit operator zero-movement confirmation.
-        if data.intent and data.fault and data.turn
+        if data.fault and data.turn
             and data.turn.phase=="finished"
             and now>=nextAutoReconcile then
             nextAutoReconcile=now+5
-            local reported=data.intent.reported
-            if type(reported)=="number"
-                and reported==amount(reported)
-                and reported<=amount(data.intent.count) then
+
+            local shouldReconcile = false
+            if data.intent then
+                local reported=data.intent.reported
+                shouldReconcile =
+                    type(reported)=="number"
+                    and reported==amount(reported)
+                    and reported<=amount(data.intent.count)
+            elseif data.fault.code=="TURN_INTERRUPTED" then
+                -- Legacy/current interrupted PREPARING turns can leave a
+                -- fault after the master has safely closed the reservation,
+                -- even when no bridge mutation was in flight.  At that point
+                -- reconcile() can prove all retained deliveries from the
+                -- physical chest ledger and clear the stale live fault.
+                shouldReconcile = true
+            end
+
+            if shouldReconcile then
                 local ok,detail=self.reconcile()
                 if ok then
                     store.event("AUTO_RECONCILED",
-                        "Interrupted colony chest transfer reconciled automatically",{
-                            kind=data.intent and data.intent.kind or nil,
+                        "Interrupted colony turn reconciled automatically",{
+                            kind=data.intent and data.intent.kind or "turn",
                             detail=detail
                         })
                 end
