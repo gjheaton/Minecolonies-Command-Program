@@ -56,8 +56,8 @@ if mode == "--help" then
     print("Usage: install_colony [option]")
     print("--install master|supply|command [sourceURL]")
     print("  Clean install; removes previous suite data.")
-    print("--update role [sourceURL]")
-    print("  Update installed role; preserve data.")
+    print("--update [role] [sourceURL]")
+    print("  Update installed role from /colony/app.cfg; optional role must match.")
     print("--repair [sourceURL]")
     print("  Refresh installed package; preserve data.")
     print("--recover  Resume interrupted installation.")
@@ -493,14 +493,39 @@ if mode == "--recover" then
 elseif mode == "--install" then
     return requireSuccess(install(arg2, arg3, true))
 elseif mode == "--update" then
-    return requireSuccess(install(arg2, arg3, false))
+    local recovered, err = recoverTransaction()
+    if not recovered then return requireSuccess(false, err) end
+    local cfg = readTable(CONFIG_PATH)
+    local installedRole = cfg and (cfg.app or cfg.role)
+    if not installedRole then
+        return requireSuccess(false,
+            "Cannot determine installed role from " .. CONFIG_PATH ..
+            ". Use --install for a new system.")
+    end
+
+    local role, source = installedRole, nil
+    if arg2 == "master" or arg2 == "supply" or arg2 == "command" then
+        if arg2 ~= installedRole then
+            return requireSuccess(false,
+                "Requested role '" .. tostring(arg2) ..
+                "' does not match installed role '" .. tostring(installedRole) .. "'.")
+        end
+        source = arg3
+    else
+        source = arg2
+        if arg3 ~= nil then
+            return requireSuccess(false,
+                "Usage: install_colony --update [role] [sourceURL]")
+        end
+    end
+    return requireSuccess(install(role, source, false))
 elseif mode == "--repair" then
     local recovered, err = recoverTransaction()
     if not recovered then return requireSuccess(false, err) end
     local cfg = readTable(CONFIG_PATH)
     return requireSuccess(install(cfg and cfg.app, arg2, false))
 elseif mode ~= nil then
-    error("Usage: install_colony [--install master|supply|command [sourceURL] | --update role [sourceURL] | --repair [sourceURL] | --recover | --help]", 0)
+    error("Usage: install_colony [--install master|supply|command [sourceURL] | --update [role] [sourceURL] | --repair [sourceURL] | --recover | --help]", 0)
 end
 
 local recovered, recoveryError = recoverTransaction()
