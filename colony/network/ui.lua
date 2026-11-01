@@ -1133,6 +1133,25 @@ function M.new(config, store, engine, io, updater, options)
                 text="Turn: "..tostring(turnId or "-").."  Phase: "..tostring(turnPhase or "idle"):upper(),
                 color=C.accent
             }
+
+            local pending=type(snapshot.pendingTransfer)=="table" and snapshot.pendingTransfer or nil
+            if pending then
+                local item=type(pending.item)=="table" and pending.item or {}
+                lines[#lines+1]={
+                    text="Item: "..tostring(item.displayName or item.name or "UNKNOWN")
+                        .." x"..tostring(pending.count or "?"),
+                    color=C.warn
+                }
+                lines[#lines+1]={
+                    text="To: "..tostring(pending.colonyLabel or pending.colonyName or pending.colonyId or "UNKNOWN")
+                        .." ["..tostring(pending.colonyId or "?").."]",
+                    color=C.warn
+                }
+                lines[#lines+1]={
+                    text="Chest: "..tostring(pending.chest or "UNKNOWN"),
+                    color=C.warn
+                }
+            end
         end
         local faults=healthRows()
         -- Held-transfer identity stays ahead of other diagnostics on a small
