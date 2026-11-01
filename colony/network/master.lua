@@ -195,7 +195,7 @@ function M.new(config, store, io, matcher)
 
     local function zeroTransferReason(pending)
         local operation = pending.kind == "export" and "export" or "import"
-        local reason = "PRS " .. operation .. " returned 0; chest unchanged. Transfer held."
+        local reason = "PRS " .. operation .. " returned 0; chest unchanged. No items moved."
         if pending.callError ~= nil and tostring(pending.callError) ~= "" then
             reason = reason .. " Bridge reason: " .. tostring(pending.callError)
         end
@@ -1562,6 +1562,18 @@ function M.new(config, store, io, matcher)
 
     function self.tick()
         local now = io.now()
+
+        -- A transfer quarantine is meaningful only while a live transfer
+        -- exists. Older recovery paths could clear pendingTransfer while
+        -- leaving TRANSFER_VERIFY behind, which globally stalled every colony.
+        -- Release that orphaned quarantine immediately.
+        if not state.pendingTransfer
+            and state.quarantine
+            and state.quarantine.code=="TRANSFER_VERIFY" then
+            clearQuarantine()
+            store.event("ORPHAN_TRANSFER_QUARANTINE_CLEARED",
+                "Cleared stale transfer quarantine with no live pending transfer",{})
+        end
 
         -- Older builds could retain a confirmed-zero transfer indefinitely.
         -- Since zero reported + zero physical delta means nothing moved, clear
