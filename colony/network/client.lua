@@ -762,7 +762,11 @@ function M.new(config, store, io, matcher)
 
     local function drainDeliveries()
         if clientError() or data.intent then return end
-        local left = amount(setting("maxImportsPerTurn", 256))
+
+        -- Incoming delivery chests are drained by a native Refined Storage
+        -- Importer. The Supply computer never mutates CRS for deliveries.
+        -- Because Master now stages only one shipment into an empty chest,
+        -- the physical decrease of that reserved item is the import receipt.
         local shipments = {}
         for _, shipment in pairs(data.shipments) do
             if shipment.verified == true and amount(shipment.imported) < shipment.count then
@@ -773,34 +777,51 @@ function M.new(config, store, io, matcher)
             if a.createdAt ~= b.createdAt then return a.createdAt < b.createdAt end
             return a.id < b.id
         end)
-        for _, shipment in ipairs(shipments) do
-            if left <= 0 then break end
-            yieldNow(io)
-            local items, err = chestSnapshot(config.deliveryChestName)
-            if not items then
-                fault("DELIVERY_CHEST", "Cannot read the delivery chest", { error = err })
-                return
-            end
-            local available = amount(io.count(items, shipment.item))
-            if available == 0 then
-                -- Absence is not proof of import: somebody may have removed it.
-                fault("DELIVERY_MISSING", "A verified delivery is missing from its reserved chest", {
-                    shipmentId = shipment.id, requestId = shipment.requestId, item = shipment.item.name,
-                    chest = config.deliveryChestName, expected = shipment.count - amount(shipment.imported), observed = available,
-                })
-                return
-            end
-            local count = math.min(left, amount(setting("maxTransferChunk", 64)), available,
-                shipment.count - amount(shipment.imported))
-            if count > 0 then
-                local moved, transferError = transfer("import", shipment, shipment.item, count, config.deliveryChestName)
-                if moved == nil then
-                    if not clientError() then fault("COLONY_IMPORT", transferError or "Colony import failed", { shipmentId = shipment.id }) end
-                    return
-                end
-                left = left - moved
-            end
+
+        if #shipments == 0 then return end
+        if #shipments > 1 then
+            fault("DELIVERY_LEDGER",
+                "More than one unimported shipment is reserved for a single-buffer delivery chest",
+                { count = #shipments })
+            return
         end
+
+        local shipment = shipments[1]
+        yieldNow(io)
+        local items, err = chestSnapshot(config.deliveryChestName)
+        if not items then
+            fault("DELIVERY_CHEST", "Cannot read the delivery chest", { error = err })
+            return
+        end
+
+        local remaining = math.max(0, amount(shipment.count) - amount(shipment.imported))
+        local observed = amount(io.count(items, shipment.item))
+        if observed > remaining then
+            fault("DELIVERY_CHEST",
+                "Delivery chest contains more of the reserved item than the shipment ledger allows",
+                {
+                    shipmentId = shipment.id, requestId = shipment.requestId,
+                    item = shipment.item.name, expected = remaining, observed = observed,
+                })
+            return
+        end
+
+        local importedNow = remaining - observed
+        if importedNow <= 0 then return end
+
+        shipment.imported = amount(shipment.imported) + importedNow
+        if not save() then
+            shipment.imported = shipment.imported - importedNow
+            return
+        end
+
+        store.event("IMPORTED",
+            "Native RS Importer drained verified delivery from staging chest",
+            {
+                shipmentId = shipment.id, requestId = shipment.requestId,
+                item = shipment.item.name, count = importedNow,
+                chest = config.deliveryChestName,
+            })
     end
 
     local function protects(item, active)
