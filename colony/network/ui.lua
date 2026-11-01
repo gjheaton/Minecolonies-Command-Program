@@ -1133,6 +1133,10 @@ function M.new(config, store, engine, io, updater, options)
                 text="Turn: "..tostring(turnId or "-").."  Phase: "..tostring(turnPhase or "idle"):upper(),
                 color=C.accent
             }
+            lines[#lines+1]={
+                text="Colony: "..tostring(turn and (turn.colonyLabel or turn.colonyName or turn.colonyId) or "None"),
+                color=C.title
+            }
 
             local pending=type(snapshot.pendingTransfer)=="table" and snapshot.pendingTransfer or nil
             if pending then
