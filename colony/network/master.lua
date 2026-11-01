@@ -1253,13 +1253,13 @@ function M.new(config, store, io, matcher)
         cs.lastSeen = io.now()
         local kind = message.kind or message.type
         if kind == "hello" or kind == "heartbeat" then
+            local resetAccepted = false
             if kind == "hello" then
                 local confirmed = channel(message.deliveryChannel) ~= ""
                     and channel(message.deliveryChannel) == channel(colony.deliveryChannel)
                     and channel(message.returnChannel) ~= ""
                     and channel(message.returnChannel) == channel(colony.returnChannel)
 
-                local resetAccepted = false
                 local needsReset =
                     bootResetPending[tostring(colony.id)] == true
                     or message.startupReset == true
@@ -1280,14 +1280,14 @@ function M.new(config, store, io, matcher)
                     end
                 end
 
-                cs.routeConfirmed = confirmed and cs.routeError == nil
                 if not confirmed then
                     local detail = "Colony color labels disagree with configured delivery/return routes"
                     if cs.routeError ~= detail then errorEvent("CHANNEL_MISMATCH", detail, {colonyId=colony.id}) end
                     cs.routeError = detail
-                else
+                elseif resetAccepted or not needsReset then
                     cs.routeError = nil
                 end
+                cs.routeConfirmed = confirmed and cs.routeError == nil
                 if confirmed and type(message.deliveryDrainLocked)=="boolean" then
                     cs.deliveryDrainLockedAck = message.deliveryDrainLocked
                     cs.deliveryDrainLockAckAt = io.now()
