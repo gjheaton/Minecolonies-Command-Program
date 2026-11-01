@@ -809,19 +809,36 @@ function M.new(config, store, io, matcher)
 
         if pending.definiteZero then
             if pending.recoveryProbe==true and pending.resetRecoveryAttempted==true then
-                local exhausted=" Automatic PRS reset completed, but the guarded retry also returned 0; automatic reset/retry stopped."
+                local retryDelay=math.max(10, tonumber(config.prsResetCooldownSeconds) or 120)
+                local exhausted=" Automatic PRS reset completed, but the guarded retry also returned 0. This request will retry after the PRS reset cooldown; other requests may continue."
                 reason=reason..exhausted
-                if record then record.detail=reason end
                 if pending.resetExhaustedLogged~=true then
                     pending.resetExhaustedLogged=true
                     store.event("PRS_RESET_EXHAUSTED",
-                        "Guarded export remained unextractable after automatic PRS reset; no further automatic retries",{
+                        "Guarded export remained unextractable after automatic PRS reset; releasing global hold and cooling down only this request",{
                             colonyId=pending.colonyId,
                             item=pending.item and pending.item.name,
                             selectionMode=pending.selectionMode,
-                            resetAttempts=integer(pending.resetAttempts)
+                            resetAttempts=integer(pending.resetAttempts),
+                            retryDelay=retryDelay
                         })
                 end
+
+                -- Two explicit zero results plus an unchanged chest prove that
+                -- no inventory moved. There is no ambiguity left to justify a
+                -- global quarantine. Release the transfer and cool down only
+                -- the affected request so unrelated supply work can continue.
+                state.pendingTransfer=nil
+                state.quarantine=nil
+                if record then
+                    record.status="error"
+                    record.detail=reason
+                    record.errorCode="PRS_ZERO_RETRY"
+                    record.retryAt=io.now()+retryDelay
+                end
+                if cs and cs.turn and cs.turn.phase=="RECOVERY" then cs.turn=nil end
+                save()
+                return false
             else
                 local resetOK,resetDetail=maybeAutoResetPRS(pending)
                 if resetOK then
@@ -1264,7 +1281,8 @@ function M.new(config, store, io, matcher)
                 else
                     record.requested = math.max(integer(record.requested), requestCount(request))
                     if record.status == "error" and record.retryAt and io.now() >= record.retryAt then
-                        record.status, record.detail, record.retryAt = "requested", "Retrying safe inventory inspection", nil
+                        record.status, record.detail, record.retryAt, record.errorCode =
+                            "requested", "Retrying safe inventory inspection", nil, nil
                     end
                     if record.errorCode == "CLIENT" then
                         record.status, record.detail, record.errorCode = "requested", "Colony reports a healthy handoff", nil
