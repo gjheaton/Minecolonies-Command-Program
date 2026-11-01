@@ -2,7 +2,7 @@
 -- A turn is a durable chest handoff, not a timed lease: an overdue client may
 -- finish its drain, but the master will not export until that exact batch arrives.
 local Config = require("colony.network.config")
-local M = { MODULE_VERSION = "4.0.36" }
+local M = { MODULE_VERSION = "4.0.37" }
 
 local function integer(value)
     return math.max(0, math.floor(tonumber(value) or 0))
@@ -454,7 +454,8 @@ function M.new(config, store, io, matcher)
                 and integer(entry.amount or entry.count)>0
                 and type(io.exportSelection)=="function" then
                 local _,mode=io.exportSelection(pending.candidate,entry,items)
-                if mode=="registry-name" or mode=="transient-name" or mode=="single-variant-name" then
+                if mode=="registry-name" or mode=="transient-name" or mode=="single-variant-name"
+                    or mode=="empty-nbt-hash" then
                     return true,mode
                 end
             end
@@ -483,7 +484,7 @@ function M.new(config, store, io, matcher)
         local mode=tostring(pending.selectionMode or "")
         local wanted=tostring(pending.item and pending.item.name or "")
 
-        if mode=="fingerprint" then
+        if mode=="fingerprint" or mode=="empty-nbt-hash" then
             local fingerprint=pending.item and pending.item.fingerprint
                 or pending.variant and pending.variant.fingerprint
             local failedNBT=matcher.canonicalNBT(
@@ -1510,7 +1511,8 @@ function M.new(config, store, io, matcher)
                         -- is exactly what may have produced the zero export.
                         if candidate and not registrySafeVariant and type(io.exportSelection)=="function" then
                             local _,mode=io.exportSelection(candidate,entry,items)
-                            if mode=="registry-name" or mode=="transient-name" then
+                            if mode=="registry-name" or mode=="transient-name"
+                                or mode=="empty-nbt-hash" then
                                 registrySafeVariant=copy(entry)
                                 registrySafeMode=mode
                             end
