@@ -10,7 +10,7 @@ return {
     },
     apps = {
         master = { version = "4.0.38", program = "/colony_master.lua" },
-        supply = { version = "4.0.32", program = "/colony_supply.lua" },
+        supply = { version = "4.0.33", program = "/colony_supply.lua" },
         command = { version = "4.0.1", program = "/colony_command.lua" },
     },
     files = {
