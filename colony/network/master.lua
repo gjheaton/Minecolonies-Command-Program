@@ -330,6 +330,15 @@ function M.new(config, store, io, matcher)
         cs.deliveryDrainLockAckAt = nil
         cs.routeConfirmed = false
 
+        -- If this colony owned the currently active in-memory work item,
+        -- discard that work as part of the staging reset. Otherwise the master
+        -- can remain stuck forever in PROCESS after cs.turn is cleared.
+        if work
+            and work.colony
+            and tostring(work.colony.id) == tostring(colony.id) then
+            work = nil
+        end
+
         if state.pendingTransfer
             and tostring(state.pendingTransfer.colonyId) == tostring(colony.id) then
             state.pendingTransfer = nil
