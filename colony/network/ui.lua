@@ -1121,6 +1121,18 @@ function M.new(config, store, engine, io, updater, options)
             if health.ok~=false and snapshot.statusMessage then
                 lines[#lines+1]={text="Supply: "..textOf(snapshot.statusMessage),color=C.good}
             end
+        elseif role()=="master" and not options.readOnly then
+            local turn=type(snapshot.currentTurn)=="table" and snapshot.currentTurn or nil
+            local turnId=turn and (turn.turn or turn.id or turn.label) or nil
+            local turnPhase=turn and turn.phase or "idle"
+            lines[#lines+1]={
+                text="Master",
+                color=C.title
+            }
+            lines[#lines+1]={
+                text="Turn: "..tostring(turnId or "-").."  Phase: "..tostring(turnPhase or "idle"):upper(),
+                color=C.accent
+            }
         end
         local faults=healthRows()
         -- Held-transfer identity stays ahead of other diagnostics on a small
