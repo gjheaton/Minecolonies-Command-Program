@@ -1257,6 +1257,27 @@ function M.new(config, store, io, matcher)
                     record.status, record.detail = "delivered", "Request no longer appears in MineColonies"
                     record.completedAt, record.completedTurn = io.now(), turn.id
                     store.event("REQUEST_DELIVERED", record.detail, {colonyId=colony.id, requestId=id})
+
+                    -- A confirmed-zero held transfer owns no physical item.
+                    -- If the authoritative MineColonies snapshot says the
+                    -- originating request is gone, discard that stale hold
+                    -- immediately instead of letting it outlive the request.
+                    local pending=state.pendingTransfer
+                    if pending
+                        and tostring(pending.colonyId)==tostring(colony.id)
+                        and tostring(pending.requestId)==tostring(id)
+                        and pending.reported==0
+                        and (pending.lastDelta==0 or pending.definiteZero==true) then
+                        store.event("STALE_ZERO_HOLD_CLEARED",
+                            "Cleared zero-move transfer hold because MineColonies request disappeared",{
+                                colonyId=colony.id,
+                                requestId=id,
+                                item=pending.item and pending.item.name,
+                                chest=pending.chest
+                            })
+                        state.pendingTransfer=nil
+                        state.quarantine=nil
+                    end
                 end
             end
             for _, request in ipairs(message.requests) do
