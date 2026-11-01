@@ -134,6 +134,10 @@ function M.new(config, store, io, matcher)
     local session = "master-" .. tostring(state.sessionCounter)
     local work = nil
     local nextTurnAt = io.now()
+    local bootResetPending = {}
+    for _, colony in ipairs(config.colonies or {}) do
+        bootResetPending[tostring(colony.id)] = true
+    end
     local defaultPolicy = {
         pollIntervalSeconds=1, colonyResponseTimeoutSeconds=30,
         batchRetrySeconds=5, messageTimeoutSeconds=30,
@@ -248,6 +252,62 @@ function M.new(config, store, io, matcher)
 
     local function errorEvent(code, message, context)
         store.error(code, message, context)
+    end
+
+    local function resetColonyStaging(colony, cs, reason)
+        local ok, detail = io.reclaimChest("master", colony.deliveryChest, colony)
+        if not ok then
+            cs.error = "Startup delivery-chest reclaim failed: " .. tostring(detail)
+            cs.errorSource = "master"
+            errorEvent("BOOT_RECLAIM", cs.error, {
+                colonyId = colony.id,
+                chest = colony.deliveryChest,
+                reason = reason,
+            })
+            save()
+            return false, cs.error
+        end
+
+        local retained = {}
+        for _, shipment in ipairs(cs.shipments or {}) do
+            local imported = math.min(integer(shipment.count), integer(shipment.imported))
+            if imported > 0 then
+                local kept = copy(shipment)
+                kept.count = imported
+                kept.imported = imported
+                kept.remaining = 0
+                retained[#retained + 1] = kept
+            end
+        end
+        cs.shipments = retained
+        cs.turn = nil
+        cs.error = nil
+        cs.errorSource = nil
+        cs.deliveryDrainLockedAck = false
+        cs.deliveryDrainLockAckAt = nil
+        cs.routeConfirmed = false
+
+        if state.pendingTransfer
+            and tostring(state.pendingTransfer.colonyId) == tostring(colony.id) then
+            state.pendingTransfer = nil
+            state.quarantine = nil
+        end
+
+        for _, record in pairs(cs.requests or {}) do
+            if record.status ~= "delivered"
+                and (record.errorCode == "CLIENT"
+                    or record.errorCode == "PRS_QUARANTINE") then
+                record.status = "requested"
+                record.detail = "Startup staging reset; request will be reevaluated"
+                record.errorCode = nil
+            end
+        end
+
+        save()
+        store.event("BOOT_RESET",
+            "Delivery staging chest reclaimed to PRS; unimported shipment staging discarded",
+            { colonyId = colony.id, chest = colony.deliveryChest, reason = reason })
+        return true, detail
     end
 
     local function quarantine(code, message, context)
@@ -1198,7 +1258,29 @@ function M.new(config, store, io, matcher)
                     and channel(message.deliveryChannel) == channel(colony.deliveryChannel)
                     and channel(message.returnChannel) ~= ""
                     and channel(message.returnChannel) == channel(colony.returnChannel)
-                cs.routeConfirmed = confirmed
+
+                local resetAccepted = false
+                local needsReset =
+                    bootResetPending[tostring(colony.id)] == true
+                    or message.startupReset == true
+                if confirmed and needsReset then
+                    local resetOK, resetDetail =
+                        resetColonyStaging(
+                            colony,
+                            cs,
+                            message.startupReset == true
+                                and "supply startup request"
+                                or "master startup"
+                        )
+                    if resetOK then
+                        bootResetPending[tostring(colony.id)] = false
+                        resetAccepted = true
+                    else
+                        cs.routeError = tostring(resetDetail)
+                    end
+                end
+
+                cs.routeConfirmed = confirmed and cs.routeError == nil
                 if not confirmed then
                     local detail = "Colony color labels disagree with configured delivery/return routes"
                     if cs.routeError ~= detail then errorEvent("CHANNEL_MISMATCH", detail, {colonyId=colony.id}) end
@@ -1211,7 +1293,7 @@ function M.new(config, store, io, matcher)
                     cs.deliveryDrainLockAckAt = io.now()
                 end
 
-                if confirmed and type(message.imports)=="table" then
+                if confirmed and not resetAccepted and type(message.imports)=="table" then
                     local imported,importError=acknowledgeImports(cs,message.imports)
                     if not imported then
                         cs.error="Heartbeat import receipt rejected: "..tostring(importError)
@@ -1220,7 +1302,8 @@ function M.new(config, store, io, matcher)
                     end
                 end
 
-                if confirmed and (message.clientError == nil or type(message.clientError) == "string") then
+                if confirmed and not resetAccepted
+                    and (message.clientError == nil or type(message.clientError) == "string") then
                     -- Connection messages report the current colony fault even
                     -- while paused. Never release a master-detected hold here.
                     -- Older journals lack provenance: migrate only these exact
@@ -1246,8 +1329,13 @@ function M.new(config, store, io, matcher)
                 end
                 io.send(colony.id, {kind="hello_ack", routeConfirmed=cs.routeConfirmed == true,
                     automationEnabled=config.automationEnabled ~= false,
-                    deliveryDrainLocked=drainLocked, error=cs.routeError})
-                if not cs.routeConfirmed then return true end
+                    deliveryDrainLocked=drainLocked,
+                    startupResetAccepted=resetAccepted,
+                    error=cs.routeError})
+                if not cs.routeConfirmed
+                    or bootResetPending[tostring(colony.id)] == true then
+                    return true
+                end
             end
             if cs.turn and (cs.turn.phase == "RESULT" or (cs.turn.phase == "WAIT_BATCH" and checkRoutes(colony, cs))) then sendTurn(colony, cs) end
             return true
@@ -1725,18 +1813,10 @@ function M.new(config, store, io, matcher)
             stats={active=#requests, crafting=#crafts, colonies=#colonies}}
     end
 
-    -- Preserve old in-flight turn sessions across reboot. Changing their ID
-    -- strands a client still legally draining its previous grant.
+    -- Every colony route is reset on its first post-boot hello.  Until that
+    -- handshake completes, no old turn or staging state is allowed to resume.
     for _, cs in pairs(state.colonies) do
         cs.routeConfirmed = false
-        if cs.turn and cs.turn.phase == "PROCESS" then cs.turn.phase = "READY" end
-        -- RECOVERY is a Master-internal reservation only; the client never
-        -- receives it. If the Master restarts while a held transfer still
-        -- exists, retaining this marker can deadlock explicit reconciliation.
-        if cs.turn and cs.turn.phase == "RECOVERY" then cs.turn = nil end
-    end
-    if state.pendingTransfer and state.pendingTransfer.intent then
-        state.pendingTransfer.reported = nil
     end
     save()
     return self
