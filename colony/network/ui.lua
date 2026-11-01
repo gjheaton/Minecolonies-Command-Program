@@ -1139,22 +1139,34 @@ function M.new(config, store, engine, io, updater, options)
             }
 
             local pending=type(snapshot.pendingTransfer)=="table" and snapshot.pendingTransfer or nil
-            if pending then
-                local item=type(pending.item)=="table" and pending.item or {}
+            local quarantine=type(snapshot.quarantine)=="table" and snapshot.quarantine or nil
+            local qctx=quarantine and type(quarantine.context)=="table" and quarantine.context or nil
+            local transferInfo=pending or qctx
+            if transferInfo then
+                local item=type(transferInfo.item)=="table" and transferInfo.item or {}
+                local itemName=item.displayName or item.name or transferInfo.displayName or transferInfo.item or "UNKNOWN"
+                local qty=transferInfo.count or transferInfo.expected or "?"
+                local colonyId=transferInfo.colonyId
+                local colonyLabel=transferInfo.colonyLabel or transferInfo.colonyName
                 lines[#lines+1]={
-                    text="Item: "..tostring(item.displayName or item.name or "UNKNOWN")
-                        .." x"..tostring(pending.count or "?"),
+                    text="Item: "..tostring(itemName).." x"..tostring(qty),
                     color=C.warn
                 }
                 lines[#lines+1]={
-                    text="To: "..tostring(pending.colonyLabel or pending.colonyName or pending.colonyId or "UNKNOWN")
-                        .." ["..tostring(pending.colonyId or "?").."]",
+                    text="To: "..tostring(colonyLabel or colonyId or "UNKNOWN")
+                        ..(colonyId and (" ["..tostring(colonyId).."]") or ""),
                     color=C.warn
                 }
                 lines[#lines+1]={
-                    text="Chest: "..tostring(pending.chest or "UNKNOWN"),
+                    text="Chest: "..tostring(transferInfo.chest or "UNKNOWN"),
                     color=C.warn
                 }
+                if quarantine and quarantine.message then
+                    lines[#lines+1]={
+                        text="Hold: "..tostring(quarantine.message),
+                        color=C.danger
+                    }
+                end
             end
         end
         local faults=healthRows()
