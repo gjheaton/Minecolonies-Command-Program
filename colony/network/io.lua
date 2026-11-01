@@ -623,6 +623,59 @@ function M.new(config,store,matcher)
         local filter,err=importFilter(item,chest,false); if not filter then return nil,err end
         return move("supply",true,filter,count,chest)
     end
+
+    -- Boot cleanup deliberately ignores shipment selectors and imports the
+    -- exact physical stack by chest slot.  Transfer chests are staging only;
+    -- the side that originally staged a chest may always reclaim its contents
+    -- back into its own RS network before normal automation starts.
+    function self.reclaimChest(role,chest,route)
+        if role~="master" and role~="supply" then
+            return false,"Invalid reclaim role"
+        end
+        if type(chest)~="string" or chest=="" then
+            return false,"Reclaim chest is not configured"
+        end
+
+        local passes=0
+        while passes<4 do
+            passes=passes+1
+            local items,err=self.snapshot(chest)
+            if not items then return false,"Cannot inspect reclaim chest: "..tostring(err) end
+            if next(items)==nil then return true,"chest empty" end
+
+            local slots={}
+            for slot,entry in pairs(items) do
+                if whole(slot,1) and type(entry)=="table"
+                    and type(entry.name)=="string" and entry.name~=""
+                    and whole(entry.count,1) and entry.count>0 then
+                    slots[#slots+1]=slot
+                else
+                    return false,"Reclaim chest contains an invalid inventory entry"
+                end
+            end
+            table.sort(slots)
+
+            local progress=0
+            for _,slot in ipairs(slots) do
+                local entry=items[slot]
+                local filter={name=entry.name,fromSlot=slot-1}
+                local moved,moveErr=move(role,false,filter,entry.count,chest,route)
+                if moved==nil then
+                    return false,"Reclaim failed for slot "..tostring(slot)..": "..tostring(moveErr)
+                end
+                if moved<1 then
+                    return false,"Reclaim moved 0 from slot "..tostring(slot).." ("..tostring(entry.name)..")"
+                end
+                progress=progress+moved
+            end
+            if progress<=0 then return false,"Reclaim made no progress" end
+        end
+
+        local remaining,err=self.snapshot(chest)
+        if not remaining then return false,"Cannot verify reclaim chest: "..tostring(err) end
+        if next(remaining)~=nil then return false,"Reclaim chest is still occupied after cleanup" end
+        return true,"chest reclaimed"
+    end
     function self.craftable(candidate)
         local rs,err=bridge("master"); if not rs then return nil,err end
         local lastError,readable
