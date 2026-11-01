@@ -1592,9 +1592,33 @@ function M.new(config, store, io, matcher)
                 cs.turn = nil
                 save()
             end
-            if not colony or not cs or cs.turn then
-                return false, "Wait for the colony to acknowledge the paused result before a recovery probe"
+            if not colony or not cs then
+                return false, "Held colony route is unavailable for recovery"
             end
+
+            -- A bridge result of exactly zero plus an unchanged delivery chest
+            -- proves that this export moved nothing. The retained turn therefore
+            -- owns no physical handoff and must not block recovery forever if
+            -- the colony never acknowledges its paused/result message.
+            if cs.turn then
+                local sameHeldTurn =
+                    tostring(cs.turn.session)==tostring(pending.session)
+                    and tostring(cs.turn.id)==tostring(pending.turn)
+                if sameHeldTurn then
+                    store.event("ZERO_EXPORT_TURN_RELEASED",
+                        "Released retained colony turn after confirmed zero PRS export",{
+                            colonyId=pending.colonyId,
+                            turn=pending.turn,
+                            phase=cs.turn.phase,
+                            item=pending.item and pending.item.name
+                        })
+                    cs.turn=nil
+                    save()
+                else
+                    return false, "Another colony turn is active; zero-export recovery cannot take ownership yet"
+                end
+            end
+
             if not checkRoutes(colony, cs) then return false, cs.routeError end
             if pending.kind=="export" and deliveryDrainLockedFor(colony)
                 and cs.deliveryDrainLockedAck~=true then
