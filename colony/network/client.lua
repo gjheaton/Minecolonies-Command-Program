@@ -1351,15 +1351,37 @@ function M.new(config, store, io, matcher)
             return false, "Cannot inspect the delivery chest: " .. tostring(err)
         end
         local outstanding = {}
-        for _, delivery in pairs(data.shipments) do
+        for id, delivery in pairs(data.shipments) do
             local key = matcher.itemIdentity(delivery.item)
-            outstanding[key] = outstanding[key] or { item = delivery.item, count = 0 }
-            outstanding[key].count = outstanding[key].count + math.max(0, delivery.count - amount(delivery.imported))
+            local row = outstanding[key]
+            if not row then
+                row = {
+                    item = delivery.item,
+                    count = 0,
+                    shipments = {},
+                    requests = {},
+                }
+                outstanding[key] = row
+            end
+            local remaining =
+                math.max(0, amount(delivery.count) - amount(delivery.imported))
+            row.count = row.count + remaining
+            if remaining > 0 then
+                row.shipments[#row.shipments + 1] = tostring(delivery.id or id)
+                row.requests[#row.requests + 1] = tostring(delivery.requestId or "?")
+            end
         end
         for _, required in pairs(outstanding) do
-            if amount(io.count(items, required.item)) < required.count then
+            local observed = amount(io.count(items, required.item))
+            if observed < required.count then
                 if shipment then shipment.imported = oldImported end
-                return false, "A verified shipment is still missing; restore or manually reconcile it before repairing"
+                return false,
+                    "Verified delivery missing from chest: item=" ..
+                    tostring(required.item and required.item.name or "?") ..
+                    " expected=" .. tostring(required.count) ..
+                    " observed=" .. tostring(observed) ..
+                    " shipment=" .. table.concat(required.shipments, ",") ..
+                    " request=" .. table.concat(required.requests, ",")
             end
         end
         local selectorKey, previousSelector
