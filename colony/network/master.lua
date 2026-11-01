@@ -1847,7 +1847,30 @@ function M.new(config, store, io, matcher)
             or work and "Processing colony " .. tostring(work.colony.id)
             or #colonies == 0 and "Configure colony routes in Settings"
             or "Polling colonies; dedicated PRS owner"
+        local currentTurn
+        if work and work.cs and work.cs.turn then
+            currentTurn={
+                colonyId=work.colony and work.colony.id,
+                colonyLabel=work.colony and (work.colony.label or work.cs.colonyName or tostring(work.colony.id)),
+                turn=work.cs.turn.id,
+                phase=work.cs.turn.phase,
+            }
+        else
+            for _, colony in ipairs(config.colonies or {}) do
+                local cs=state.colonies[tostring(colony.id)]
+                if cs and cs.turn then
+                    currentTurn={
+                        colonyId=colony.id,
+                        colonyLabel=colony.label or cs.colonyName or tostring(colony.id),
+                        turn=cs.turn.id,
+                        phase=cs.turn.phase,
+                    }
+                    break
+                end
+            end
+        end
         return {role="master", statusMessage=status, requests=requests, colonies=colonies,
+            currentTurn=currentTurn,
             crafts=crafts, quarantine=copy(state.quarantine), pendingTransfer=copy(state.pendingTransfer),
             history=d.history or {}, errors=d.errors or {},
             health={{label="Dedicated PRS owner", ok=true, detail="Only this computer calls the player RS Bridge"},
