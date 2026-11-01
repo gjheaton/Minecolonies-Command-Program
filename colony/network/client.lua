@@ -438,7 +438,7 @@ function M.new(config, store, io, matcher)
                 current.id = id
                 current.requestId = tostring(shipment.requestId)
                 current.count = amount(shipment.count)
-                current.imported = 0
+                current.imported = math.min(current.count, amount(shipment.imported))
                 current.createdAt = tonumber(shipment.createdAt) or io.now()
                 data.shipments[id] = current
             end
@@ -959,15 +959,34 @@ function M.new(config, store, io, matcher)
         if message.kind == "hello_ack" then
             if type(message.routeConfirmed) ~= "boolean" or type(message.automationEnabled) ~= "boolean"
                 or (message.deliveryDrainLocked ~= nil and type(message.deliveryDrainLocked) ~= "boolean")
+                or (message.startupResetAccepted ~= nil and type(message.startupResetAccepted) ~= "boolean")
                 or message.error ~= nil and (type(message.error) ~= "string" or #message.error > 512) then return false end
             lastContact = io.now()
             masterConnection = {
                 routeConfirmed = message.routeConfirmed,
                 automationEnabled = message.automationEnabled,
                 deliveryDrainLocked = message.deliveryDrainLocked == true,
+                startupResetAccepted = message.startupResetAccepted == true,
                 error = message.error,
                 receivedAt = lastContact,
             }
+            if data.bootResetPending == true and message.startupResetAccepted == true then
+                data.intent = nil
+                data.fault = nil
+                data.turn = nil
+                data.session = nil
+                data.seenTurns = {}
+                data.highestTurn = nil
+                data.shipments = {}
+                data.returnSelectors = {}
+                data.bootResetPending = false
+                startupPreparationPending = false
+                startupInterruptedPending = false
+                if save() then
+                    store.event("BOOT_RESET",
+                        "Startup staging reset completed; fresh turns may resume")
+                end
+            end
             return true
         end
         local session = message.session and tostring(message.session)
@@ -1114,6 +1133,23 @@ function M.new(config, store, io, matcher)
     function self.tick()
         local now = io.now()
 
+        if data.bootResetPending == true then
+            if now >= nextHello then
+                send({
+                    kind = "hello", role = "supply", colonyName = data.colonyName,
+                    deliveryChestName = config.deliveryChestName,
+                    returnChestName = config.returnChestName,
+                    deliveryChannel = config.deliveryChannel,
+                    returnChannel = config.returnChannel,
+                    startupReset = true,
+                    clientError = clientError(),
+                    imports = imports(),
+                })
+                nextHello = now + math.max(0.1, tonumber(setting("helloSeconds", 5)) or 5)
+            end
+            return
+        end
+
         -- Local startup reconciliation always runs before the first hello.
         -- Older clients persisted an interrupted preparation as WAITING plus
         -- TURN_INTERRUPTED, so key recovery off the durable fault as well as
@@ -1231,6 +1267,7 @@ function M.new(config, store, io, matcher)
             send({ kind = "hello", role = "supply", colonyName = data.colonyName,
                 deliveryChestName = config.deliveryChestName, returnChestName = config.returnChestName,
                 deliveryChannel = config.deliveryChannel, returnChannel = config.returnChannel,
+                startupReset = false,
                 clientError = clientError(), session = data.turn and data.turn.session,
                 turn = data.turn and data.turn.turn,
                 imports = imports(),
@@ -1438,6 +1475,22 @@ function M.new(config, store, io, matcher)
             settings = store.data.settings or config, turn = copy(data.turn), intent = copy(data.intent),
             masterId = config.masterId, lastContact = lastContact,
         }
+    end
+
+    do
+        local ok, detail = io.reclaimChest("supply", config.returnChestName)
+        if ok then
+            data.bootResetPending = true
+            save()
+            store.event("BOOT_RECLAIM",
+                "Return staging chest reclaimed to CRS before master contact",
+                { chest = config.returnChestName, detail = detail })
+        else
+            data.bootResetPending = false
+            fault("BOOT_RECLAIM",
+                "Startup return-chest reclaim failed: " .. tostring(detail),
+                { chest = config.returnChestName })
+        end
     end
 
     return self
