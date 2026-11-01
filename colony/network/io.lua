@@ -588,20 +588,34 @@ function M.new(config,store,matcher)
         end
         if transient and found then return {name=variant.name},"transient-name" end
 
-        -- Legacy AP/RS on 1.20.1 accepts the CC:Tweaked NBT hash directly in
-        -- a name+nbt filter. This is especially important for an ordinary
-        -- no-NBT item when another same-registry stack DOES carry NBT:
-        -- name-only would be unsafe, while AP fingerprint matching can mutate
-        -- or lock the live RS stack. 418835... is CC:Tweaked's hash for an
-        -- empty CompoundTag and is already normalized by the matcher as no NBT.
+        -- Legacy AP/RS on 1.20.1 accepts the CC:Tweaked empty-CompoundTag
+        -- hash directly in a name+nbt filter. Prefer this over AP fingerprints
+        -- whenever the requested variant is a normal no-NBT item but another
+        -- same-registry NBT variant exists. Fingerprint predicates on this AP/RS
+        -- stack can mutate/cache the live RS stack and have repeatedly returned
+        -- false zeroes for otherwise valid stock.
         local emptyNBTHash="41883520c3071f5f4a4a4613fb005e0c"
-        if type(candidate)=="table" and type(variant)=="table"
+        local plainSelected=type(candidate)=="table" and type(variant)=="table"
             and not candidate.toolClass
             and candidate.hasNBT~=true
             and candidate.name==variant.name
-            and type(variant.nbt)=="string"
-            and variant.nbt:lower()==emptyNBTHash then
-            return {name=variant.name,nbt=variant.nbt},"empty-nbt-hash"
+            and matcher.canonicalNBT(variant.nbt)==""
+        local mixedSameName=false
+        if plainSelected and type(items)=="table" then
+            for _,entry in pairs(items) do
+                if type(entry)=="table" and entry.name==variant.name
+                    and whole(entry.amount,0) and entry.amount>0
+                    and matcher.canonicalNBT(entry.nbt)~="" then
+                    mixedSameName=true
+                    break
+                end
+            end
+        end
+        if plainSelected and (
+            mixedSameName
+            or type(variant.nbt)=="string" and variant.nbt:lower()==emptyNBTHash
+        ) then
+            return {name=variant.name,nbt=emptyNBTHash},"empty-nbt-hash"
         end
 
         return {fingerprint=variant.fingerprint},"fingerprint"
