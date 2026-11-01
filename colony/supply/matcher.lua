@@ -425,9 +425,11 @@ function M.new(config, store)
         local out = {}
         local seen = {}
         local class = requestToolClass(request)
+        local stats = {checked=0,rejected=0,duplicates=0,reasons={}}
 
         for _, item in pairs(type(request) == "table" and type(request.items) == "table" and request.items or {}) do
             if type(item) == "table" and type(item.name) == "string" and item.name ~= "" then
+                stats.checked=stats.checked+1
                 local candidate = {
                     name = item.name,
                     displayName = item.displayName or item.name,
@@ -456,12 +458,38 @@ function M.new(config, store)
                     seen[candidate.identity] = true
                     out[#out + 1] = candidate
                 elseif candidate.rejected then
-                    store.log("MATCH reject request=" .. tostring(request.id or "?") ..
-                        " item=" .. tostring(candidate.name) .. " reason=" .. candidate.rejected)
+                    stats.rejected=stats.rejected+1
+                    stats.reasons[candidate.rejected]=(stats.reasons[candidate.rejected] or 0)+1
+                else
+                    stats.duplicates=stats.duplicates+1
                 end
             end
         end
-        return out, class
+        return out, class, stats
+    end
+
+    local function logMatchSummary(request, candidates, stats, selected, outcome)
+        stats=type(stats)=="table" and stats or {checked=0,rejected=0,duplicates=0,reasons={}}
+        local accepted=type(candidates)=="table" and #candidates or 0
+        local parts={
+            "MATCH request="..tostring(request and request.id or "?"),
+            "checked="..tostring(stats.checked or 0),
+            "accepted="..tostring(accepted),
+            "rejected="..tostring(stats.rejected or 0),
+        }
+        if (stats.duplicates or 0)>0 then parts[#parts+1]="duplicates="..tostring(stats.duplicates) end
+        if selected then
+            parts[#parts+1]="selected="..tostring(selected.displayName or selected.name or "UNKNOWN")
+            parts[#parts+1]="stock="..tostring(selected.stock or 0)
+            if selected.craftable then parts[#parts+1]="craftable=true" end
+        else
+            parts[#parts+1]="result="..tostring(outcome or "no acceptable candidate")
+        end
+        local reasons={}
+        for reason,count in pairs(stats.reasons or {}) do reasons[#reasons+1]=reason.." x"..tostring(count) end
+        table.sort(reasons)
+        if #reasons>0 then parts[#parts+1]="rejects=["..table.concat(reasons,", ").."]" end
+        store.log(table.concat(parts," "))
     end
 
     function self.findStoredVariants(bridge, candidate, safeCall)
@@ -574,8 +602,9 @@ function M.new(config, store)
     end
 
     function self.chooseFromSnapshot(request, inventoryItems, craftableLookup, remaining)
-        local candidates, class = self.requestCandidates(request)
+        local candidates, class, stats = self.requestCandidates(request)
         if #candidates == 0 then
+            logMatchSummary(request,candidates,stats,nil,"no acceptable candidates")
             return nil, class, "no acceptable candidates"
         end
 
@@ -649,12 +678,14 @@ function M.new(config, store)
             return a.identity < b.identity
         end)
 
+        logMatchSummary(request,candidates,stats,candidates[1],nil)
         return candidates[1], class, nil
     end
 
     function self.choose(request, playerBridge, safeCall, remaining)
-        local candidates, class = self.requestCandidates(request)
+        local candidates, class, stats = self.requestCandidates(request)
         if #candidates == 0 then
+            logMatchSummary(request,candidates,stats,nil,"no acceptable candidates")
             return nil, class, "no acceptable candidates"
         end
 
@@ -678,6 +709,7 @@ function M.new(config, store)
             return a.identity < b.identity
         end)
 
+        logMatchSummary(request,candidates,stats,candidates[1],nil)
         return candidates[1], class, nil
     end
 
