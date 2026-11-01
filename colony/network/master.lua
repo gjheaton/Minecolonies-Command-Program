@@ -2,7 +2,7 @@
 -- A turn is a durable chest handoff, not a timed lease: an overdue client may
 -- finish its drain, but the master will not export until that exact batch arrives.
 local Config = require("colony.network.config")
-local M = { MODULE_VERSION = "4.1.1" }
+local M = { MODULE_VERSION = "4.1.2" }
 
 local function integer(value)
     return math.max(0, math.floor(tonumber(value) or 0))
@@ -525,11 +525,28 @@ function M.new(config, store, io, matcher)
 
     local function stock()
         local items, err = io.stock()
-        if type(items) ~= "table" then
-            quarantine("PRS_READ", "Cannot read PRS inventory: " .. tostring(err), {})
+        if type(items) == "table" then
+            if state.prsReconnectUntil then
+                store.event("PRS_RECONNECTED","PRS inventory became readable after automatic reset",{})
+            end
+            state.prsReconnectUntil=nil
+            state.prsReconnectDetail=nil
+            if state.quarantine and state.quarantine.code=="PRS_READ" then
+                clearQuarantine()
+            end
+            return items
+        end
+
+        local now=io.now()
+        if state.prsReconnectUntil and now<state.prsReconnectUntil then
+            state.prsReconnectDetail="Waiting for PRS reconnect: "..tostring(err or "not connected")
             return nil
         end
-        return items
+
+        state.prsReconnectUntil=nil
+        state.prsReconnectDetail=nil
+        quarantine("PRS_READ", "Cannot read PRS inventory: " .. tostring(err), {})
+        return nil
     end
 
     local function stockCount(items, item)
@@ -688,8 +705,14 @@ function M.new(config, store, io, matcher)
         pending.resetPulseDetail=tostring(detail or "")
         if ok then
             state.lastPrsResetAt=io.now()
-            pending.autoRecoveryAt=io.now()+(tonumber(config.prsResetRecoveryDelaySeconds) or 10)
+            local recoveryDelay=math.max(2,tonumber(config.prsResetRecoveryDelaySeconds) or 10)
+            pending.autoRecoveryAt=io.now()+recoveryDelay
             pending.nextAutoRecoveryAt=pending.autoRecoveryAt
+            -- The RS network can legitimately disappear for several seconds
+            -- after the reset pulse. During this bounded window a failed stock
+            -- read is a reconnect wait, not a transfer-integrity fault.
+            state.prsReconnectUntil=io.now()+recoveryDelay
+            state.prsReconnectDetail="Waiting for PRS bridge after automatic reset"
             store.event("PRS_DESYNC_RESET","Confirmed PRS ghost item reset triggered",{
                 colonyId=pending.colonyId,item=pending.item and pending.item.name,
                 selectionMode=pending.selectionMode,detail=detail
@@ -1675,6 +1698,11 @@ function M.new(config, store, io, matcher)
                 end
             end
         end
+        if state.prsReconnectUntil then
+            local items=stock()
+            if not items then return end
+        end
+
         if work then
             local colony, cs = work.colony, work.cs
 
@@ -2114,7 +2142,10 @@ function M.new(config, store, io, matcher)
         end
 
         local action
-        if state.quarantine and state.pendingTransfer then
+        if state.prsReconnectUntil then
+            local remaining=math.max(0,math.ceil(state.prsReconnectUntil-io.now()))
+            action="Waiting for PRS to reconnect ("..tostring(remaining).."s)"
+        elseif state.quarantine and state.pendingTransfer then
             local pending=state.pendingTransfer
             action="Held: "..transferItemLabel(pending).." x"..tostring(pending.count or "?")
         elseif state.pendingTransfer then
