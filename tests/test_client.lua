@@ -28,6 +28,15 @@ Test.case("colony drains only on next grant and completes only when MineColonies
     Test.equal(#c.engine.snapshot().requests,0)
 end)
 
+Test.case("stale TURN_INTERRUPTED fault clears automatically after master closes the turn",function()
+    local w,c=S.clientFixture()
+    c.store.data.client.turn={session="S",turn=1,phase="finished",policy={}}
+    c.store.data.client.fault={code="TURN_INTERRUPTED",message="Turn preparation was interrupted; transfers need reconciliation",time=w.now}
+    c.store.save();c.restart()
+    w.tick(2)
+    assert(c.store.data.client.fault==nil,"stale interrupted-turn fault survived automatic reconciliation")
+end)
+
 Test.case("restart reconstructs an interrupted preparing turn before first master hello",function()
     local w,c=S.clientFixture();local delivery=shipment()
     w.insert(w.channels.D2,{name="minecraft:stone"},4)
