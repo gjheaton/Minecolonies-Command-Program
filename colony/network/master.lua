@@ -1911,9 +1911,13 @@ function M.new(config, store, io, matcher)
                 end
             end
         end
+        local pendingSnapshot=copy(state.pendingTransfer)
+        if type(pendingSnapshot)=="table" then
+            pendingSnapshot.colonyLabel=transferColonyLabel(pendingSnapshot)
+        end
         return {role="master", statusMessage=status, requests=requests, colonies=colonies,
             currentTurn=currentTurn,
-            crafts=crafts, quarantine=copy(state.quarantine), pendingTransfer=copy(state.pendingTransfer),
+            crafts=crafts, quarantine=copy(state.quarantine), pendingTransfer=pendingSnapshot,
             history=d.history or {}, errors=d.errors or {},
             health={{label="Dedicated PRS owner", ok=true, detail="Only this computer calls the player RS Bridge"},
                 {label="Transfer integrity", ok=state.quarantine == nil, detail=transferFaultDetail()}},
