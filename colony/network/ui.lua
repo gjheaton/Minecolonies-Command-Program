@@ -1111,6 +1111,10 @@ function M.new(config, store, engine, io, updater, options)
             local turnId=type(turn)=="table" and (turn.turn or turn.id or turn.label) or nil
             local turnPhase=type(turn)=="table" and turn.phase or snapshot.status
             lines[#lines+1]={
+                text="Colony: "..tostring(snapshot.colonyName or "Unknown"),
+                color=C.title
+            }
+            lines[#lines+1]={
                 text="Turn: "..tostring(turnId or "-").."  Phase: "..tostring(turnPhase or "waiting"):upper(),
                 color=C.accent
             }
