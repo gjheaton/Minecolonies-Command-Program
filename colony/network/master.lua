@@ -798,16 +798,47 @@ function M.new(config, store, io, matcher)
         if pending.reported == 0 and delta == 0 then
             pending.definiteZero = true
         end
+
+        local cs = state.colonies[tostring(pending.colonyId)]
+        local record = cs and cs.requests[pending.requestId]
+
+        -- A bridge result of exactly zero together with an unchanged chest is
+        -- not an uncertain transfer: it proves that nothing moved. Keep this
+        -- failure request-local instead of globally quarantining all supply.
+        if pending.definiteZero then
+            local retryDelay=math.max(10, tonumber(config.prsResetCooldownSeconds) or 120)
+            if record then
+                record.status="error"
+                record.detail=reason.." No items moved; this request will retry after cooldown."
+                record.errorCode="PRS_ZERO"
+                record.retryAt=io.now()+retryDelay
+            end
+            store.event("PRS_ZERO_EXPORT",
+                "PRS export moved zero items; request cooled down without global quarantine",{
+                    colonyId=pending.colonyId,
+                    colonyLabel=transferColonyLabel(pending),
+                    requestId=pending.requestId,
+                    item=pending.item and pending.item.name,
+                    count=pending.count,
+                    chest=pending.chest,
+                    retryDelay=retryDelay
+                })
+            state.pendingTransfer=nil
+            if state.quarantine and state.quarantine.code=="TRANSFER_VERIFY" then
+                state.quarantine=nil
+            end
+            save()
+            return false
+        end
+
         quarantine("TRANSFER_VERIFY", reason, {colonyId=pending.colonyId,
             colonyLabel=transferColonyLabel(pending), chest=pending.chest,
             requestId=pending.requestId, item=pending.item.name, displayName=pending.item.displayName,
             expected=pending.count,
             reported=pending.reported, actual=delta, error=err, callError=pending.callError,selectionMode=pending.selectionMode})
-        local cs = state.colonies[tostring(pending.colonyId)]
-        local record = cs and cs.requests[pending.requestId]
         if record then record.status, record.detail, record.errorCode = "error", reason, "PRS_QUARANTINE" end
 
-        if pending.definiteZero then
+        if false and pending.definiteZero then
             if pending.recoveryProbe==true and pending.resetRecoveryAttempted==true then
                 local retryDelay=math.max(10, tonumber(config.prsResetCooldownSeconds) or 120)
                 local exhausted=" Automatic PRS reset completed, but the guarded retry also returned 0. This request will retry after the PRS reset cooldown; other requests may continue."
