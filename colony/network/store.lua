@@ -16,6 +16,51 @@ local function timestamp()
     end
     return 0
 end
+local function yieldingSerialize(value)
+    local chunks, active, steps = {}, {}, 0
+
+    local function emit(text)
+        chunks[#chunks + 1] = text
+        steps = steps + 1
+        if steps >= 200 then
+            steps = 0
+            sleep(0)
+        end
+    end
+
+    local function primitive(v)
+        local kind = type(v)
+        if kind == "string" or kind == "number" or kind == "boolean" then
+            return textutils.serialize(v, {compact=true})
+        end
+        if kind == "nil" then return "nil" end
+        error("Unsupported persistent value type: " .. kind, 0)
+    end
+
+    local function encode(v)
+        if type(v) ~= "table" then
+            emit(primitive(v))
+            return
+        end
+        if active[v] then error("Cyclic persistent journal data", 0) end
+        active[v] = true
+        emit("{")
+        local first = true
+        for key, item in pairs(v) do
+            if not first then emit(",") end
+            first = false
+            emit("[")
+            encode(key)
+            emit("]=")
+            encode(item)
+        end
+        emit("}")
+        active[v] = nil
+    end
+
+    encode(value)
+    return table.concat(chunks)
+end
 local function checkSpace(target,source,directory)
     local free=fs.getFreeSpace(target)
     if free=="unlimited" then return end
@@ -75,7 +120,7 @@ function M.new(path,config)
         local ok,err=pcall(function()
             -- CC:Tweaked stores shared tables by value with this option, while
             -- still rejecting cycles. Serialize before touching either slot.
-            local source=textutils.serialize(pending,{compact=true,allow_repetitions=true})
+            local source=yieldingSerialize(pending)
             assert(type(source)=="string","Persistent journal serialization returned no text")
             local directory=fs.getDir(path)
             checkSpace(target,source,directory)
