@@ -845,54 +845,41 @@ function M.new(config, store, io, matcher)
         -- not an uncertain transfer: it proves that nothing moved. Keep this
         -- failure request-local instead of globally quarantining all supply.
         if pending.definiteZero then
-            -- Zero + unchanged chest proves nothing moved, so this never needs
-            -- a global quarantine. But if the requested item is still visible
-            -- through the PRS bridge, treat it as a likely PRS desync and run
-            -- one guarded reset/retry before cooling down the request.
+            -- Zero + unchanged chest proves nothing moved. There is therefore
+            -- no transfer state to reconcile and no reason to retain a global
+            -- pendingTransfer. Optionally pulse PRS recovery, then release the
+            -- transfer immediately and retry only this request after cooldown.
             local resetOK,resetWhy=maybeAutoResetPRS(pending)
+            local retryDelay
             if resetOK then
-                if record then
-                    record.status="in_progress"
-                    record.detail=reason.." Automatic PRS reset sent; guarded retry scheduled."
-                    record.errorCode=nil
-                    record.retryAt=nil
-                end
-                store.event("PRS_ZERO_RECOVERY",
-                    "Confirmed zero export; automatic PRS reset scheduled before one guarded retry",{
+                retryDelay=math.max(10, tonumber(config.prsResetRecoveryDelaySeconds) or 10)
+            else
+                retryDelay=math.max(10, tonumber(config.prsResetCooldownSeconds) or 120)
+            end
+
+            if record then
+                record.status="error"
+                record.detail=reason.." No items moved. "
+                    ..(resetOK and "PRS reset sent; " or ("PRS reset not started: "..tostring(resetWhy).."; "))
+                    .."this request will retry after cooldown."
+                record.errorCode="PRS_ZERO"
+                record.retryAt=io.now()+retryDelay
+            end
+
+            store.event(resetOK and "PRS_ZERO_RECOVERY" or "PRS_ZERO_EXPORT",
+                resetOK
+                    and "Confirmed zero export; PRS reset sent and request released for timed retry"
+                    or "PRS export moved zero items; request released for timed retry",{
                         colonyId=pending.colonyId,
                         colonyLabel=transferColonyLabel(pending),
                         requestId=pending.requestId,
                         item=pending.item and pending.item.name,
                         count=pending.count,
                         chest=pending.chest,
-                        detail=resetWhy
+                        resetReason=resetWhy,
+                        retryDelay=retryDelay
                     })
-                if state.quarantine and state.quarantine.code=="TRANSFER_VERIFY" then
-                    state.quarantine=nil
-                end
-                save()
-                return false
-            end
 
-            local retryDelay=math.max(10, tonumber(config.prsResetCooldownSeconds) or 120)
-            if record then
-                record.status="error"
-                record.detail=reason.." No items moved. PRS reset not started: "..tostring(resetWhy)..
-                    ". This request will retry after cooldown."
-                record.errorCode="PRS_ZERO"
-                record.retryAt=io.now()+retryDelay
-            end
-            store.event("PRS_ZERO_EXPORT",
-                "PRS export moved zero items; request cooled down without global quarantine",{
-                    colonyId=pending.colonyId,
-                    colonyLabel=transferColonyLabel(pending),
-                    requestId=pending.requestId,
-                    item=pending.item and pending.item.name,
-                    count=pending.count,
-                    chest=pending.chest,
-                    resetReason=resetWhy,
-                    retryDelay=retryDelay
-                })
             state.pendingTransfer=nil
             if state.quarantine and state.quarantine.code=="TRANSFER_VERIFY" then
                 state.quarantine=nil
@@ -1575,6 +1562,38 @@ function M.new(config, store, io, matcher)
 
     function self.tick()
         local now = io.now()
+
+        -- Older builds could retain a confirmed-zero transfer indefinitely.
+        -- Since zero reported + zero physical delta means nothing moved, clear
+        -- that stale live transfer before doing any other work.
+        if state.pendingTransfer
+            and state.pendingTransfer.reported==0
+            and (state.pendingTransfer.lastDelta==0 or state.pendingTransfer.definiteZero==true) then
+            local stale=state.pendingTransfer
+            local cs=state.colonies[tostring(stale.colonyId)]
+            local record=cs and cs.requests and cs.requests[stale.requestId]
+            local retryDelay=math.max(10, tonumber(config.prsResetCooldownSeconds) or 120)
+            if record and record.status~="delivered" then
+                record.status="error"
+                record.detail="Recovered retained zero-move transfer; request will retry after cooldown."
+                record.errorCode="PRS_ZERO"
+                record.retryAt=io.now()+retryDelay
+            end
+            store.event("RETAINED_ZERO_RELEASED",
+                "Released retained zero-move transfer so unrelated requests can continue",{
+                    colonyId=stale.colonyId,
+                    requestId=stale.requestId,
+                    item=stale.item and stale.item.name,
+                    chest=stale.chest,
+                    retryDelay=retryDelay
+                })
+            state.pendingTransfer=nil
+            if state.quarantine and state.quarantine.code=="TRANSFER_VERIFY" then
+                state.quarantine=nil
+            end
+            save()
+        end
+
         if state.pendingTransfer then
             verifyPending(false)
             if state.pendingTransfer and not state.pendingTransfer.uncertain then return end
