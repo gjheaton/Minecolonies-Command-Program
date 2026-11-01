@@ -295,11 +295,12 @@ function M.new(config, store, io, matcher)
 
         for _, record in pairs(cs.requests or {}) do
             if record.status ~= "delivered"
-                and (record.errorCode == "CLIENT"
-                    or record.errorCode == "PRS_QUARANTINE") then
+                and record.errorCode ~= "REQUEST_CHANGED"
+                and record.errorCode ~= "CRAFT_UNCERTAIN" then
                 record.status = "requested"
                 record.detail = "Startup staging reset; request will be reevaluated"
                 record.errorCode = nil
+                record.retryAt = nil
             end
         end
 
