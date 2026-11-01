@@ -342,6 +342,22 @@ function M.new(config, store, io, matcher)
     data.retiredSessions = type(data.retiredSessions) == "table" and data.retiredSessions or {}
     data.seenTurns = type(data.seenTurns) == "table" and data.seenTurns or {}
     data.cursor = amount(data.cursor)
+    -- Migrate older journals away from persisted raw request/response blobs.
+    for _, record in pairs(data.requests) do
+        if type(record)=="table" then
+            record.raw=nil
+            if type(record.master)=="table" then
+                record.master={
+                    status=record.master.status,
+                    detail=record.master.detail or record.master.message,
+                    shipped=amount(record.master.shipped),
+                    imported=amount(record.master.imported),
+                    requested=amount(record.master.requested),
+                    updatedAt=record.master.updatedAt,
+                }
+            end
+        end
+    end
     local nextHello, nextRetry, nextAutoReconcile = 0, 0, 0
     local lastContact
     local masterConnection
@@ -498,8 +514,7 @@ function M.new(config, store, io, matcher)
                 data.requests[id] = record
             end
             record.active = true
-            record.raw = copy(request)
-            record.raw.id = id
+            record.raw = nil
             record.count = requestCount(request)
             record.totalCount = math.max(amount(record.totalCount), record.count)
             record.name = tostring(request.name or request.displayName or id)
@@ -539,7 +554,8 @@ function M.new(config, store, io, matcher)
         for offset = 1, limit do
             local id = eligible[(start + offset - 1) % #eligible + 1]
             local record = data.requests[id]
-            local request = copy(record.raw)
+            local request = copy(active[id])
+            request.id = id
             request.firstSeen = record.firstSeen
             request.totalCount = record.totalCount
             request.imported, request.staged = shipmentTotals(id)
@@ -939,7 +955,14 @@ function M.new(config, store, io, matcher)
                     record.phase, record.status = status, status
                     record.detail = tostring(response.detail or response.message or "")
                     record.lastResponse = io.now()
-                    record.master = copy(response)
+                    record.master = {
+                        status = status,
+                        detail = record.detail,
+                        shipped = amount(response.shipped),
+                        imported = amount(response.imported),
+                        requested = amount(response.requested),
+                        updatedAt = io.now(),
+                    }
                     if status == "crafting" and not record.craftStartedAt then record.craftStartedAt = io.now() end
                     if status == "in progress" and not record.deliveryStartedAt then record.deliveryStartedAt = io.now() end
                 end
