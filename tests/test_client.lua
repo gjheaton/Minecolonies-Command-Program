@@ -28,6 +28,52 @@ Test.case("colony drains only on next grant and completes only when MineColonies
     Test.equal(#c.engine.snapshot().requests,0)
 end)
 
+Test.case("restart reconstructs an interrupted preparing turn before first master hello",function()
+    local w,c=S.clientFixture();local delivery=shipment()
+    w.insert(w.channels.D2,{name="minecraft:stone"},4)
+    c.store.data.client.turn={
+        session="S",turn=1,policy={},deliveries={delivery},
+        phase="preparing",startedAt=w.now,
+    }
+    c.store.save();c.restart()
+    w.sent={}
+    Test.equal(#w.callsFor("import",false),0,"restart mutated the chest before startup reconciliation")
+    w.tick(2)
+    assert(c.store.data.client.fault==nil,"recoverable preparing turn was advertised as a fault")
+    Test.equal(c.store.data.client.turn.phase,"waiting")
+    Test.equal(c.store.data.client.shipments.D1.imported,4)
+    Test.equal(#w.callsFor("import",false),1,"startup reconstruction repeated or skipped the colony import")
+    local hello=w.packet("hello",1);assert(hello,"startup reconciliation never contacted the master")
+    assert(hello.message.clientError==nil,"first hello advertised a recovered startup fault")
+    local batch=w.packet("batch",1);assert(batch,"rebuilt turn batch was not sent")
+    Test.equal(batch.message.imports.D1,4)
+end)
+
+Test.case("restart reconciles a numeric preparing intent locally without replaying the bridge call",function()
+    local w,c=S.clientFixture();local delivery=shipment()
+    w.insert(w.channels.D2,{name="minecraft:stone"},4)
+    w.take(w.channels.D2,{name="minecraft:stone"},4)
+    c.rs.add({name="minecraft:stone"},4)
+    c.store.data.client.shipments.D1=delivery
+    c.store.data.client.shipments.D1.imported=0
+    c.store.data.client.turn={
+        session="S",turn=1,policy={},deliveries={delivery},
+        phase="preparing",startedAt=w.now,
+    }
+    c.store.data.client.intent={
+        kind="import",shipmentId="D1",item={name="minecraft:stone"},count=4,
+        chest="delivery",beforeChest=4,beforeImported=0,reported=4,
+        session="S",turn=1,startedAt=w.now,
+    }
+    c.store.save();c.restart();w.sent={}
+    w.tick(2)
+    assert(c.store.data.client.fault==nil)
+    assert(c.store.data.client.intent==nil)
+    Test.equal(c.store.data.client.shipments.D1.imported,4)
+    Test.equal(#w.callsFor("import",false),0,"startup reconciliation replayed a completed bridge mutation")
+    local hello=w.packet("hello",1);assert(hello and hello.message.clientError==nil)
+end)
+
 Test.case("duplicate grants and results do not replay colony imports",function()
     local w,c=S.clientFixture();local delivery=shipment()
     w.insert(w.channels.D2,{name="minecraft:stone"},4)
