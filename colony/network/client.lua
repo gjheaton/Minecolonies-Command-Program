@@ -343,6 +343,8 @@ function M.new(config, store, io, matcher)
     local lastContact
     local masterConnection
     local persistenceError
+    local startupPreparationPending =
+        type(data.turn) == "table" and data.turn.phase == "preparing"
 
     local function setting(key, default)
         local policy = data.turn and data.turn.policy
@@ -380,7 +382,11 @@ function M.new(config, store, io, matcher)
 
     -- An interrupted call cannot safely be replayed: a courier may already
     -- have consumed warehouse stock, hiding its destination inventory delta.
-    if type(data.intent) == "table" then
+    -- If the reboot happened while a turn was still PREPARING, defer the
+    -- decision until tick() can first reconcile the local journal and rebuild
+    -- the batch.  This keeps a recoverable local restart from advertising a
+    -- false TURN_INTERRUPTED fault to the master.
+    if type(data.intent) == "table" and not startupPreparationPending then
         fault("IMPORT_UNCERTAIN", "An interrupted chest transfer needs reconciliation; automatic transfers are paused", data.intent)
     end
 
@@ -1011,14 +1017,19 @@ function M.new(config, store, io, matcher)
         data.turn = {
             session = message.session, turn = message.turn,
             policy = type(message.policy) == "table" and copy(message.policy) or {},
+            -- Persist the grant's delivery ledger with the PREPARING marker.
+            -- A restart can then reconstruct the turn locally before it talks
+            -- to the master again.
+            deliveries = message.deliveries ~= nil and copy(message.deliveries) or nil,
             phase = "preparing", startedAt = io.now(),
         }
-        -- Persist the reservation before touching either Ender Chest. A
-        -- restarted preparing turn is blocked instead of repeating mutations.
+        -- Persist the reservation and the complete preparation input before
+        -- touching either Ender Chest.
         if not save() then return false end
-        shipmentList(message.deliveries)
+        shipmentList(data.turn.deliveries)
         data.turn.batch = batchForTurn()
         data.turn.phase = "waiting"
+        data.turn.deliveries = nil
         if save() then
             send(copy(data.turn.batch))
             nextRetry = io.now() + math.max(0.1, tonumber(setting("batchRetrySeconds", 5)) or 5)
@@ -1026,21 +1037,86 @@ function M.new(config, store, io, matcher)
         return true
     end
 
-    -- An interrupted preparation may have completed an import but not its
-    -- batch. Never repeat the preparation; send a read-only error batch.
-    if data.turn and data.turn.phase == "preparing" then
-        fault("TURN_INTERRUPTED", "Turn preparation was interrupted; transfers need reconciliation")
-        data.turn.batch = {
-            kind = "batch", session = data.turn.session, turn = data.turn.turn,
-            requests = {}, imports = imports(), authoritative = false,
-            clientError = clientError(), returnSelectors = selectorsForBatch(),
-        }
+    local function recoverInterruptedPreparation()
+        if not startupPreparationPending then return true end
+        if not data.turn or data.turn.phase ~= "preparing" then
+            startupPreparationPending = false
+            return true
+        end
+
+        -- A transfer journal with a numeric bridge result can be reconciled
+        -- from the physical chest delta without repeating the mutation.  Do
+        -- this before the first hello so a clean local restart stays invisible
+        -- to the master.
+        if type(data.intent) == "table" then
+            local reported = data.intent.reported
+            if type(reported) == "number"
+                and reported == amount(reported)
+                and reported <= amount(data.intent.count) then
+                local ok, detail = self.reconcile({ allowPreparing = true })
+                if not ok then
+                    fault(
+                        "TURN_INTERRUPTED",
+                        "Turn preparation was interrupted; local reconciliation failed: " ..
+                            tostring(detail)
+                    )
+                    startupPreparationPending = false
+                    return false
+                end
+            else
+                fault(
+                    "TURN_INTERRUPTED",
+                    "Turn preparation was interrupted with an unknown bridge result; transfers need reconciliation"
+                )
+                startupPreparationPending = false
+                return false
+            end
+        end
+
+        -- Reapply only durable/idempotent preparation work.  shipmentList()
+        -- merges exact verified delivery records, while batchForTurn() resumes
+        -- from the persisted import/return ledgers and therefore does not
+        -- repeat any already-accounted chest mutation.
+        if data.turn.deliveries ~= nil
+            and not shipmentList(data.turn.deliveries) then
+            fault(
+                "TURN_INTERRUPTED",
+                "Turn preparation was interrupted; saved delivery records could not be restored"
+            )
+            startupPreparationPending = false
+            return false
+        end
+
+        data.turn.batch = batchForTurn()
         data.turn.phase = "waiting"
-        save()
+        data.turn.deliveries = nil
+        if not save() then
+            fault(
+                "TURN_INTERRUPTED",
+                "Turn preparation was reconciled locally but the rebuilt batch could not be persisted"
+            )
+            startupPreparationPending = false
+            return false
+        end
+
+        startupPreparationPending = false
+        store.event(
+            "STARTUP_RECONCILED",
+            "Interrupted turn preparation was reconstructed locally before master contact",
+            { session = data.turn.session, turn = data.turn.turn }
+        )
+        return true
     end
 
     function self.tick()
         local now = io.now()
+
+        -- Local startup reconciliation always runs before the first hello.
+        -- If it cannot prove a safe recovery, the resulting fault is what the
+        -- master will see; a recoverable restart never advertises an error.
+        if startupPreparationPending then
+            recoverInterruptedPreparation()
+        end
 
         -- A forced update/reboot can interrupt the program after the bridge
         -- returned but before the normal accounting path cleared its durable
@@ -1145,8 +1221,11 @@ function M.new(config, store, io, matcher)
         return self.canUpdate()
     end
 
-    function self.reconcile()
-        if data.turn and data.turn.phase ~= "finished" then
+    function self.reconcile(options)
+        local allowPreparing =
+            type(options) == "table" and options.allowPreparing == true
+        if data.turn and data.turn.phase ~= "finished"
+            and not (allowPreparing and data.turn.phase == "preparing") then
             return false, "Wait for the master result to close the reserved turn before repairing"
         end
         local intent = data.intent
