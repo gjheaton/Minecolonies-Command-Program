@@ -697,9 +697,28 @@ Test.case("ordinary exports use names only with full plain stock proof while tag
         assert(filter,kind)
         if mode=="plain" or mode=="empty-tag" then
             Test.equal(kind,"plain-name");Test.equal(filter.name,source.name);Test.equal(filter.fingerprint,nil)
-        else Test.equal(kind,"fingerprint");Test.equal(filter.fingerprint,source.fingerprint);Test.equal(filter.name,nil) end
-        Test.equal(filter.nbt,nil);Test.equal(#w.calls,0,"selector planning accessed hardware")
+            Test.equal(filter.nbt,nil)
+        elseif mode=="tagged-sibling" then
+            Test.equal(kind,"empty-nbt-hash");Test.equal(filter.name,source.name);Test.equal(filter.fingerprint,nil)
+            Test.equal(filter.nbt,"41883520c3071f5f4a4a4613fb005e0c")
+        else
+            Test.equal(kind,"fingerprint");Test.equal(filter.fingerprint,source.fingerprint);Test.equal(filter.name,nil)
+            Test.equal(filter.nbt,nil)
+        end
+        Test.equal(#w.calls,0,"selector planning accessed hardware")
     end
+end)
+
+Test.case("plain item beside NBT sibling uses empty-NBT selector instead of AP fingerprint",function()
+    local _,m=targetFixture()
+    local source={name="minecraft:red_banner",amount=10,fingerprint="plain-banner"}
+    local candidate=m.matcher.requestCandidates(S.request("R","minecraft:red_banner",1))[1]
+    local tagged={name="minecraft:red_banner",amount=20,nbt={BlockEntityTag={Patterns={{Color=15,Pattern="creeper"}}}},fingerprint="tagged-banner"}
+    local filter,kind=m.io.exportSelection(candidate,source,{source,tagged})
+    Test.equal(kind,"empty-nbt-hash")
+    Test.equal(filter.name,"minecraft:red_banner")
+    Test.equal(filter.nbt,"41883520c3071f5f4a4a4613fb005e0c")
+    Test.equal(filter.fingerprint,nil)
 end)
 
 Test.case("plain-name physical verification rejects a tagged same-name gain while preserving exact-selector evidence behavior",function()
