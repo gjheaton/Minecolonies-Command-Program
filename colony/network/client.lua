@@ -1027,7 +1027,16 @@ function M.new(config, store, io, matcher)
         end
         if self.updateWaiting then return false end
         if data.session ~= session then
-            if data.session then data.retiredSessions[tostring(data.session)] = true end
+            if data.session then
+                local retired=tostring(data.session)
+                data.retiredSessions[retired]=io.now()
+                local rows={}
+                for id,when in pairs(data.retiredSessions) do
+                    rows[#rows+1]={id=id,when=tonumber(when) or 0}
+                end
+                table.sort(rows,function(a,b) return a.when>b.when end)
+                for index=17,#rows do data.retiredSessions[rows[index].id]=nil end
+            end
             data.session, data.seenTurns = session, {}
             data.highestTurn = nil
         end
