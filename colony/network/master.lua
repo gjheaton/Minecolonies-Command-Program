@@ -845,10 +845,40 @@ function M.new(config, store, io, matcher)
         -- not an uncertain transfer: it proves that nothing moved. Keep this
         -- failure request-local instead of globally quarantining all supply.
         if pending.definiteZero then
+            -- Zero + unchanged chest proves nothing moved, so this never needs
+            -- a global quarantine. But if the requested item is still visible
+            -- through the PRS bridge, treat it as a likely PRS desync and run
+            -- one guarded reset/retry before cooling down the request.
+            local resetOK,resetWhy=maybeAutoResetPRS(pending)
+            if resetOK then
+                if record then
+                    record.status="in_progress"
+                    record.detail=reason.." Automatic PRS reset sent; guarded retry scheduled."
+                    record.errorCode=nil
+                    record.retryAt=nil
+                end
+                store.event("PRS_ZERO_RECOVERY",
+                    "Confirmed zero export; automatic PRS reset scheduled before one guarded retry",{
+                        colonyId=pending.colonyId,
+                        colonyLabel=transferColonyLabel(pending),
+                        requestId=pending.requestId,
+                        item=pending.item and pending.item.name,
+                        count=pending.count,
+                        chest=pending.chest,
+                        detail=resetWhy
+                    })
+                if state.quarantine and state.quarantine.code=="TRANSFER_VERIFY" then
+                    state.quarantine=nil
+                end
+                save()
+                return false
+            end
+
             local retryDelay=math.max(10, tonumber(config.prsResetCooldownSeconds) or 120)
             if record then
                 record.status="error"
-                record.detail=reason.." No items moved; this request will retry after cooldown."
+                record.detail=reason.." No items moved. PRS reset not started: "..tostring(resetWhy)..
+                    ". This request will retry after cooldown."
                 record.errorCode="PRS_ZERO"
                 record.retryAt=io.now()+retryDelay
             end
@@ -860,6 +890,7 @@ function M.new(config, store, io, matcher)
                     item=pending.item and pending.item.name,
                     count=pending.count,
                     chest=pending.chest,
+                    resetReason=resetWhy,
                     retryDelay=retryDelay
                 })
             state.pendingTransfer=nil
