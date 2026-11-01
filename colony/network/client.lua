@@ -763,10 +763,10 @@ function M.new(config, store, io, matcher)
     local function drainDeliveries()
         if clientError() or data.intent then return end
 
-        -- Incoming delivery chests are drained by a native Refined Storage
-        -- Importer. The Supply computer never mutates CRS for deliveries.
-        -- Because Master now stages only one shipment into an empty chest,
-        -- the physical decrease of that reserved item is the import receipt.
+        -- Native RS Importer owns the physical delivery move. Master stages
+        -- only into an empty chest, so the existence of a newer verified
+        -- shipment proves every older shipment's chest contents were already
+        -- drained. Keep only the newest shipment tied to the live chest.
         local shipments = {}
         for _, shipment in pairs(data.shipments) do
             if shipment.verified == true and amount(shipment.imported) < shipment.count then
@@ -777,16 +777,26 @@ function M.new(config, store, io, matcher)
             if a.createdAt ~= b.createdAt then return a.createdAt < b.createdAt end
             return a.id < b.id
         end)
-
         if #shipments == 0 then return end
-        if #shipments > 1 then
-            fault("DELIVERY_LEDGER",
-                "More than one unimported shipment is reserved for a single-buffer delivery chest",
-                { count = #shipments })
-            return
+
+        local changed = false
+        for index = 1, #shipments - 1 do
+            local shipment = shipments[index]
+            local remaining = math.max(0, amount(shipment.count) - amount(shipment.imported))
+            if remaining > 0 then
+                shipment.imported = amount(shipment.count)
+                changed = true
+                store.event("IMPORTED",
+                    "Older verified delivery acknowledged after a newer single-buffer shipment was staged",
+                    {
+                        shipmentId = shipment.id, requestId = shipment.requestId,
+                        item = shipment.item.name, count = remaining,
+                        chest = config.deliveryChestName,
+                    })
+            end
         end
 
-        local shipment = shipments[1]
+        local shipment = shipments[#shipments]
         yieldNow(io)
         local items, err = chestSnapshot(config.deliveryChestName)
         if not items then
@@ -796,6 +806,13 @@ function M.new(config, store, io, matcher)
 
         local remaining = math.max(0, amount(shipment.count) - amount(shipment.imported))
         local observed = amount(io.count(items, shipment.item))
+        local totalPhysical = 0
+        for _, entry in pairs(items) do
+            if type(entry) == "table" then
+                totalPhysical = totalPhysical + amount(entry.count or entry.amount)
+            end
+        end
+
         if observed > remaining then
             fault("DELIVERY_CHEST",
                 "Delivery chest contains more of the reserved item than the shipment ledger allows",
@@ -805,23 +822,31 @@ function M.new(config, store, io, matcher)
                 })
             return
         end
-
-        local importedNow = remaining - observed
-        if importedNow <= 0 then return end
-
-        shipment.imported = amount(shipment.imported) + importedNow
-        if not save() then
-            shipment.imported = shipment.imported - importedNow
+        if totalPhysical > observed then
+            fault("DELIVERY_CHEST",
+                "Delivery chest contains an item that is not the newest reserved shipment",
+                {
+                    shipmentId = shipment.id, requestId = shipment.requestId,
+                    item = shipment.item.name, expected = remaining,
+                    observed = observed, physicalTotal = totalPhysical,
+                })
             return
         end
 
-        store.event("IMPORTED",
-            "Native RS Importer drained verified delivery from staging chest",
-            {
-                shipmentId = shipment.id, requestId = shipment.requestId,
-                item = shipment.item.name, count = importedNow,
-                chest = config.deliveryChestName,
-            })
+        local importedNow = remaining - observed
+        if importedNow > 0 then
+            shipment.imported = amount(shipment.imported) + importedNow
+            changed = true
+            store.event("IMPORTED",
+                "Native RS Importer drained verified delivery from staging chest",
+                {
+                    shipmentId = shipment.id, requestId = shipment.requestId,
+                    item = shipment.item.name, count = importedNow,
+                    chest = config.deliveryChestName,
+                })
+        end
+
+        if changed and not save() then return end
     end
 
     local function protects(item, active)
