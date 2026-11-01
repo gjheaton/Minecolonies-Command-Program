@@ -658,8 +658,25 @@ function M.new(config,store,matcher)
             local progress=0
             for _,slot in ipairs(slots) do
                 local entry=items[slot]
-                local filter={name=entry.name,fromSlot=slot-1}
-                local moved,moveErr=move(role,false,filter,entry.count,chest,route)
+                local filter={name=entry.name,fromSlot=slot-1,count=entry.count}
+                local moved,moveErr
+                if config.usePeripheralTransfer==false then
+                    local rs,bridgeErr=bridge(role)
+                    if not rs then return false,tostring(bridgeErr) end
+                    local direction
+                    if role=="master" then
+                        direction=route and route.outputDirection
+                    else
+                        direction=config.colonyExportDirection
+                    end
+                    if type(direction)~="string" or direction=="" then
+                        return false,"Reclaim direction is not configured"
+                    end
+                    moved,moveErr=call(rs,"importItem",filter,direction)
+                    moved,moveErr=settled(moved,moveErr)
+                else
+                    moved,moveErr=move(role,false,filter,entry.count,chest,route)
+                end
                 if moved==nil then
                     return false,"Reclaim failed for slot "..tostring(slot)..": "..tostring(moveErr)
                 end
