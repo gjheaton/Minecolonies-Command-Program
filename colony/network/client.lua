@@ -853,47 +853,12 @@ function M.new(config, store, io, matcher)
     end
 
     local function stageOverflow(active)
-        if setting("overflowEnabled", false) ~= true or clientError() or data.intent then return end
-        if not config.returnChestName or config.returnChestName == config.deliveryChestName then
-            fault("RETURN_CHANNEL", "Overflow needs a separate return chest channel")
-            return
-        end
-        local stock, err = io.colonyStock()
-        if type(stock) ~= "table" then
-            fault("COLONY_STOCK", "Cannot safely inspect colony stock for overflow", { error = err })
-            return
-        end
-        local left = amount(setting("maxReturnItemsPerTurn", 128))
-        local entries = {}
-        local collected=0
-        for _, item in pairs(stock) do
-            collected=collected+1
-            if collected%64==0 then yieldNow(io) end
-            if type(item) == "table" and item.name then entries[#entries + 1] = item end
-        end
-        yieldNow(io)
-        table.sort(entries, function(a, b) return matcher.itemIdentity(a) < matcher.itemIdentity(b) end)
-        local examined=0
-        for _, item in ipairs(entries) do
-            examined=examined+1
-            if examined%32==0 then yieldNow(io) end
-            if left <= 0 then break end
-            local surplus = math.max(0, amount(item.amount or item.count) - keepCount(item))
-            if surplus > 0 and not protects(item, active) then
-                local chest, chestError = chestSnapshot(config.returnChestName)
-                if not chest then fault("RETURN_CHEST", "Cannot inspect the return chest", { error = chestError }); return end
-                local free = amount(io.capacity(config.returnChestName, chest, item, amount(setting("chestReserveSlots", 1))))
-                local count = math.min(surplus, left, free, amount(setting("maxTransferChunk", 64)))
-                if count > 0 then
-                    local moved, transferError = transfer("return", nil, item, count, config.returnChestName)
-                    if moved == nil then
-                        if not clientError() then fault("COLONY_RETURN", transferError or "Colony return failed") end
-                        return
-                    end
-                    left = left - moved
-                end
-            end
-        end
+        -- Supply is deliberately read-only against CRS. AP/RS bridge mutations
+        -- have repeatedly desynchronized the colony network, so overflow
+        -- staging is disabled here even if an older config still has the
+        -- setting enabled. Native RS components may be used for future return
+        -- handling, but the computer will not export from CRS.
+        return
     end
 
     local function selectorsForBatch()
@@ -1577,19 +1542,14 @@ function M.new(config, store, io, matcher)
     end
 
     do
-        local ok, detail = io.reclaimChest("supply", config.returnChestName)
-        if ok then
-            data.bootResetPending = true
-            save()
-            store.event("BOOT_RECLAIM",
-                "Return staging chest reclaimed to CRS before master contact",
-                { chest = config.returnChestName, detail = detail })
-        else
-            data.bootResetPending = false
-            fault("BOOT_RECLAIM",
-                "Startup return-chest reclaim failed: " .. tostring(detail),
-                { chest = config.returnChestName })
-        end
+        -- Do not mutate CRS during startup. The colony RS Bridge is read-only
+        -- from this program; startup recovery is coordinated with Master
+        -- without pulling the return chest back into CRS.
+        data.bootResetPending = true
+        save()
+        store.event("BOOT_RESET",
+            "Supply startup reset armed without mutating CRS",
+            { returnChest = config.returnChestName })
     end
 
     return self
