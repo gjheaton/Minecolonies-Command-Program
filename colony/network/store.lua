@@ -1,7 +1,10 @@
--- Two-slot persistent journal. Never continue a mutation after a failed save.
+-- Volatile runtime state for MineColonies Supply 4.1.
+-- Configuration is persistent elsewhere; turns, requests, transfer ledgers,
+-- errors, telemetry history, craft tracking and recovery state live only in RAM.
+-- A reboot intentionally starts from a clean operational state and rebuilds
+-- from the physical chests, Refined Storage and MineColonies requests.
 local M = {}
--- CC:Tweaked charges at least 500 bytes for each file and directory.
-local MINIMUM_FILE_SIZE = 500
+
 local function timestamp()
     local api=os
     if type(api)=="table" then
@@ -16,162 +19,81 @@ local function timestamp()
     end
     return 0
 end
-local function yieldingSerialize(value)
-    local chunks, active, steps = {}, {}, 0
 
-    local function emit(text)
-        chunks[#chunks + 1] = text
-        steps = steps + 1
-        if steps >= 200 then
-            steps = 0
-            sleep(0)
-        end
-    end
-
-    local function primitive(v)
-        local kind = type(v)
-        if kind == "string" or kind == "number" or kind == "boolean" then
-            return textutils.serialize(v, {compact=true})
-        end
-        if kind == "nil" then return "nil" end
-        error("Unsupported persistent value type: " .. kind, 0)
-    end
-
-    local function encode(v)
-        if type(v) ~= "table" then
-            emit(primitive(v))
-            return
-        end
-        if active[v] then error("Cyclic persistent journal data", 0) end
-        active[v] = true
-        emit("{")
-        local first = true
-        for key, item in pairs(v) do
-            if not first then emit(",") end
-            first = false
-            emit("[")
-            encode(key)
-            emit("]=")
-            encode(item)
-        end
-        emit("}")
-        active[v] = nil
-    end
-
-    encode(value)
-    return table.concat(chunks)
+local function limit(entries, maximum)
+    maximum=math.max(1,math.floor(tonumber(maximum) or 1))
+    while #entries>maximum do table.remove(entries,1) end
 end
-local function checkSpace(target,source,directory)
-    local free=fs.getFreeSpace(target)
-    if free=="unlimited" then return end
-    assert(type(free)=="number" and free>=0,"Cannot determine available persistent journal space")
-    local reclaim=fs.exists(target) and math.max(fs.getSize(target),MINIMUM_FILE_SIZE) or 0
-    local required=math.max(#source,MINIMUM_FILE_SIZE)
-    local missing=directory
-    while missing~="" and not fs.exists(missing) do
-        required=required+MINIMUM_FILE_SIZE
-        missing=fs.getDir(missing)
-    end
-    -- Opening this alternating slot with "w" reclaims its previous footprint.
-    assert(required<=free+reclaim,"Out of space for persistent journal (need "..required
-        .." bytes; "..(free+reclaim).." available including the replaced slot)")
-end
-local function read(path)
-    if not fs.exists(path) then return nil end
-    local h=fs.open(path,"r"); if not h then error("Cannot read journal "..path,0) end
-    local source=h.readAll(); h.close()
-    local ok,value=pcall(textutils.unserialize,source)
-    if not ok or type(value)~="table" or value.schema~=4 or type(value.revision)~="number" then return nil end
-    return value
-end
+
 function M.new(path,config)
-    local self={path=path,data={schema=4,revision=0,history={},errors={}},fault=nil}
-    function self.load()
-        local first,second=read(path..".a"),read(path..".b")
-        if not first and not second and (fs.exists(path..".a") or fs.exists(path..".b")) then
-            error("Both persistent journal slots are invalid; refusing new transfers",0)
+    local self={
+        path=path,
+        data={schema=5,revision=0,history={},errors={}},
+        fault=nil,
+        volatile=true,
+    }
+
+    local function removeLegacyState()
+        if type(path)~="string" or path=="" then return end
+        for _,suffix in ipairs({".a",".b",".a.bak",".b.bak",".tmp",".old"}) do
+            local candidate=path..suffix
+            if fs.exists(candidate) and not fs.isDir(candidate) then
+                pcall(fs.delete,candidate)
+            end
         end
-        local selected=not first and second or not second and first or first and second and (first.revision>second.revision and first or second)
-        if selected then self.data=selected end
-        self.data.history=self.data.history or {}; self.data.errors=self.data.errors or {}
+    end
+
+    function self.load()
+        -- 4.1 deliberately ignores all prior operational journals.
+        removeLegacyState()
+        self.data={schema=5,revision=0,history={},errors={}}
+        self.fault=nil
         return self.data
     end
+
     function self.save()
-        if self.fault then error(self.fault,0) end
-
-        -- Persistence is for recovery state, not an unlimited log archive.
-        -- Keep these deliberately small so textutils.serialize cannot spend
-        -- long enough in one non-yielding call to trip CC:Tweaked's watchdog.
-        local history=self.data.history
-        if type(history)=="table" then
-            local limit=math.min(100, math.max(10, tonumber(config and config.maxHistoryEntries) or 100))
-            while #history>limit do table.remove(history,1) end
-        end
-        local errors=self.data.errors
-        if type(errors)=="table" then
-            local limit=math.min(25, math.max(5, tonumber(config and config.maxErrorEntries) or 25))
-            while #errors>limit do table.remove(errors,1) end
-        end
-
-        local revision=(self.data.revision or 0)+1
-        local pending={}; for key,value in pairs(self.data) do pending[key]=value end
-        pending.schema=4; pending.revision=revision
-        local target=path..(revision%2==0 and ".a" or ".b")
-        local ok,err=pcall(function()
-            -- CC:Tweaked stores shared tables by value with this option, while
-            -- still rejecting cycles. Serialize before touching either slot.
-            local source=yieldingSerialize(pending)
-            assert(type(source)=="string","Persistent journal serialization returned no text")
-            local directory=fs.getDir(path)
-            checkSpace(target,source,directory)
-            if directory~="" and not fs.exists(directory) then fs.makeDir(directory) end
-            local h=assert(fs.open(target,"w"),"Cannot write persistent journal")
-            h.write(source); h.close()
-            local verify=assert(fs.open(target,"r")); local saved=verify.readAll(); verify.close()
-            assert(saved==source,"Persistent journal verification failed")
-        end)
-        if not ok then self.fault="Persistence failure: "..tostring(err); error(self.fault,0) end
-        self.data.schema=4; self.data.revision=revision
+        -- Preserve the transactional API for the running program, but never
+        -- serialize runtime state to disk. A successful return means the
+        -- in-memory state is available for the rest of this process lifetime.
+        self.data.revision=(tonumber(self.data.revision) or 0)+1
         return true
     end
+
     function self.event(kind,message,context)
         local entries=self.data.history
-        entries[#entries+1]={time=timestamp(),kind=kind,message=message,context=context}
-        while #entries>(config and config.maxHistoryEntries or 400) do table.remove(entries,1) end
-        self.save()
+        entries[#entries+1]={
+            time=timestamp(),kind=kind,message=message,context=context,
+        }
+        limit(entries,config and config.maxHistoryEntries or 400)
+        return true
     end
-    function self.log(message) self.event("INFO",message) end
+
+    function self.log(message)
+        return self.event("INFO",message)
+    end
+
     function self.error(code,message,context)
         local entries=self.data.errors
-        entries[#entries+1]={time=timestamp(),code=code,message=message,context=context,severity="ERROR"}
-        while #entries>(config and config.maxErrorEntries or 100) do table.remove(entries,1) end
-        self.save()
+        entries[#entries+1]={
+            time=timestamp(),code=code,message=message,
+            context=context,severity="ERROR",
+        }
+        limit(entries,config and config.maxErrorEntries or 100)
+        return true
     end
-    -- Error entries are a display archive. Live faults and transfer intents
-    -- stay in their own journal fields and must survive clearing this list.
+
     function self.clearErrors()
-        local previousErrors,previousHistory=self.data.errors,self.data.history
-        if type(previousErrors)~="table" or type(previousHistory)~="table" then
-            return false,"Error history is invalid; restore the journal before clearing it"
-        end
-        local count=0;for _ in pairs(previousErrors) do count=count+1 end
-        if count==0 then return true,"No recorded errors to clear; active faults are unchanged" end
-        local previousRevision=self.data.revision
-        local history={};for index,entry in ipairs(previousHistory) do history[index]=entry end
-        history[#history+1]={time=timestamp(),kind="ERROR_HISTORY_CLEARED",
-            message="Recorded error history cleared; active faults and transfer records retained",context={count=count}}
-        while #history>(config and config.maxHistoryEntries or 400) do table.remove(history,1) end
-        self.data.errors,self.data.history={},history
-        local ok,saved,reason=pcall(self.save)
-        if not ok or saved~=true then
-            self.data.errors,self.data.history,self.data.revision=previousErrors,previousHistory,previousRevision
-            local detail=tostring(ok and (reason or "Journal save did not confirm durability") or saved)
-            self.fault=self.fault or ("Persistence failure: "..detail)
-            return false,"Error history save could not be confirmed; records retained in the current session: "..detail
-        end
-        return true,"Cleared "..count.." recorded errors; active faults and transfer records are unchanged"
+        local entries=self.data.errors
+        local count=type(entries)=="table" and #entries or 0
+        self.data.errors={}
+        self.event("ERROR_HISTORY_CLEARED",
+            "Recorded runtime error history cleared; active runtime faults are unchanged",
+            {count=count})
+        return true,"Cleared "..count.." runtime errors; reboot also clears all runtime state"
     end
+
     self.addError=self.error
     return self
 end
+
 return M
