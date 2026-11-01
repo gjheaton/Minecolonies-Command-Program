@@ -1449,15 +1449,36 @@ function M.new(config, store, io, matcher)
     end
 
     function self.snapshot()
+        -- UI/telemetry snapshots are read-only views, not transaction backups.
+        -- Never deep-copy raw MineColonies requests, retained master results,
+        -- turn batches, or shipment internals here.
         local rows = {}
         for id, record in pairs(data.requests) do
             if record.active ~= false then
-                local row = copy(record)
-                row.imported, row.staged = shipmentTotals(id)
-                row.shipped = row.imported + row.staged
-                row.requested = row.count
-                row.detail = row.status == "timed out" and row.timeoutDetail or row.detail
-                rows[#rows + 1] = row
+                local imported, staged = shipmentTotals(id)
+                rows[#rows + 1] = {
+                    id = tostring(record.id or id),
+                    requestId = tostring(record.requestId or record.id or id),
+                    name = record.name,
+                    displayName = record.displayName or record.name,
+                    item = type(record.item)=="table" and record.item.name or record.item,
+                    status = record.status,
+                    phase = record.phase,
+                    count = record.count,
+                    requested = record.count,
+                    shipped = imported + staged,
+                    imported = imported,
+                    staged = staged,
+                    detail = record.status == "timed out" and record.timeoutDetail or record.detail,
+                    firstSeen = record.firstSeen,
+                    lastSeen = record.lastSeen,
+                    lastResponse = record.lastResponse,
+                    phaseSince = record.phaseSince,
+                    craftStartedAt = record.craftStartedAt,
+                    deliveryStartedAt = record.deliveryStartedAt,
+                    completedAt = record.completedAt,
+                    deadline = record.deadline,
+                }
             end
         end
         table.sort(rows, function(a, b) return a.id < b.id end)
@@ -1473,6 +1494,29 @@ function M.new(config, store, io, matcher)
                 detail = "Master connected; delivery drain locked for PRS transfer verification"
             else detail = "Master connected; waiting for turns" end
         end
+        local turn
+        if type(data.turn)=="table" then
+            turn = {
+                phase = data.turn.phase,
+                session = data.turn.session,
+                turn = data.turn.turn,
+                id = data.turn.id,
+                startedAt = data.turn.startedAt,
+                finishedAt = data.turn.finishedAt,
+                policy = type(data.turn.policy)=="table" and copy(data.turn.policy) or nil,
+            }
+        end
+        local intent
+        if type(data.intent)=="table" then
+            intent = {
+                kind=data.intent.kind,
+                count=data.intent.count,
+                chest=data.intent.chest,
+                reported=data.intent.reported,
+                beforeChest=data.intent.beforeChest,
+                callError=data.intent.callError,
+            }
+        end
         return {
             role = "supply", colonyName = data.colonyName,
             health = { ok = connected == true and not clientError() and routeConfirmed ~= false,
@@ -1481,7 +1525,7 @@ function M.new(config, store, io, matcher)
             status = clientError() and "error" or (data.turn and data.turn.phase or "waiting"),
             statusMessage = detail,
             requests = rows, colonies = {}, history = store.data.history or {}, errors = store.data.errors or {},
-            settings = store.data.settings or config, turn = copy(data.turn), intent = copy(data.intent),
+            settings = store.data.settings or config, turn = turn, intent = intent,
             masterId = config.masterId, lastContact = lastContact,
         }
     end
