@@ -2,7 +2,7 @@
 -- A turn is a durable chest handoff, not a timed lease: an overdue client may
 -- finish its drain, but the master will not export until that exact batch arrives.
 local Config = require("colony.network.config")
-local M = { MODULE_VERSION = "4.1.0" }
+local M = { MODULE_VERSION = "4.1.1" }
 
 local function integer(value)
     return math.max(0, math.floor(tonumber(value) or 0))
@@ -2112,7 +2112,54 @@ function M.new(config, store, io, matcher)
         if type(pendingSnapshot)=="table" then
             pendingSnapshot.colonyLabel=transferColonyLabel(pendingSnapshot)
         end
-        return {role="master", statusMessage=status, requests=requests, colonies=colonies,
+
+        local action
+        if state.quarantine and state.pendingTransfer then
+            local pending=state.pendingTransfer
+            action="Held: "..transferItemLabel(pending).." x"..tostring(pending.count or "?")
+        elseif state.pendingTransfer then
+            local pending=state.pendingTransfer
+            local verb
+            if pending.intent then
+                verb=pending.kind=="export" and "Exporting" or "Importing"
+            elseif pending.reported~=nil then
+                verb="Verifying"
+            else
+                verb="Preparing transfer"
+            end
+            action=verb.." "..tostring(pending.count or "?").."x "..transferItemLabel(pending)
+                .." "..(pending.kind=="export" and "to " or "from ")..transferColonyLabel(pending)
+        elseif work and work.cs and work.cs.turn then
+            local total=#(work.requests or {})
+            if not work.returnDone then
+                action="Checking "..tostring(work.colony.label or work.cs.colonyName or work.colony.id).." return chest"
+            else
+                local index=math.max(1,integer(work.index))
+                local request=work.requests and work.requests[index]
+                if request then
+                    action="Checking "..tostring(work.colony.label or work.cs.colonyName or work.colony.id)
+                        .." request "..tostring(index).."/"..tostring(total)..": "
+                        ..tostring(request.name or request.displayName or request.id or "UNKNOWN")
+                else
+                    action="Finishing "..tostring(work.colony.label or work.cs.colonyName or work.colony.id).." turn"
+                end
+            end
+        elseif currentTurn then
+            local phase=tostring(currentTurn.phase or ""):upper()
+            local colony=tostring(currentTurn.colonyLabel or currentTurn.colonyId or "colony")
+            if phase=="WAIT_BATCH" then action="Waiting for "..colony.." batch"
+            elseif phase=="RESULT" then action="Waiting for "..colony.." result acknowledgement"
+            elseif phase=="RECOVERY" then action="Checking transfer recovery for "..colony
+            else action="Processing "..colony.." turn" end
+        elseif config.automationEnabled==false then
+            action="Paused"
+        elseif self.updateWaiting then
+            action="Waiting for update"
+        else
+            action="Idle - waiting for next turn"
+        end
+
+        return {role="master", statusMessage=status, action=action, requests=requests, colonies=colonies,
             currentTurn=currentTurn,
             crafts=crafts, quarantine=copy(state.quarantine), pendingTransfer=pendingSnapshot,
             history=d.history or {}, errors=d.errors or {},
