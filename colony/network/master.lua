@@ -1037,33 +1037,12 @@ function M.new(config, store, io, matcher)
         state.pendingTransfer.callError = err
         state.pendingTransfer.intent = nil
 
-        -- Delivery chests are single-shipment buffers drained immediately by
-        -- a native RS Importer on the colony side. A valid positive PRS export
-        -- can disappear before Master observes the chest increase. When the
-        -- chest was empty before the call, trust the sane positive bridge
-        -- result as the staged shipment. Zero/unknown results keep the strict
-        -- physical recovery path.
-        if kind == "export"
-            and type(moved) == "number"
-            and moved == integer(moved)
-            and moved > 0
-            and moved <= count
-            and physicalBefore
-            and type(physicalBefore.totals) == "table"
-            and next(physicalBefore.totals) == nil then
-            local accepted = state.pendingTransfer
-            creditTransfer(accepted, integer(moved), nil)
-            store.event("CHEST_STAGED",
-                "PRS export accepted for native-import delivery buffer",
-                {
-                    colonyId = colony.id,
-                    requestId = record and record.id,
-                    item = item.name,
-                    count = integer(moved),
-                })
-            return true
-        end
-
+        -- Never trust a positive RS bridge return by itself. Advanced
+        -- Peripherals / RS can report a successful export while neither PRS
+        -- nor the physical delivery chest actually changes. Keep the transfer
+        -- pending until verifyPending() observes real chest evidence. If the
+        -- native importer drains too quickly to observe that evidence, hold
+        -- the transfer as uncertain rather than falsely crediting a shipment.
         save()
         return true
     end
