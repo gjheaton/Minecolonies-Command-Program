@@ -403,7 +403,9 @@ function M.new(config, store, engine, io, updater, options)
             if checking then status="CHECKING..."
             elseif updater.checkError then status="ERROR: "..tostring(updater.checkError)
             elseif updater.availableVersion then status="UPDATE AVAILABLE: v"..tostring(updater.availableVersion)
-            elseif updater.remoteSuiteVersion then status="CURRENT (suite v"..tostring(updater.remoteSuiteVersion)..")"
+            elseif updater.remoteSuiteVersion then
+                status="CURRENT (suite v"..tostring(updater.remoteSuiteVersion)
+                    ..", app v"..tostring(config.PROGRAM_VERSION or config.programVersion or Config.VERSION)..")"
             elseif updater.remoteVersion then status="CURRENT (app v"..tostring(updater.remoteVersion)..")"
             else status="NOT CHECKED" end
         end
