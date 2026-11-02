@@ -381,7 +381,7 @@ function M.new(config, store, io, matcher)
     local function shipmentsFor(cs)
         local result = {}
         for _, shipment in ipairs(cs.shipments) do
-            if shipment.verified then
+            if shipment.verified or shipment.provisional then
                 local entry = copy(shipment)
                 entry.remaining = math.max(0, integer(entry.count) - integer(entry.imported))
                 result[#result + 1] = entry
@@ -1077,12 +1077,43 @@ function M.new(config, store, io, matcher)
         state.pendingTransfer.callError = err
         state.pendingTransfer.intent = nil
 
-        -- Never trust a positive RS bridge return by itself. Advanced
-        -- Peripherals / RS can report a successful export while neither PRS
-        -- nor the physical delivery chest actually changes. Keep the transfer
-        -- pending until verifyPending() observes real chest evidence. If the
-        -- native importer drains too quickly to observe that evidence, hold
-        -- the transfer as uncertain rather than falsely crediting a shipment.
+        -- A positive bridge result is not success by itself, but the delivery
+        -- chest may be drained by the native CRS importer before Master can
+        -- observe it. Record a provisional shipment tied to the Supply-side CRS
+        -- baseline. Only a later CRS increase may promote it to verified.
+        if kind=="export"
+            and type(moved)=="number"
+            and moved==integer(moved)
+            and moved>0 and moved<=count
+            and type(state.pendingTransfer.crsBaseline)=="number" then
+            local pending=state.pendingTransfer
+            state.shipmentCounter=state.shipmentCounter+1
+            local shipment={
+                id="shipment-"..tostring(state.shipmentCounter),
+                requestId=pending.requestId,generation=pending.generation,
+                item=copy(pending.item),count=integer(moved),imported=0,
+                verified=false,provisional=true,crsBaseline=pending.crsBaseline,
+                createdAt=io.now(),turn=pending.turn,session=pending.session,
+            }
+            cs.shipments[#cs.shipments+1]=shipment
+            if record then
+                record.status="in progress"
+                record.detail="Bridge reported export; awaiting CRS verification"
+            end
+            if work and tostring(work.colony.id)==tostring(colony.id) then
+                work.items=work.items+integer(moved)
+            end
+            state.pendingTransfer=nil
+            save()
+            store.event("EXPORT_PROVISIONAL",
+                "Bridge reported export; awaiting colony CRS inventory proof",{
+                    colonyId=colony.id,requestId=record and record.id,
+                    shipmentId=shipment.id,item=item.name,count=integer(moved),
+                    crsBaseline=pending.crsBaseline,
+                })
+            return true
+        end
+
         save()
         return true
     end
@@ -1124,6 +1155,17 @@ function M.new(config, store, io, matcher)
         local p = cs.turn.policy
         if not record or record.status == "delivered" or record.status == "error" then return end
         statusRecord(cs, record, p)
+        for _,shipment in ipairs(cs.shipments or {}) do
+            if shipment.requestId==record.id
+                and shipment.generation==record.generation
+                and shipment.provisional==true
+                and shipment.verified~=true then
+                record.status="in progress"
+                record.detail="Bridge-reported export awaiting CRS verification"
+                save()
+                return
+            end
+        end
         local shipped = totals(cs, record)
         local remaining = math.max(0, record.requested - shipped)
         if remaining == 0 or work.items >= p.maxItemsPerTurn then return end
@@ -1281,7 +1323,30 @@ function M.new(config, store, io, matcher)
             end
         end
         for _, shipment in ipairs(cs.shipments) do
-            if imports[shipment.id] ~= nil then shipment.imported = imports[shipment.id] end
+            if imports[shipment.id] ~= nil then
+                shipment.imported = imports[shipment.id]
+                if shipment.provisional==true
+                    and shipment.verified~=true
+                    and integer(shipment.imported)>=integer(shipment.count) then
+                    shipment.verified=true
+                    shipment.provisional=nil
+                    local record=cs.requests[shipment.requestId]
+                    if record then
+                        record.firstShipmentAt=record.firstShipmentAt or io.now()
+                        record.status="in progress"
+                        record.detail="CRS inventory increase verified delivery"
+                    end
+                    if cs.turn then
+                        cs.turn.itemsShipped=integer(cs.turn.itemsShipped)+integer(shipment.count)
+                    end
+                    store.event("CRS_VERIFIED",
+                        "Colony RS inventory increase verified provisional export",{
+                            colonyId=shipment.colonyId,
+                            requestId=shipment.requestId,shipmentId=shipment.id,
+                            item=shipment.item and shipment.item.name,count=shipment.count,
+                        })
+                end
+            end
         end
         return true
     end
