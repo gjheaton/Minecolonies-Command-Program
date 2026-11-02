@@ -728,19 +728,39 @@ function M.new(config, store, engine, io, updater, options)
     end
 
     local function drawHistory()
-        local _,h=screen.size()
-        local rows,page,pages=pageRows(newestFirst(snapshot.history or data().history),"history",h-7)
-        frame("TRANSFER / EVENT HISTORY  "..page.."/"..pages,"VERIFIED shipments and acknowledged completions are separate events.",C.dim)
-        for i,e in ipairs(rows) do
+        local w,h=screen.size()
+        local events=newestFirst(snapshot.history or data().history)
+        local maxLines=math.max(1,h-7)
+        local rendered={}
+        for _,e in ipairs(events) do
             local kind=tostring(e.kind or e.event or e.status or "")
             local color=kind:lower():find("craft",1,true) and C.title or statusColor(kind)
             if tostring(e.direction or ""):find("RETURN",1,true) then color=C.accent end
             local context=type(e.context)=="table" and e.context or {}
             local amount=e.amount or context.amount or context.count
-            row(4+i,timeOf(e.time or e.at).." "..kind.." "..tostring(e.item or context.item or "")
-                ..(amount and (" x"..tostring(amount)) or "").." "..textOf(e.detail or e.message),color)
+            local item=e.item or context.item or ""
+            if type(item)=="table" then item=item.name or item.displayName or "" end
+            local text=timeOf(e.time or e.at).." "..kind.." "..tostring(item)
+                ..(amount and (" x"..tostring(amount)) or "").." "..textOf(e.detail or e.message)
+            local lines=Util.wrapText(text,math.max(1,w-2))
+            for _,line in ipairs(lines) do
+                rendered[#rendered+1]={text=line,color=color}
+            end
         end
-        footer("history",page,pages)
+        local totalPages=math.max(1,math.ceil(#rendered/maxLines))
+        local page=Util.clamp(self.pages.history or 1,1,totalPages)
+        self.pages.history=page
+        local first=(page-1)*maxLines+1
+        local last=math.min(#rendered,first+maxLines-1)
+        frame("TRANSFER / EVENT HISTORY  "..page.."/"..totalPages,"Long events wrap to additional lines; no history detail is clipped.",C.dim)
+        local y=4
+        for i=first,last do
+            local entry=rendered[i]
+            row(y,entry.text,entry.color)
+            y=y+1
+        end
+        if #rendered==0 then row(6,"No history events.",C.dim) end
+        footer("history",page,totalPages)
     end
 
     local function drawErrors()
