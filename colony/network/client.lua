@@ -433,7 +433,8 @@ function M.new(config, store, io, matcher)
         end
         for _, shipment in pairs(deliveries) do
             if type(shipment) ~= "table" or shipment.id == nil
-                or shipment.requestId == nil or shipment.verified ~= true
+                or shipment.requestId == nil
+                or (shipment.verified ~= true and shipment.provisional ~= true)
                 or type(shipment.item) ~= "table" or type(shipment.item.name) ~= "string"
                 or shipment.item.name == "" or amount(shipment.count) == 0
                 or type(shipment.crsBaseline)~="number" or shipment.crsBaseline<0
@@ -449,9 +450,14 @@ function M.new(config, store, io, matcher)
             if current and (not sameItem(current.item, shipment.item)
                 or current.item.fingerprint ~= shipment.item.fingerprint
                 or current.count ~= amount(shipment.count)
-                or current.requestId ~= tostring(shipment.requestId)) then
+                or current.requestId ~= tostring(shipment.requestId)
+                or amount(current.crsBaseline) ~= amount(shipment.crsBaseline)) then
                 fault("DELIVERY_CHANGED", "A verified shipment identity or quantity changed", { id = id })
                 return false
+            end
+            if current then
+                current.verified=shipment.verified==true
+                current.provisional=shipment.provisional==true and true or nil
             end
             if not current then
                 current = copy(shipment)
@@ -799,7 +805,8 @@ function M.new(config, store, io, matcher)
 
         local shipments={}
         for _,shipment in pairs(data.shipments) do
-            if shipment.verified==true and amount(shipment.imported)<shipment.count then
+            if (shipment.verified==true or shipment.provisional==true)
+                and amount(shipment.imported)<shipment.count then
                 shipments[#shipments+1]=shipment
             end
         end
