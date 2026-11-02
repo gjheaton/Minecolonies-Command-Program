@@ -403,10 +403,8 @@ function M.new(config, store, engine, io, updater, options)
             if checking then status="CHECKING..."
             elseif updater.checkError then status="ERROR: "..tostring(updater.checkError)
             elseif updater.availableVersion then status="UPDATE AVAILABLE: v"..tostring(updater.availableVersion)
-            elseif updater.remoteSuiteVersion then
-                status="CURRENT (suite v"..tostring(updater.remoteSuiteVersion)
-                    ..", app v"..tostring(config.PROGRAM_VERSION or config.programVersion or Config.VERSION)..")"
-            elseif updater.remoteVersion then status="CURRENT (app v"..tostring(updater.remoteVersion)..")"
+            elseif updater.remoteSuiteVersion then status="CURRENT (Suite v"..tostring(updater.remoteSuiteVersion)..")"
+            elseif updater.remoteVersion then status="CURRENT (App v"..tostring(updater.remoteVersion)..")"
             else status="NOT CHECKED" end
         end
         local source="UNAVAILABLE"
@@ -1205,6 +1203,9 @@ function M.new(config, store, engine, io, updater, options)
         if info and (self.updateCheckPending or updater.checkQueued or updater.checking or updater.installing
             or info.checked or updater.remoteSuiteVersion or updater.remoteVersion or updater.availableVersion or updater.checkError) then
             lines[#lines+1]={text="Update: "..info.status..(info.checked and (" @"..info.checked) or ""),color=info.color}
+            local appLabel=role()=="master" and "Master" or "Supply"
+            local appVersion=tostring(config.PROGRAM_VERSION or config.programVersion or Config.VERSION)
+            lines[#lines+1]={text="        ("..appLabel.." v"..appVersion..")",color=info.color}
             lines[#lines+1]={text="Source: "..info.source,color=C.dim}
         end
         if role()=="master" and not options.readOnly and snapshot.action then
