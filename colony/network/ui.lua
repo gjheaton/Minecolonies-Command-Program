@@ -1228,10 +1228,10 @@ function M.new(config, store, engine, io, updater, options)
             if line.sticky then sticky=target end
         end
         -- Leave the last terminal row empty for print's trailing newline.
-        -- When a live Action line exists, reserve the final visible row for it.
+        -- Reserve enough bottom rows for the complete wrapped live Action text.
         local limit=math.max(0,height-1)
-        local stickyLine=sticky and sticky[#sticky] or nil
-        local bodyLimit=math.max(0,limit-(stickyLine and 1 or 0))
+        local stickyCount=sticky and math.min(#sticky,limit) or 0
+        local bodyLimit=math.max(0,limit-stickyCount)
         local truncated=#wrapped>bodyLimit
         SharedUI.resetTerminal(C.text,C.bg)
         local shown=math.min(#wrapped,truncated and math.max(0,bodyLimit-1) or bodyLimit)
@@ -1242,8 +1242,12 @@ function M.new(config, store, engine, io, updater, options)
         if truncated and bodyLimit>0 then
             SharedUI.setTerminalColor(C.warn);print(Util.clip("More current details: HEALTH",width))
         end
-        if stickyLine and limit>0 then
-            SharedUI.setTerminalColor(stickyLine.color);print(Util.clip(stickyLine.text,width))
+        if stickyCount>0 then
+            local first=math.max(1,#sticky-stickyCount+1)
+            for index=first,#sticky do
+                local line=sticky[index]
+                SharedUI.setTerminalColor(line.color);print(Util.clip(line.text,width))
+            end
         end
         SharedUI.setTerminalColor(C.text)
     end
