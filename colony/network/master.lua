@@ -557,6 +557,18 @@ function M.new(config, store, io, matcher)
         return count
     end
 
+    local function requestCrsBaseline(request, candidate)
+        if type(request)~="table" or type(candidate)~="table"
+            or type(request.crsBaselines)~="table" then return nil end
+        for _,row in ipairs(request.crsBaselines) do
+            if type(row)=="table" and row.identity==candidate.identity
+                and type(row.amount)=="number" and row.amount>=0 then
+                return integer(row.amount)
+            end
+        end
+        return nil
+    end
+
     local function retainedRegistryRecoveryEligible(pending)
         if type(pending)~="table"
             or pending.kind~="export"
@@ -799,7 +811,7 @@ function M.new(config, store, io, matcher)
         return delta, nil
     end
 
-    local function creditTransfer(pending, count, physical)
+    local function creditTransfer(pending, count, physical, proof)
         local cs = state.colonies[tostring(pending.colonyId)]
         if pending.kind == "export" then
             local shipmentItem = copy(pending.item)
@@ -816,12 +828,13 @@ function M.new(config, store, io, matcher)
             local shipment = {id="shipment-" .. tostring(state.shipmentCounter),
                 requestId=pending.requestId, generation=pending.generation,
                 item=shipmentItem, count=count, imported=0, verified=true,
+                crsBaseline=pending.crsBaseline,
                 createdAt=io.now(), turn=pending.turn, session=pending.session}
             cs.shipments[#cs.shipments + 1] = shipment
             local record = cs.requests[pending.requestId]
             if record then
                 record.firstShipmentAt = record.firstShipmentAt or io.now()
-                record.status, record.detail = "in progress", "Verified in delivery chest; awaiting colony import"
+                record.status, record.detail = "in progress", "Verified leaving PRS; awaiting colony CRS verification"
             end
             for _, job in pairs(state.craftJobs) do
                 if activeCraft(job) and matcher.exactlyMatches(job.item, pending.item) then
@@ -840,8 +853,12 @@ function M.new(config, store, io, matcher)
         end
         state.pendingTransfer = nil
         save()
-        store.event(pending.kind == "export" and "CHEST_VERIFIED" or "RETURN_IMPORTED",
-            pending.kind == "export" and "Delivery chest delta verified" or "Return chest decrease verified",
+        local exportProof = proof=="prs" and "PRS_VERIFIED" or "CHEST_VERIFIED"
+        local exportMessage = proof=="prs"
+            and "PRS stock decrease verified; awaiting colony CRS verification"
+            or "Delivery chest delta verified"
+        store.event(pending.kind == "export" and exportProof or "RETURN_IMPORTED",
+            pending.kind == "export" and exportMessage or "Return chest decrease verified",
             {colonyId=pending.colonyId, requestId=pending.requestId, item=pending.item.name, count=count})
     end
 
@@ -849,6 +866,27 @@ function M.new(config, store, io, matcher)
         local pending = state.pendingTransfer
         if not pending then return true end
         if not manual and io.now() < (pending.nextReadAt or 0) then return false end
+        if pending.kind=="export"
+            and type(pending.reported)=="number"
+            and pending.reported>0
+            and type(pending.prsBefore)=="number" then
+            local currentStock,stockError=io.stock()
+            if type(currentStock)=="table" then
+                local current=stockCount(currentStock,pending.item)
+                local prsDelta=pending.prsBefore-current
+                pending.lastPrsDelta=prsDelta
+                if prsDelta==integer(pending.reported) then
+                    creditTransfer(pending,integer(pending.reported),nil,"prs")
+                    if pending.uncertain or pending.recoveryProbe then
+                        clearQuarantine()
+                        store.event("PRS_RECOVERED","Held transfer verified from PRS stock decrease",{colonyId=pending.colonyId})
+                    end
+                    return true
+                end
+            else
+                pending.lastPrsError=tostring(stockError or "PRS inventory unavailable")
+            end
+        end
         local delta, err, physical = matchingPendingChest(pending)
         pending.nextReadAt = io.now() + (pending.pollSeconds or 0.25)
         if delta and delta > 0 and delta <= pending.count then
@@ -1019,6 +1057,8 @@ function M.new(config, store, io, matcher)
             chest=kind == "export" and colony.deliveryChest or colony.returnChest,
             item=copy(item), candidate=candidate and copy(candidate) or nil,
             variant=variant and copy(variant) or nil, count=count, before=before, physicalBefore=physicalBefore,
+            prsBefore=kind=="export" and stockCount(stockSnapshot or {}, item) or nil,
+            crsBaseline=kind=="export" and candidate and candidate.crsBaseline or nil,
             selectionMode=selectionMode,
             session=cs.turn.session, turn=cs.turn.id, startedAt=io.now(),
             verifySeconds=p.transferVerifyTimeoutSeconds, pollSeconds=p.transferPollSeconds,
@@ -1149,6 +1189,13 @@ function M.new(config, store, io, matcher)
                 p.maxItemsPerTurn - work.items, integer(capacity))
             if count <= 0 then
                 record.status, record.detail = "in progress", "Delivery chest has no reserved capacity"
+                save()
+                return
+            end
+            candidate.crsBaseline=requestCrsBaseline(request,candidate)
+            if candidate.crsBaseline==nil then
+                record.status,record.detail="error","Cannot establish pre-transfer CRS baseline; export withheld"
+                record.retryAt=io.now()+p.retryCooldownSeconds
                 save()
                 return
             end
