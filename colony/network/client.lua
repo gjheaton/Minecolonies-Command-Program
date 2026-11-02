@@ -436,6 +436,7 @@ function M.new(config, store, io, matcher)
                 or shipment.requestId == nil or shipment.verified ~= true
                 or type(shipment.item) ~= "table" or type(shipment.item.name) ~= "string"
                 or shipment.item.name == "" or amount(shipment.count) == 0
+                or type(shipment.crsBaseline)~="number" or shipment.crsBaseline<0
                 or (shipment.item.transientNameImport~=nil and not validTransientNameImport(shipment.item))
                 or (shipment.item.fingerprint ~= nil and not validFingerprint(shipment.item.fingerprint))
                 or (shipment.item.fingerprint == nil and matcher.canonicalNBT(shipment.item.nbt) ~= ""
@@ -541,7 +542,7 @@ function M.new(config, store, io, matcher)
         return ids
     end
 
-    local function selectedRequests(active)
+    local function selectedRequests(active, crsStock)
         local ids = activeIds(active)
         local eligible = {}
         for _, id in ipairs(ids) do
@@ -559,6 +560,23 @@ function M.new(config, store, io, matcher)
             request.firstSeen = record.firstSeen
             request.totalCount = record.totalCount
             request.imported, request.staged = shipmentTotals(id)
+            request.crsBaselines={}
+            local seenBaseline={}
+            for _,candidate in pairs(type(request.items)=="table" and request.items or {}) do
+                if type(candidate)=="table" and type(candidate.name)=="string" and candidate.name~="" then
+                    local identity=matcher.itemIdentity(candidate)
+                    if identity and not seenBaseline[identity] then
+                        seenBaseline[identity]=true
+                        local total=0
+                        for _,entry in pairs(type(crsStock)=="table" and crsStock or {}) do
+                            if type(entry)=="table" and matcher.exactlyMatches(candidate,entry) then
+                                total=total+amount(entry.amount or entry.count)
+                            end
+                        end
+                        request.crsBaselines[#request.crsBaselines+1]={identity=identity,amount=total}
+                    end
+                end
+            end
             out[#out + 1] = request
         end
         data.cursor = (start + limit) % #eligible
@@ -779,87 +797,65 @@ function M.new(config, store, io, matcher)
     local function drainDeliveries()
         if clientError() or data.intent then return end
 
-        -- Native RS Importer owns the physical delivery move. Master stages
-        -- only into an empty chest, so the existence of a newer verified
-        -- shipment proves every older shipment's chest contents were already
-        -- drained. Keep only the newest shipment tied to the live chest.
-        local shipments = {}
-        for _, shipment in pairs(data.shipments) do
-            if shipment.verified == true and amount(shipment.imported) < shipment.count then
-                shipments[#shipments + 1] = shipment
+        local shipments={}
+        for _,shipment in pairs(data.shipments) do
+            if shipment.verified==true and amount(shipment.imported)<shipment.count then
+                shipments[#shipments+1]=shipment
             end
         end
-        table.sort(shipments, function(a, b)
-            if a.createdAt ~= b.createdAt then return a.createdAt < b.createdAt end
-            return a.id < b.id
-        end)
-        if #shipments == 0 then return end
+        if #shipments==0 then return end
 
-        local changed = false
-        for index = 1, #shipments - 1 do
-            local shipment = shipments[index]
-            local remaining = math.max(0, amount(shipment.count) - amount(shipment.imported))
-            if remaining > 0 then
-                shipment.imported = amount(shipment.count)
-                changed = true
-                store.event("IMPORTED",
-                    "Older verified delivery acknowledged after a newer single-buffer shipment was staged",
-                    {
-                        shipmentId = shipment.id, requestId = shipment.requestId,
-                        item = shipment.item.name, count = remaining,
-                        chest = config.deliveryChestName,
-                    })
-            end
-        end
-
-        local shipment = shipments[#shipments]
-        yieldNow(io)
-        local items, err = chestSnapshot(config.deliveryChestName)
-        if not items then
-            fault("DELIVERY_CHEST", "Cannot read the delivery chest", { error = err })
+        local stock,err=io.colonyStock()
+        if type(stock)~="table" then
+            fault("CRS_READ","Cannot verify colony RS inventory after delivery",{error=err})
             return
         end
 
-        local remaining = math.max(0, amount(shipment.count) - amount(shipment.imported))
-        local observed = amount(io.count(items, shipment.item))
-        local totalPhysical = 0
-        for _, entry in pairs(items) do
-            if type(entry) == "table" then
-                totalPhysical = totalPhysical + amount(entry.count or entry.amount)
+        local groups={}
+        for _,shipment in ipairs(shipments) do
+            if type(shipment.crsBaseline)=="number" and shipment.crsBaseline>=0 then
+                local key=matcher.itemIdentity(shipment.item)
+                local group=groups[key]
+                if not group then
+                    group={item=shipment.item,baseline=amount(shipment.crsBaseline),shipments={}}
+                    groups[key]=group
+                else
+                    group.baseline=math.min(group.baseline,amount(shipment.crsBaseline))
+                end
+                group.shipments[#group.shipments+1]=shipment
             end
         end
 
-        if observed > remaining then
-            fault("DELIVERY_CHEST",
-                "Delivery chest contains more of the reserved item than the shipment ledger allows",
-                {
-                    shipmentId = shipment.id, requestId = shipment.requestId,
-                    item = shipment.item.name, expected = remaining, observed = observed,
-                })
-            return
-        end
-        if totalPhysical > observed then
-            fault("DELIVERY_CHEST",
-                "Delivery chest contains an item that is not the newest reserved shipment",
-                {
-                    shipmentId = shipment.id, requestId = shipment.requestId,
-                    item = shipment.item.name, expected = remaining,
-                    observed = observed, physicalTotal = totalPhysical,
-                })
-            return
-        end
-
-        local importedNow = remaining - observed
-        if importedNow > 0 then
-            shipment.imported = amount(shipment.imported) + importedNow
-            changed = true
-            store.event("IMPORTED",
-                "Native RS Importer drained verified delivery from staging chest",
-                {
-                    shipmentId = shipment.id, requestId = shipment.requestId,
-                    item = shipment.item.name, count = importedNow,
-                    chest = config.deliveryChestName,
-                })
+        local changed=false
+        for _,group in pairs(groups) do
+            local current=0
+            for _,entry in pairs(stock) do
+                if type(entry)=="table" and matcher.exactlyMatches(group.item,entry) then
+                    current=current+amount(entry.amount or entry.count)
+                end
+            end
+            local observedIncrease=math.max(0,current-group.baseline)
+            table.sort(group.shipments,function(a,b)
+                if a.createdAt~=b.createdAt then return a.createdAt<b.createdAt end
+                return a.id<b.id
+            end)
+            local remainingProof=observedIncrease
+            for _,shipment in ipairs(group.shipments) do
+                local already=amount(shipment.imported)
+                local target=math.min(shipment.count,remainingProof)
+                if target>already then
+                    local delta=target-already
+                    shipment.imported=target
+                    changed=true
+                    store.event("CRS_VERIFIED",
+                        "Colony RS inventory increase verified delivery",{
+                            shipmentId=shipment.id,requestId=shipment.requestId,
+                            item=shipment.item.name,count=delta,
+                            baseline=group.baseline,current=current,
+                        })
+                end
+                remainingProof=math.max(0,remainingProof-shipment.count)
+            end
         end
 
         if changed and not save() then return end
@@ -927,12 +923,22 @@ function M.new(config, store, io, matcher)
         yieldNow(io)
         stageOverflow(active)
         yieldNow(io)
+        local crsStock,crsError=io.colonyStock()
+        if type(crsStock)~="table" then
+            local selectors=selectorsForBatch()
+            return {
+                kind="batch",session=data.turn.session,turn=data.turn.turn,
+                requests={},imports=imports(),
+                clientError="Cannot read CRS inventory for pre-transfer baseline: "..tostring(crsError),
+                authoritative=false,returnSelectors=selectors,
+            }
+        end
         local name = io.colonyName()
         data.colonyName = type(name) == "string" and name or data.colonyName
         local selectors = selectorsForBatch()
         return {
             kind = "batch", session = data.turn.session, turn = data.turn.turn,
-            requests = selectedRequests(active), activeIds = activeIds(active),
+            requests = selectedRequests(active,crsStock), activeIds = activeIds(active),
             imports = imports(), colonyName = data.colonyName,
             authoritative = true, returnSelectors = selectors, clientError = clientError(),
         }
