@@ -467,10 +467,22 @@ function M.new(config, store, io, matcher)
                 record.status, record.detail = "timed out", "Craft deadline expired; existing job remains reserved"
             end
         elseif shipped > 0 then
-            record.status, record.detail = "in progress", "Waiting for MineColonies to remove the request"
-            if io.now() - (record.firstShipmentAt or io.now()) >= p.acknowledgementTimeoutSeconds then
-                record.status, record.detail = "timed out", "MineColonies acknowledgement overdue; verified quantities are not resent"
+            local outstanding=math.max(0,integer(record.requested)-shipped)
+            if outstanding>0 then
+                record.status, record.detail = "in progress",
+                    "Partial delivery verified; "..tostring(outstanding).." still outstanding and eligible for a future turn"
+                if io.now() - (record.firstShipmentAt or io.now()) >= p.acknowledgementTimeoutSeconds then
+                    record.status, record.detail = "timed out",
+                        "Partial delivery is overdue; "..tostring(outstanding).." remains eligible for a future turn"
+                end
+            else
+                record.status, record.detail = "in progress", "Waiting for MineColonies to remove the fully supplied request"
+                if io.now() - (record.firstShipmentAt or io.now()) >= p.acknowledgementTimeoutSeconds then
+                    record.status, record.detail = "timed out",
+                        "MineColonies acknowledgement overdue; full verified quantity already supplied"
+                end
             end
+        end
         elseif record.status ~= "missing" and io.now() - record.createdAt >= p.onHandTimeoutSeconds then
             record.status, record.detail = "timed out", "On-hand delivery deadline expired"
         end
