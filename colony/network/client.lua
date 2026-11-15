@@ -1089,6 +1089,13 @@ function M.new(config, store, io, matcher)
         local session = message.session and tostring(message.session)
         local turnId = message.turn and tostring(message.turn)
         if message.kind ~= "turn" and message.kind ~= "result" then return false end
+        -- A startup reset must complete before this client may reserve a turn.
+        -- The master's hello_ack and first turn are separate rednet messages and
+        -- can be observed out of order. If a turn arrives first, reject it; the
+        -- master will retry WAIT_BATCH after the reset ACK clears this gate.
+        if message.kind == "turn" and data.bootResetPending == true then
+            return false
+        end
         if not session or session == "" or not turnId or turnId == "" then return false end
         lastContact, data.lastContact = io.now(), io.now()
         if message.kind == "result" then
