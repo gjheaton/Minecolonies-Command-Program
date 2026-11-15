@@ -482,7 +482,6 @@ function M.new(config, store, io, matcher)
                         "MineColonies acknowledgement overdue; full verified quantity already supplied"
                 end
             end
-        end
         elseif record.status ~= "missing" and io.now() - record.createdAt >= p.onHandTimeoutSeconds then
             record.status, record.detail = "timed out", "On-hand delivery deadline expired"
         end
