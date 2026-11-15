@@ -74,6 +74,13 @@ local function fixture(role,hasMonitor,width,height,options)
     return f
 end
 
+Test.case("Master HOME displays the engine current turn colony number and phase",function()
+    local f=fixture("master",true,100,30)
+    f.state.currentTurn={colonyId=4,colonyLabel="Stardust",turn=19,phase="WAIT_BATCH"}
+    f.ui.view="home";f.ui.draw()
+    assert(f.monitor.dump():find("Current turn: Stardust #19   WAIT_BATCH",1,true))
+end)
+
 Test.case("shared supply UI renders every existing tab and preserves verified quantities",function()
     local f=fixture()
     f.state.requests={{id="R",name="minecraft:stone",status="in progress",requested=6,shipped=4,imported=2}}

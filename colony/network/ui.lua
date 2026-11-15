@@ -601,10 +601,13 @@ function M.new(config, store, engine, io, updater, options)
         local requests = list(snapshot.requests or snapshot.requestRows)
         local counts = {}
         for _,r in ipairs(requests) do local s=tostring(r.status or "requested"):lower(); counts[s]=(counts[s] or 0)+1 end
-        local turn = snapshot.turn or snapshot.session
-        local turnName = type(turn)=="table" and (turn.label or turn.colonyId or turn.id or turn.phase) or turn
+        local turn = snapshot.currentTurn or snapshot.turn or snapshot.session
+        local turnName = type(turn)=="table" and (turn.colonyLabel or turn.label or turn.colonyId or turn.id or turn.phase) or turn
+        local turnPhase = type(turn)=="table" and turn.phase or snapshot.phase
+        local turnNumber = type(turn)=="table" and (turn.turn or turn.id)
+        if turnNumber then turnName=tostring(turnName or "").." #"..tostring(turnNumber) end
         row(5,"Role: "..role():upper().."   Computer: "..tostring(options.sourceId or snapshot.computerId or os.getComputerID()),C.dim)
-        row(6,"Current turn: "..tostring(turnName or "Waiting").."   "..tostring(snapshot.phase or ""),C.accent)
+        row(6,"Current turn: "..tostring(turnName or "Waiting").."   "..tostring(turnPhase or ""),C.accent)
         local autoCraft,inherited=effective("autoCraftEnabled")
         local totalRequests=type(snapshot.totals)=="table" and tonumber(snapshot.totals.requests) or #requests
         totalRequests=math.max(#requests,math.floor(totalRequests or #requests))

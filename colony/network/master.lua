@@ -20,7 +20,8 @@ local function copy(value, seen)
 end
 
 local function requestCount(request)
-    local count = integer(request.count or request.minCount)
+    local count = integer(request.count)
+    if count == 0 then count = integer(request.minCount) end
     if count == 0 then
         for _, item in pairs(request.items or {}) do
             if type(item) == "table" then count = math.max(count, integer(item.count)) end
@@ -1471,9 +1472,17 @@ function M.new(config, store, io, matcher)
             active[tostring(id)] = true
         end
         for _, request in ipairs(message.requests) do
-            if type(request) ~= "table" or request.id == nil or type(request.items) ~= "table" then return false end
+            if type(request) ~= "table" or request.id == nil or type(request.items) ~= "table" then
+                errorEvent("BAD_BATCH", "Request is missing its id or item alternatives", {colonyId=colony.id,turn=turn.id})
+                return false
+            end
             local id = tostring(request.id)
-            if seen[id] or not active[id] or requestCount(request) <= 0 then return false end
+            if seen[id] or not active[id] or requestCount(request) <= 0 then
+                local reason=seen[id] and "Duplicate request id" or not active[id] and "Request absent from activeIds"
+                    or "Request has no positive count, minCount, or item count"
+                errorEvent("BAD_BATCH",reason,{colonyId=colony.id,turn=turn.id,requestId=id})
+                return false
+            end
             seen[id] = true
         end
         local imported, importError = acknowledgeImports(cs, message.imports)

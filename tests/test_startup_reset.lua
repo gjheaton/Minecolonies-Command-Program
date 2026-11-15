@@ -48,6 +48,17 @@ Test.case("Master-only restart releases both live Supply reservations", function
     end)
 end)
 
+Test.case("Stardust request with zero count and positive minimum cannot strand its batch", function()
+    local w, m = fixture()
+    w.computers[4].integrator.requests = {{id="MINIMUM", name="Stone", count=0,
+        minCount=4, items={{name="minecraft:stone", count=0}}}}
+    w.untilTrue(function()
+        local cs=m.store.data.master.colonies["4"]
+        return cs and cs.requests.MINIMUM ~= nil
+    end)
+    Test.equal(m.store.data.master.colonies["4"].requests.MINIMUM.requested,4)
+end)
+
 Test.case("late startup ACK never erases a fresh turn and stale startup hello never resets it", function()
     local w, m = fixture()
     w.drop.batch = 10000
