@@ -459,6 +459,16 @@ function M.new(config, store, io, matcher)
         local shipped, imported = totals(cs, record)
         record.shipped, record.imported = shipped, imported
         if record.status == "delivered" or record.status == "error" then return end
+        if integer(record.requested)>0 and imported>=integer(record.requested) then
+            record.fullyImportedAt=record.fullyImportedAt or io.now()
+            record.status,record.detail="in progress","Full quantity imported; waiting for MineColonies acknowledgement"
+            if io.now()-record.fullyImportedAt>=p.acknowledgementTimeoutSeconds then
+                record.status,record.errorCode="error","MC_ACK_OVERDUE"
+                record.detail="Full quantity imported, but MineColonies request is still open; inspect warehouse/requester. No additional supply sent"
+            end
+            return
+        end
+        record.fullyImportedAt=nil
         local job = record.craftIdentity and state.craftJobs[record.craftIdentity]
         if activeCraft(job) and shipped < integer(record.requested) then
             record.status = job.state == "uncertain" and "error" or "crafting"

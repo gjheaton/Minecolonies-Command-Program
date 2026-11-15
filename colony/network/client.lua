@@ -1485,6 +1485,15 @@ function M.new(config, store, io, matcher)
                     timeout = tonumber(setting("onHandTimeoutSeconds", 120))
                 end
                 record.status = phase
+                local imported = shipmentTotals(record.id)
+                if record.count>0 and imported>=record.count then
+                    record.fullyImportedAt=record.fullyImportedAt or now
+                    if phase~="error" and now-record.fullyImportedAt>=tonumber(setting("acknowledgementTimeoutSeconds",600)) then
+                        record.status="error"
+                        record.detail="Full quantity imported, but MineColonies request is still open; inspect warehouse/requester. No additional supply sent"
+                        timeout=nil
+                    end
+                else record.fullyImportedAt=nil end
                 if timeout and timeout > 0 and since and now - since >= timeout then
                     record.status = "timed out"
                     record.timeoutDetail = phase == "crafting" and "Crafting deadline exceeded; existing work retained"

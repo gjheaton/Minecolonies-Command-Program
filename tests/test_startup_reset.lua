@@ -48,6 +48,39 @@ Test.case("Master-only restart releases both live Supply reservations", function
     end)
 end)
 
+Test.case("fully imported requests become acknowledgement errors after ten minutes without resupply",function()
+    local w,m=fixture()
+    w.untilTrue(function()
+        local cs=m.store.data.master.colonies["4"]
+        return cs and cs.requests.R4~=nil
+    end)
+    -- The current deployment's external RS importer owns chest -> CRS moves.
+    -- Seed its confirmed cumulative receipt, rather than simulate a CRS export.
+    local shipment={id="ACK1",requestId="R4",generation=1,count=4,imported=4,
+        verified=true,item={name="minecraft:stone"},crsBaseline=0}
+    m.store.data.master.colonies["4"].shipments={S.copy(shipment)}
+    w.computers[4].store.data.client.shipments.ACK1=S.copy(shipment)
+    w.at(1,m.engine.snapshot);w.tick(4)
+    local record=m.store.data.master.colonies["4"].requests.R4
+    assert(record.fullyImportedAt)
+    local exports=#w.callsFor("export",true)
+    w.now=record.fullyImportedAt+599
+    w.at(1,m.engine.snapshot)
+    Test.equal(record.status,"in progress")
+    w.advance(1)
+    w.at(1,m.engine.snapshot)
+    Test.equal(record.status,"error")
+    Test.equal(record.errorCode,"MC_ACK_OVERDUE")
+    for _=1,20 do w.step() end
+    local rows=w.at(4,w.computers[4].engine.snapshot).requests
+    Test.equal(rows[1].status,"error")
+    Test.equal(#w.callsFor("export",true),exports,"acknowledgement error resent stock")
+    Test.equal(#w.callsFor("craft",true),0)
+    w.computers[4].integrator.requests={}
+    w.untilTrue(function() return record.status=="delivered" end)
+    Test.equal(#w.callsFor("export",true),exports)
+end)
+
 Test.case("new Master grant arriving before reset receipt cannot reserve an idle client",function()
     local w,m=fixture()
     local c=w.computers[4]
