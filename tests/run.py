@@ -34,6 +34,7 @@ try:
     lua.execute("require('tests.test_zero_return')")
     lua.execute("require('tests.test_delivery_diagnostics')")
     lua.execute("require('tests.test_empty_nbt')")
+    lua.execute("require('tests.test_startup_reset')")
     passed, failed = lua.eval("Test.run()")
 except Exception as error:
     sys.exit(f"Simulation could not run: {error}")

@@ -1597,6 +1597,12 @@ function M.new(config, store, io, matcher)
         if kind == "hello" or kind == "heartbeat" then
             local resetAccepted = false
             if kind == "hello" then
+                local resetId = message.startupResetId
+                if resetId ~= nil and (type(resetId) ~= "string" or resetId == "" or #resetId > 128) then return false end
+                cs.acceptedResetIds = cs.acceptedResetIds or {}
+                -- A delayed hello from an earlier Supply process must not
+                -- reclaim the current process's chest or erase its turn.
+                if resetId and cs.acceptedResetIds[resetId] and cs.startupResetId ~= resetId then return false end
                 local confirmed = channel(message.deliveryChannel) ~= ""
                     and channel(message.deliveryChannel) == channel(colony.deliveryChannel)
                     and channel(message.returnChannel) ~= ""
@@ -1604,7 +1610,8 @@ function M.new(config, store, io, matcher)
 
                 local needsReset =
                     bootResetPending[tostring(colony.id)] == true
-                    or message.startupReset == true
+                    or (message.startupReset == true
+                        and (not resetId or cs.startupResetId ~= resetId))
                 if confirmed and needsReset then
                     local resetOK, resetDetail =
                         resetColonyStaging(
@@ -1616,6 +1623,8 @@ function M.new(config, store, io, matcher)
                         )
                     if resetOK then
                         bootResetPending[tostring(colony.id)] = false
+                        cs.startupResetId = resetId
+                        if resetId then cs.acceptedResetIds[resetId] = true end
                         resetAccepted = true
                     else
                         cs.routeError = tostring(resetDetail)
@@ -1665,6 +1674,9 @@ function M.new(config, store, io, matcher)
                 -- A paused master still confirms connectivity. This receipt
                 -- cannot grant permission to touch either Ender Chest.
                 local drainLocked=deliveryDrainLockedFor(colony)
+                local resetReceipt = resetAccepted or (cs.routeConfirmed == true
+                    and message.startupResetId ~= nil and cs.startupResetId == message.startupResetId
+                    and bootResetPending[tostring(colony.id)] ~= true)
                 if not drainLocked then
                     cs.deliveryDrainLockedAck=false
                     cs.deliveryDrainLockAckAt=nil
@@ -1672,7 +1684,9 @@ function M.new(config, store, io, matcher)
                 io.send(colony.id, {kind="hello_ack", routeConfirmed=cs.routeConfirmed == true,
                     automationEnabled=config.automationEnabled ~= false,
                     deliveryDrainLocked=drainLocked,
-                    startupResetAccepted=resetAccepted,
+                    startupResetAccepted=resetReceipt,
+                    startupResetId=message.startupResetId,
+                    resetSession=resetReceipt and session or nil,
                     error=cs.routeError})
                 if not cs.routeConfirmed
                     or bootResetPending[tostring(colony.id)] == true then

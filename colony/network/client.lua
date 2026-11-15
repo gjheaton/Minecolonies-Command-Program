@@ -1,5 +1,6 @@
 -- Dedicated supply client. Only the master owns player Refined Storage.
 local M = {}
+local bootSequence = 0
 
 local function amount(value)
     return math.max(0, math.floor(tonumber(value) or 0))
@@ -336,6 +337,9 @@ function M.new(config, store, io, matcher)
     local self = {}
     store.data.client = type(store.data.client) == "table" and store.data.client or {}
     local data = store.data.client
+    bootSequence = bootSequence + 1
+    local bootId = tostring(os.epoch and os.epoch("utc") or io.now()) .. ":" .. tostring(bootSequence)
+    local resetSessions = {}
     data.requests = type(data.requests) == "table" and data.requests or {}
     data.shipments = type(data.shipments) == "table" and data.shipments or {}
     data.returnSelectors = type(data.returnSelectors) == "table" and data.returnSelectors or {}
@@ -1053,6 +1057,9 @@ function M.new(config, store, io, matcher)
                 or (message.deliveryDrainLocked ~= nil and type(message.deliveryDrainLocked) ~= "boolean")
                 or (message.startupResetAccepted ~= nil and type(message.startupResetAccepted) ~= "boolean")
                 or message.error ~= nil and (type(message.error) ~= "string" or #message.error > 512) then return false end
+            if message.startupResetId ~= nil and message.startupResetId ~= bootId then return false end
+            if message.resetSession ~= nil and (type(message.resetSession) ~= "string"
+                or message.resetSession == "" or data.retiredSessions[message.resetSession]) then return false end
             lastContact = io.now()
             masterConnection = {
                 routeConfirmed = message.routeConfirmed,
@@ -1063,11 +1070,19 @@ function M.new(config, store, io, matcher)
                 receivedAt = lastContact,
             }
             if message.startupResetAccepted == true
-                and data.bootResetPending == true then
-                -- Only the outstanding startup-reset handshake may clear live
-                -- protocol state. A delayed/duplicate hello_ack can arrive after
-                -- a fresh turn grant; clearing data.turn here would strand the
-                -- Master in WAIT_BATCH until COLONY_TIMEOUT.
+                and (data.bootResetPending == true
+                    or (message.startupResetId == bootId and message.resetSession
+                        and not resetSessions[message.resetSession])) then
+                -- Clear only this Supply boot's reset or the first receipt
+                -- from a new Master session. Repeated receipts cannot erase a
+                -- freshly accepted turn, while Master-only restarts can release
+                -- a live reservation whose counterpart no longer exists.
+                if message.resetSession then
+                    resetSessions[message.resetSession] = true
+                    if data.session and data.session ~= message.resetSession then
+                        data.retiredSessions[tostring(data.session)] = io.now()
+                    end
+                end
                 data.intent = nil
                 data.fault = nil
                 data.turn = nil
@@ -1257,6 +1272,7 @@ function M.new(config, store, io, matcher)
                     deliveryChannel = config.deliveryChannel,
                     returnChannel = config.returnChannel,
                     startupReset = true,
+                    startupResetId = bootId,
                     clientError = clientError(),
                     imports = imports(),
                 })
@@ -1383,6 +1399,7 @@ function M.new(config, store, io, matcher)
                 deliveryChestName = config.deliveryChestName, returnChestName = config.returnChestName,
                 deliveryChannel = config.deliveryChannel, returnChannel = config.returnChannel,
                 startupReset = false,
+                startupResetId = bootId,
                 clientError = clientError(), session = data.turn and data.turn.session,
                 turn = data.turn and data.turn.turn,
                 imports = imports(),
