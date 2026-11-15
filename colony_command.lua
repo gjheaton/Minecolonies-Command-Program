@@ -17,15 +17,33 @@
 --         building, and CHECK UPDATE / UPDATE is persistent in the header.
 -- v3.0.7: Shared updater now validates both app and suite metadata versions.
 -- v4.0.0: Command version aligned with the v4 suite release line.
+-- v4.0.2: Suite version is read from the installed manifest/config so
+--         suite-only updates do not cause a permanent update notification.
 
 local REFRESH_SECONDS = 10
 local RAID_BLINK_SECONDS = 0.75
 local TEXT_SCALE = 0.5
-local PROGRAM_VERSION = "4.0.1"
-local SUITE_VERSION = "4.1.13"
+local PROGRAM_VERSION = "4.0.2"
 
 local Util = require("colony.lib.util")
 local SharedUI = require("colony.lib.ui")
+
+-- The suite version belongs to the installed package, not to this app source.
+-- Read it from the local manifest/config so suite-only updates do not leave
+-- Command Center permanently advertising an update while the app version is unchanged.
+local function installedSuiteVersion()
+    local ok, manifest = pcall(dofile, "/colony/manifest.lua")
+    if ok and type(manifest) == "table" and type(manifest.suiteVersion) == "string" then
+        return manifest.suiteVersion
+    end
+    local cfg = Util.readSerializedTable("/colony/app.cfg")
+    if type(cfg) == "table" and type(cfg.suiteVersion) == "string" then
+        return cfg.suiteVersion
+    end
+    return "unknown"
+end
+
+local SUITE_VERSION = installedSuiteVersion()
 local SuiteUpdater = require("colony.lib.updater")
 local VisitorJobs = require("colony.command.visitor_jobs")
 local Waypoints = require("colony.command.waypoints")
