@@ -550,16 +550,39 @@ function M.new(config, store, io, matcher)
 
     local function selectedRequests(active, crsStock)
         local ids = activeIds(active)
-        local eligible = {}
+        local partial, fresh = {}, {}
         for _, id in ipairs(ids) do
-            if data.requests[id].count > 0 then eligible[#eligible + 1] = id end
+            local record=data.requests[id]
+            if record.count > 0 then
+                local imported, staged=shipmentTotals(id)
+                local supplied=imported+staged
+                if supplied>0 and supplied<record.count then
+                    partial[#partial+1]=id
+                else
+                    fresh[#fresh+1]=id
+                end
+            end
         end
         local out = {}
-        if #eligible == 0 then return out end
-        local limit = math.min(#eligible, amount(setting("maxRequestsPerTurn", 8)))
-        local start = data.cursor % #eligible
-        for offset = 1, limit do
-            local id = eligible[(start + offset - 1) % #eligible + 1]
+        local totalEligible=#partial+#fresh
+        if totalEligible == 0 then return out end
+        local limit = math.min(totalEligible, amount(setting("maxRequestsPerTurn", 8)))
+        local selected={}
+        -- Finish already-started requests first. This keeps a verified partial
+        -- shipment from waiting several round-robin turns behind untouched work.
+        for _,id in ipairs(partial) do
+            if #selected>=limit then break end
+            selected[#selected+1]=id
+        end
+        if #selected<limit and #fresh>0 then
+            local start = data.cursor % #fresh
+            local take=math.min(#fresh,limit-#selected)
+            for offset=1,take do
+                selected[#selected+1]=fresh[(start+offset-1)%#fresh+1]
+            end
+            data.cursor=(start+take)%#fresh
+        end
+        for _, id in ipairs(selected) do
             local record = data.requests[id]
             local request = copy(active[id])
             request.id = id
@@ -585,7 +608,6 @@ function M.new(config, store, io, matcher)
             end
             out[#out + 1] = request
         end
-        data.cursor = (start + limit) % #eligible
         return out
     end
 
