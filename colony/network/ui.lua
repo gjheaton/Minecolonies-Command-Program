@@ -709,15 +709,26 @@ function M.new(config, store, engine, io, updater, options)
         local rows,page,pages=pageRows(requests,"requests",h-9)
         frame("ACTIVE REQUESTS  "..page.."/"..pages,"VERIFIED is staged; completion requires MineColonies acknowledgement.",C.dim)
         local wide=w>=70
-        local itemWidth=math.max(8,w-(wide and 49 or 27))
+        local showColony=role()=="master" and wide
+        local colonyWidth=showColony and 10 or 0
+        local itemWidth=math.max(8,w-(wide and 49 or 27)-(showColony and (colonyWidth+1) or 0))
         local quantityWidth=wide and 22 or 11
-        row(5,Util.padRight("ITEM",itemWidth).." "..Util.padRight(wide and "REQ / VERIFIED / IMPORT" or "VERIFY/REQ",quantityWidth).." STATUS",C.dim)
+        local header=(showColony and (Util.padRight("COLONY",colonyWidth).." ") or "")
+            ..Util.padRight("ITEM",itemWidth).." "
+            ..Util.padRight(wide and "REQ / VERIFIED / IMPORT" or "VERIFY/REQ",quantityWidth)
+            .." STATUS"
+        row(5,header,C.dim)
         for i,r in ipairs(rows) do
             local shipped=r.shipped or r.verified or r.sent or ((r.staged or 0)+(r.imported or 0))
             local quantity=wide and (tostring(r.requested or r.count or 0).." / "..tostring(shipped).." / "..tostring(r.imported or 0))
                 or (tostring(shipped).."/"..tostring(r.requested or r.count or 0))
             local item=tostring(r.displayName or r.item or r.name or r.id or "Unknown")
-            row(5+i,Util.padRight(item,itemWidth).." "..Util.padRight(quantity,quantityWidth).." "..tostring(r.status or "requested"):upper(),statusColor(r.status),function()
+            local colony=showColony and tostring(r.colonyLabel or r.colonyId or "?") or ""
+            local line=(showColony and (Util.padRight(colony,colonyWidth).." ") or "")
+                ..Util.padRight(item,itemWidth).." "
+                ..Util.padRight(quantity,quantityWidth).." "
+                ..tostring(r.status or "requested"):upper()
+            row(5+i,line,statusColor(r.status),function()
                 self.notice=item
                     .." | id="..tostring(r.id or r.requestId or "UNKNOWN")
                     ..(r.generation~=nil and (" | gen="..tostring(r.generation)) or "")
