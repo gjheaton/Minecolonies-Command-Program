@@ -1127,6 +1127,10 @@ function M.new(config, store, io, matcher)
                 -- a live reservation whose counterpart no longer exists.
                 if message.resetSession then
                     resetSessions[message.resetSession] = true
+                    if data.masterResetSession and data.masterResetSession ~= message.resetSession then
+                        data.retiredSessions[tostring(data.masterResetSession)] = io.now()
+                    end
+                    data.masterResetSession = message.resetSession
                     if data.session and data.session ~= message.resetSession then
                         data.retiredSessions[tostring(data.session)] = io.now()
                     end
@@ -1159,6 +1163,11 @@ function M.new(config, store, io, matcher)
         if message.kind == "turn" and data.bootResetPending == true then
             return false
         end
+        -- On a Master-only restart an idle/finished client can otherwise accept
+        -- the new grant before its reset receipt, then lose that reservation
+        -- when the receipt arrives. Require the acknowledged Master session.
+        if message.kind == "turn" and data.masterResetSession
+            and session ~= data.masterResetSession then return false end
         if not session or session == "" or not turnId or turnId == "" then return false end
         lastContact, data.lastContact = io.now(), io.now()
         if message.kind == "result" then

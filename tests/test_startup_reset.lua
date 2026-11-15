@@ -48,6 +48,29 @@ Test.case("Master-only restart releases both live Supply reservations", function
     end)
 end)
 
+Test.case("new Master grant arriving before reset receipt cannot reserve an idle client",function()
+    local w,m=fixture()
+    local c=w.computers[4]
+    w.untilTrue(function() return c.store.data.client.turn and c.store.data.client.turn.phase=="finished" end)
+    w.queue={}
+    m.restart();m.store.data.master.colonyCursor=1
+    w.advance(1);w.tick(4);w.deliver()
+    w.tick(1)
+    local grantIndex
+    for index,packet in ipairs(w.queue) do
+        if packet.to==4 and packet.message.kind=="turn" then grantIndex=index;break end
+    end
+    assert(grantIndex,"new Master grant was not queued")
+    local old=c.store.data.client.turn
+    w.deliver(grantIndex)
+    assert(c.store.data.client.turn==old,"client reserved a turn from an unacknowledged Master session")
+    w.flush()
+    w.untilTrue(function()
+        local cs=m.store.data.master.colonies["4"]
+        return cs and cs.requests.R4~=nil
+    end)
+end)
+
 Test.case("Stardust request with zero count and positive minimum cannot strand its batch", function()
     local w, m = fixture()
     w.computers[4].integrator.requests = {{id="MINIMUM", name="Stone", count=0,
@@ -138,6 +161,31 @@ Test.case("batch send failures are visible and the original batch retries after 
     assert(c.store.data.client.turn.turn==turn.turn)
     snapshot=w.at(4,c.engine.snapshot)
     assert(not snapshot.statusMessage:find("Batch not sent",1,true))
+end)
+
+Test.case("Master send failures identify colony and retain the original grant for retry",function()
+    local w,m=fixture()
+    local original=m.io.send
+    local blocked=true
+    m.io.send=function(id,message)
+        if blocked and id==4 and message.kind=="turn" then return false,"Message exceeds protocol limits" end
+        return original(id,message)
+    end
+    w.untilTrue(function()
+        local cs=m.store.data.master.colonies["4"]
+        return cs and cs.turn and cs.turn.sendError
+    end)
+    local held=m.store.data.master.colonies["4"].turn
+    assert(held.sendError:find("protocol limits",1,true))
+    local found=false
+    for _,event in ipairs(m.store.data.errors) do
+        if event.code=="NETWORK_SEND" and event.context.colonyId==4 then found=true end
+    end
+    assert(found,"Master hid a failed turn transmission")
+    blocked=false
+    w.untilTrue(function() return m.store.data.master.colonies["4"].requests.R4~=nil end)
+    assert(m.store.data.master.colonies["4"].turn.id==held.id)
+    assert(held.sendError==nil)
 end)
 
 Test.case("late startup ACK never erases a fresh turn and stale startup hello never resets it", function()

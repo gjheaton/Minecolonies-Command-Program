@@ -493,12 +493,22 @@ function M.new(config, store, io, matcher)
         if not turn then return end
         turn.lastSentAt = io.now()
         save()
+        local message
         if turn.phase == "WAIT_BATCH" then
-            io.send(colony.id, {kind="turn", session=turn.session, turn=turn.id,
-                policy=copy(turn.policy), deliveries=shipmentsFor(cs)})
+            message={kind="turn", session=turn.session, turn=turn.id,
+                policy=copy(turn.policy), deliveries=shipmentsFor(cs)}
         elseif turn.phase == "RESULT" then
-            io.send(colony.id, copy(turn.result))
+            message=copy(turn.result)
         end
+        if not message then return end
+        local sent,detail=io.send(colony.id,message)
+        if not sent then
+            local reason="Cannot send "..message.kind..": "..tostring(detail or "modem did not accept the message")
+            if turn.sendError~=reason then
+                errorEvent("NETWORK_SEND",reason,{colonyId=colony.id,turn=turn.id,phase=turn.phase})
+            end
+            turn.sendError=reason
+        else turn.sendError=nil end
     end
 
     local function finishTurn(colony, cs)
@@ -2234,7 +2244,8 @@ function M.new(config, store, io, matcher)
             local p = policy(colony)
             colonies[#colonies + 1] = {id=colony.id, label=colony.label or cs.colonyName or tostring(colony.id),
                 state=(cs.error or cs.routeError) and "error" or cs.turn and cs.turn.phase or "idle", lastSeen=cs.lastSeen,
-                session=cs.turn and cs.turn.session, turn=cs.turn and cs.turn.id, detail=cs.error or cs.routeError}
+                session=cs.turn and cs.turn.session, turn=cs.turn and cs.turn.id,
+                detail=cs.error or cs.routeError or (cs.turn and cs.turn.sendError)}
             for _, record in pairs(cs.requests) do
                 if record.status ~= "delivered" then
                     statusRecord(cs, record, p)
