@@ -131,7 +131,20 @@ function M.new(config, store, io, matcher)
     state.turnCounter = integer(state.turnCounter)
     state.shipmentCounter = integer(state.shipmentCounter)
     state.colonyCursor = integer(state.colonyCursor)
-    local session = "master-" .. tostring(state.sessionCounter)
+
+    -- Runtime state is intentionally volatile, so sessionCounter alone resets
+    -- after every reboot and would reuse "master-1". A still-running Supply
+    -- client correctly rejects repeated turn numbers from an old session.
+    -- Include wall-clock epoch (plus computer ID when available) so every
+    -- Master process gets a fresh protocol session across restarts.
+    local epoch
+    if os and type(os.epoch)=="function" then
+        local ok,value=pcall(os.epoch,"utc")
+        if ok and type(value)=="number" then epoch=math.floor(value) end
+    end
+    epoch=epoch or math.floor((os and os.clock and os.clock() or 0)*1000)
+    local computerId=os and type(os.getComputerID)=="function" and os.getComputerID() or 0
+    local session = table.concat({"master",tostring(computerId),tostring(epoch),tostring(state.sessionCounter)},"-")
     local work = nil
     local nextTurnAt = io.now()
     local bootResetPending = {}
