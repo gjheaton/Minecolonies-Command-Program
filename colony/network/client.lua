@@ -1062,7 +1062,12 @@ function M.new(config, store, io, matcher)
                 error = message.error,
                 receivedAt = lastContact,
             }
-            if message.startupResetAccepted == true then
+            if message.startupResetAccepted == true
+                and data.bootResetPending == true then
+                -- Only the outstanding startup-reset handshake may clear live
+                -- protocol state. A delayed/duplicate hello_ack can arrive after
+                -- a fresh turn grant; clearing data.turn here would strand the
+                -- Master in WAIT_BATCH until COLONY_TIMEOUT.
                 data.intent = nil
                 data.fault = nil
                 data.turn = nil
