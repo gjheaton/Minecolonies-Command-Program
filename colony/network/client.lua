@@ -1,5 +1,6 @@
 -- Dedicated supply client. Only the master owns player Refined Storage.
 local M = {}
+local Protocol = require("colony.network.protocol")
 local bootSequence = 0
 
 local function amount(value)
@@ -366,6 +367,7 @@ function M.new(config, store, io, matcher)
     local lastContact
     local masterConnection
     local persistenceError
+    local sendErrors = {}
     local startupPreparationPending =
         type(data.turn) == "table" and data.turn.phase == "preparing"
     local startupInterruptedPending =
@@ -399,7 +401,18 @@ function M.new(config, store, io, matcher)
 
     local function send(message)
         message.version = 1
-        return io.send(tonumber(config.masterId), message)
+        local ok, detail = io.send(tonumber(config.masterId), message)
+        if not ok then
+            detail = tostring(detail or "modem did not accept the message")
+            if sendErrors[message.kind] ~= detail then
+                store.error("NETWORK_SEND", "Cannot send "..tostring(message.kind)..": "..detail,
+                    {turn=message.turn,session=message.session,masterId=config.masterId})
+            end
+            sendErrors[message.kind] = detail
+        else
+            sendErrors[message.kind] = nil
+        end
+        return ok, detail
     end
 
     local function clientError()
@@ -588,7 +601,21 @@ function M.new(config, store, io, matcher)
         end
         for _, id in ipairs(selected) do
             local record = data.requests[id]
-            local request = copy(active[id])
+            -- Integrator payloads also contain presentation/recipe metadata.
+            -- Send only the fields consumed by Master and its matcher; a large
+            -- unused field must not silently prevent the entire batch sending.
+            local raw = active[id]
+            local request = {}
+            for _,key in ipairs({"count","minCount","name","displayName","description","desc","type","toolType","toolClass"}) do
+                request[key] = copy(raw[key])
+            end
+            request.items = {}
+            for _,item in pairs(type(raw.items)=="table" and raw.items or {}) do
+                if type(item)=="table" then
+                    request.items[#request.items+1] = {name=item.name,displayName=item.displayName,
+                        count=item.count,nbt=copy(item.nbt)}
+                end
+            end
             request.id = id
             request.firstSeen = record.firstSeen
             request.totalCount = record.totalCount
@@ -612,7 +639,7 @@ function M.new(config, store, io, matcher)
             end
             out[#out + 1] = request
         end
-        return out
+        return out, {freshCount=#fresh, freshSelected=math.max(0,#selected-math.min(#partial,limit))}
     end
 
     local function chestSnapshot(name)
@@ -969,12 +996,33 @@ function M.new(config, store, io, matcher)
         local name = io.colonyName()
         data.colonyName = type(name) == "string" and name or data.colonyName
         local selectors = selectorsForBatch()
-        return {
+        local requests,selection = selectedRequests(active,crsStock)
+        local batch = {
             kind = "batch", session = data.turn.session, turn = data.turn.turn,
-            requests = selectedRequests(active,crsStock), activeIds = activeIds(active),
+            requests = requests, activeIds = activeIds(active),
             imports = imports(), colonyName = data.colonyName,
             authoritative = true, returnSelectors = selectors, clientError = clientError(),
         }
+        batch.version = 1
+        local removed=0
+        -- A batch may contain fewer than the negotiated maximum. Keep each
+        -- request's exact alternatives intact, plus all active IDs and receipts.
+        while #batch.requests > 1 and not Protocol.valid(batch) do
+            table.remove(batch.requests)
+            removed=removed+1
+        end
+        if selection and selection.freshCount>0 then
+            data.cursor=(data.cursor-math.min(removed,selection.freshSelected))%selection.freshCount
+        end
+        if not Protocol.valid(batch) then
+            local detail="Batch exceeds protocol limits even with one request; inspect request metadata or return selectors"
+            store.error("BATCH_LIMIT",detail,{turn=batch.turn,requestId=batch.requests[1] and batch.requests[1].id})
+            -- Close the reservation with an explicit non-authoritative error.
+            -- Do not report absent requests or invent delivery acknowledgements.
+            return {version=1,kind="batch",session=batch.session,turn=batch.turn,
+                authoritative=false,requests={},imports={},clientError=detail}
+        end
+        return batch
     end
 
     local function acknowledge(turn)
@@ -1609,12 +1657,16 @@ function M.new(config, store, io, matcher)
         local routeConfirmed = masterConnection and masterConnection.routeConfirmed
         local automationEnabled = masterConnection and masterConnection.automationEnabled
         local detail = clientError()
+        if not detail and sendErrors.batch then detail="Batch not sent: "..sendErrors.batch end
         if not detail then
             if not connected then detail = "Waiting for master connection"
             elseif routeConfirmed == false then detail = masterConnection.error or "Master connected; colony route mismatch"
             elseif automationEnabled == false then detail = "Master connected; automation paused"
             elseif masterConnection and masterConnection.deliveryDrainLocked==true then
                 detail = "Master connected; delivery drain locked for PRS transfer verification"
+            elseif data.bootResetPending then detail="Master connected; waiting for startup reset acknowledgement"
+            elseif data.turn and data.turn.phase=="waiting" then detail="Batch sent; waiting for Master result"
+            elseif data.turn and data.turn.phase=="preparing" then detail="Preparing colony batch"
             else detail = "Master connected; waiting for turns" end
         end
         local turn
@@ -1642,10 +1694,10 @@ function M.new(config, store, io, matcher)
         end
         return {
             role = "supply", colonyName = data.colonyName,
-            health = { ok = connected == true and not clientError() and routeConfirmed ~= false,
+            health = { ok = connected == true and not clientError() and not sendErrors.batch and routeConfirmed ~= false,
                 connected = connected == true, detail = detail,
                 routeConfirmed = routeConfirmed, automationEnabled = automationEnabled },
-            status = clientError() and "error" or (data.turn and data.turn.phase or "waiting"),
+            status = (clientError() or sendErrors.batch) and "error" or (data.turn and data.turn.phase or "waiting"),
             statusMessage = detail,
             requests = rows, colonies = {}, history = store.data.history or {}, errors = store.data.errors or {},
             settings = store.data.settings or config, turn = turn, intent = intent,

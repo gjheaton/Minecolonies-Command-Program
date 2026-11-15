@@ -59,6 +59,87 @@ Test.case("Stardust request with zero count and positive minimum cannot strand i
     Test.equal(m.store.data.master.colonies["4"].requests.MINIMUM.requested,4)
 end)
 
+Test.case("large unused Integrator metadata cannot silently prevent Stardust batch transmission", function()
+    local w,m=fixture()
+    local request=S.request("LARGE","minecraft:stone",4)
+    request.recipe={debug=string.rep("x",5000)}
+    request.items[1].tags={debug=string.rep("y",5000)}
+    w.computers[4].integrator.requests={request}
+    w.untilTrue(function()
+        local cs=m.store.data.master.colonies["4"]
+        return cs and cs.requests.LARGE ~= nil
+    end)
+    local packet=w.packet("batch",1)
+    assert(packet)
+    Test.equal(m.store.data.master.colonies["4"].requests.LARGE.requested,4)
+end)
+
+Test.case("untransmittable exact request closes reservation with a visible error and no shipment", function()
+    local w,m=fixture()
+    local request=S.request("NBT-LARGE","minecraft:stone",4,string.rep("x",5000))
+    w.computers[4].integrator.requests={request}
+    w.untilTrue(function()
+        local cs=m.store.data.master.colonies["4"]
+        return cs and cs.error and cs.error:find("protocol limits",1,true)
+    end)
+    local cs=m.store.data.master.colonies["4"]
+    assert(cs.turn.phase~="WAIT_BATCH")
+    Test.equal(#cs.shipments,0)
+    local found=false
+    for _,event in ipairs(w.computers[4].store.data.errors) do if event.code=="BATCH_LIMIT" then found=true end end
+    assert(found,"local batch error was not recorded")
+end)
+
+Test.case("smaller wire batches retain exact alternatives and eventually visit every request", function()
+    local w,m=fixture()
+    local requests={}
+    for index=1,10 do
+        local request={id="WIDE"..index,count=1,name="Wide request",items={}}
+        for alternative=1,600 do
+            request.items[#request.items+1]={name="minecraft:item_"..alternative,count=1}
+        end
+        requests[#requests+1]=request
+    end
+    w.computers[4].integrator.requests=requests
+    w.untilTrue(function()
+        local cs=m.store.data.master.colonies["4"]
+        for index=1,10 do if not (cs and cs.requests["WIDE"..index]) then return false end end
+        return true
+    end)
+    local shortened=false
+    for _,packet in ipairs(w.sent) do
+        if packet.from==4 and packet.message.kind=="batch" and packet.message.authoritative then
+            if #packet.message.requests<8 then shortened=true end
+            for _,request in ipairs(packet.message.requests) do Test.equal(#request.items,600) end
+        end
+    end
+    assert(shortened,"fixture did not exercise smaller batches")
+end)
+
+Test.case("batch send failures are visible and the original batch retries after transport recovers", function()
+    local w,m=fixture()
+    local c=w.computers[4]
+    local original=c.io.send
+    local blocked=true
+    c.io.send=function(id,message)
+        if blocked and message.kind=="batch" then return false,"test transport failure" end
+        return original(id,message)
+    end
+    w.untilTrue(function() return c.store.data.client.turn and c.store.data.client.turn.phase=="waiting" end)
+    local turn=c.store.data.client.turn
+    local snapshot=w.at(4,c.engine.snapshot)
+    assert(snapshot.statusMessage:find("Batch not sent",1,true))
+    assert(not snapshot.health.ok)
+    blocked=false
+    w.untilTrue(function()
+        local cs=m.store.data.master.colonies["4"]
+        return cs and cs.requests.R4 ~= nil
+    end)
+    assert(c.store.data.client.turn.turn==turn.turn)
+    snapshot=w.at(4,c.engine.snapshot)
+    assert(not snapshot.statusMessage:find("Batch not sent",1,true))
+end)
+
 Test.case("late startup ACK never erases a fresh turn and stale startup hello never resets it", function()
     local w, m = fixture()
     w.drop.batch = 10000
