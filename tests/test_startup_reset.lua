@@ -29,6 +29,47 @@ local function fixture()
     return w, m
 end
 
+Test.case("CRS read recovery keeps receipts and never moves items",function()
+    local w,m=fixture()
+    local c=w.computers[4]
+    w.untilTrue(function() return c.store.data.client.turn and c.store.data.client.turn.phase=="finished" end)
+    local d=c.store.data.client
+    d.shipments.READ1={id="READ1",requestId="R4",count=4,imported=0,
+        verified=true,item={name="minecraft:stone"},crsBaseline=0,createdAt=w.now}
+    local reads=0
+    c.io.colonyStock=function() reads=reads+1;return nil,"NOT_CONNECTED" end
+    w.tick(4)
+    Test.equal(d.fault.code,"CRS_READ")
+    w.advance(5);w.tick(4)
+    Test.equal(d.fault.code,"CRS_READ")
+    local attempted=reads
+    w.tick(4);Test.equal(reads,attempted)
+    c.io.colonyStock=function() reads=reads+1;return {{name="minecraft:stone",amount=2}} end
+    local calls=#w.calls
+    w.advance(5);w.tick(4)
+    assert(not d.fault,"successful stock read left stale fault")
+    Test.equal(d.shipments.READ1.imported,2,"recovery invented delivery proof")
+    Test.equal(#w.calls,calls,"recovery moved items")
+    d.fault={code="TRANSFER_DESYNC",message="held",time=w.now}
+    attempted=reads;w.advance(5);w.tick(4)
+    Test.equal(d.fault.code,"TRANSFER_DESYNC")
+    Test.equal(reads,attempted,"recovery bypassed transfer hold")
+    d.fault={code="CRS_READ",message="read failed",time=w.now}
+    d.intent={kind="import"}
+    w.advance(5);w.tick(4)
+    Test.equal(reads,attempted,"recovery bypassed unresolved transfer intent")
+    assert(d.fault and d.intent)
+    d.intent=nil
+    d.shipments={}
+    c.io.colonyStock=function() return nil,"NOT_CONNECTED" end
+    local ok=w.at(4,c.engine.reconcile)
+    Test.equal(ok,false,"manual reconcile cleared an unreadable network")
+    c.io.colonyStock=function() return {} end
+    ok=w.at(4,c.engine.reconcile)
+    Test.equal(ok,true)
+    assert(not d.fault,"empty but readable network could not recover")
+end)
+
 Test.case("Master-only restart releases both live Supply reservations", function()
     local w, m = fixture()
     w.drop.batch = 10000

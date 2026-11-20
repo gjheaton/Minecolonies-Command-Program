@@ -363,7 +363,7 @@ function M.new(config, store, io, matcher)
             end
         end
     end
-    local nextHello, nextRetry, nextAutoReconcile = 0, 0, 0
+    local nextHello, nextRetry, nextAutoReconcile, nextStockRetry = 0, 0, 0, 0
     local lastContact
     local masterConnection
     local persistenceError
@@ -853,8 +853,10 @@ function M.new(config, store, io, matcher)
         return delta
     end
 
-    local function drainDeliveries()
-        if clientError() or data.intent then return end
+    local function drainDeliveries(recoverRead)
+        local recovering = recoverRead == true and data.fault
+            and data.fault.code == "CRS_READ" and not persistenceError
+        if data.intent or (clientError() and not recovering) then return end
 
         local shipments={}
         for _,shipment in pairs(data.shipments) do
@@ -863,11 +865,11 @@ function M.new(config, store, io, matcher)
                 shipments[#shipments+1]=shipment
             end
         end
-        if #shipments==0 then return end
+        if #shipments==0 and not recovering then return end
 
         local stock,err=io.colonyStock()
         if type(stock)~="table" then
-            fault("CRS_READ","Cannot verify colony RS inventory after delivery",{error=err})
+            if not recovering then fault("CRS_READ","Cannot verify colony RS inventory after delivery",{error=err}) end
             return
         end
 
@@ -919,6 +921,12 @@ function M.new(config, store, io, matcher)
         end
 
         if changed and not save() then return end
+        if recovering then
+            local previous = data.fault
+            data.fault = nil
+            if not save() then data.fault = previous; return end
+            store.event("CRS_RECOVERED", "Colony RS inventory read restored; delivery verification resumed without moving items")
+        end
     end
 
     local function protects(item, active)
@@ -1400,6 +1408,13 @@ function M.new(config, store, io, matcher)
             end
         end
 
+        -- Retry only the read-only fault, retaining all transfer holds and receipts.
+        if data.fault and data.fault.code=="CRS_READ" and not data.intent
+            and (not data.turn or data.turn.phase=="finished") and now>=nextStockRetry then
+            nextStockRetry=now+5
+            drainDeliveries(true)
+        end
+
         -- A forced update/reboot can interrupt the program after the bridge
         -- returned but before the normal accounting path cleared its durable
         -- intent. When that numeric bridge result is still present, the normal
@@ -1542,6 +1557,11 @@ function M.new(config, store, io, matcher)
                 and (data.turn.phase == "waiting" or data.turn.phase == "preparing")
             ) then
             return false, "Wait for the master result to close the reserved turn before repairing"
+        end
+        if data.fault and data.fault.code=="CRS_READ" and not data.intent then
+            drainDeliveries(true)
+            if clientError() then return false, clientError() end
+            return true, "Colony RS inventory read restored without moving items"
         end
         local intent = data.intent
         local shipment, oldImported, returnPhysical
