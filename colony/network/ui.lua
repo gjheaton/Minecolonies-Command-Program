@@ -727,10 +727,15 @@ function M.new(config, store, engine, io, updater, options)
                 or (tostring(shipped).."/"..tostring(r.requested or r.count or 0))
             local item=tostring(r.displayName or r.item or r.name or r.id or "Unknown")
             local colony=showColony and tostring(r.colonyLabel or r.colonyId or "?") or ""
+            local status=tostring(r.status or "requested"):upper()
+            if type(r.acknowledgementRemaining)=="number" and r.status~="error" then
+                local seconds=math.max(0,math.ceil(r.acknowledgementRemaining))
+                status=string.format("ACK WAIT %02d:%02d",math.floor(seconds/60),seconds%60)
+            end
             local line=(showColony and (Util.padRight(colony,colonyWidth).." ") or "")
                 ..Util.padRight(item,itemWidth).." "
                 ..Util.padRight(quantity,quantityWidth).." "
-                ..tostring(r.status or "requested"):upper()
+                ..status
             row(5+i,line,statusColor(r.status),function()
                 self.notice=item
                     .." | id="..tostring(r.id or r.requestId or "UNKNOWN")

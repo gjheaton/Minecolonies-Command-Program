@@ -21,7 +21,7 @@ local SETTINGS = {
 local REQUEST_FIELDS = {
     "name", "displayName", "status", "phase", "count", "requested", "shipped", "imported",
     "staged", "detail", "firstSeen", "lastSeen", "lastResponse", "phaseSince",
-    "craftStartedAt", "deliveryStartedAt", "completedAt", "deadline",
+    "craftStartedAt", "deliveryStartedAt", "completedAt", "deadline", "acknowledgementRemaining",
 }
 local EVENT_FIELDS = {
     "kind", "code", "message", "severity", "time", "epoch", "detail", "item",

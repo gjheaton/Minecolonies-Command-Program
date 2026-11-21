@@ -1687,6 +1687,10 @@ function M.new(config, store, io, matcher)
                     deliveryStartedAt = record.deliveryStartedAt,
                     completedAt = record.completedAt,
                     deadline = record.deadline,
+                    acknowledgementRemaining = record.fullyImportedAt and imported>=record.count
+                        and record.status~="error" and record.status~="delivered"
+                        and math.max(0,math.ceil(record.fullyImportedAt
+                            +tonumber(setting("acknowledgementTimeoutSeconds",600))-io.now())) or nil,
                 }
             end
         end

@@ -425,6 +425,9 @@ function M.new(config, store, io, matcher)
         if record.errorCode == "PRS_QUARANTINE" and state.quarantine then
             result.detail = currentTransferReason()
         end
+        if record.acknowledgementDeadline and record.status~="error" and record.status~="delivered" then
+            result.acknowledgementRemaining=math.max(0,math.ceil(record.acknowledgementDeadline-io.now()))
+        end
         return result
     end
 
@@ -461,6 +464,7 @@ function M.new(config, store, io, matcher)
         if record.status == "delivered" or record.status == "error" then return end
         if integer(record.requested)>0 and imported>=integer(record.requested) then
             record.fullyImportedAt=record.fullyImportedAt or io.now()
+            record.acknowledgementDeadline=record.fullyImportedAt+p.acknowledgementTimeoutSeconds
             record.status,record.detail="in progress","Full quantity imported; waiting for MineColonies acknowledgement"
             if io.now()-record.fullyImportedAt>=p.acknowledgementTimeoutSeconds then
                 record.status,record.errorCode="error","MC_ACK_OVERDUE"
@@ -469,6 +473,7 @@ function M.new(config, store, io, matcher)
             return
         end
         record.fullyImportedAt=nil
+        record.acknowledgementDeadline=nil
         local job = record.craftIdentity and state.craftJobs[record.craftIdentity]
         if activeCraft(job) and shipped < integer(record.requested) then
             record.status = job.state == "uncertain" and "error" or "crafting"

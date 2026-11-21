@@ -74,6 +74,18 @@ local function fixture(role,hasMonitor,width,height,options)
     return f
 end
 
+Test.case("request screen shows acknowledgement countdown and preserves error status",function()
+    local f=fixture("supply",true,100,30)
+    f.state.requests={{id="garlic",name="Garlic",requested=64,imported=64,shipped=64,
+        status="in progress",acknowledgementRemaining=599}}
+    f.ui.view="requests";f.ui.draw()
+    assert(f.monitor.dump():find("ACK WAIT 09:59",1,true))
+    f.state.requests[1].status="error"
+    f.ui.draw()
+    assert(not f.monitor.dump():find("ACK WAIT",1,true))
+    assert(f.monitor.dump():find("ERROR",1,true))
+end)
+
 Test.case("Master HOME displays the engine current turn colony number and phase",function()
     local f=fixture("master",true,100,30)
     f.state.currentTurn={colonyId=4,colonyLabel="Stardust",turn=19,phase="WAIT_BATCH"}

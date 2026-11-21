@@ -108,6 +108,12 @@ Test.case("fully imported requests become acknowledgement errors after ten minut
     w.now=record.fullyImportedAt+599
     w.at(1,m.engine.snapshot)
     Test.equal(record.status,"in progress")
+    local countdown=w.at(1,m.engine.snapshot).requests
+    for _,row in ipairs(countdown) do
+        if row.id=="R4" then Test.equal(row.acknowledgementRemaining,1) end
+    end
+    local clientRows=w.at(4,w.computers[4].engine.snapshot).requests
+    Test.equal(clientRows[1].acknowledgementRemaining,1)
     w.advance(1)
     w.at(1,m.engine.snapshot)
     Test.equal(record.status,"error")
